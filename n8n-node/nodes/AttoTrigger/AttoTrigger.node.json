@@ -1,0 +1,18 @@
+{
+  "node": "n8n-nodes-atto.attoTrigger",
+  "nodeVersion": "1.0",
+  "codexVersion": "1.0",
+  "categories": ["Finance & Accounting"],
+  "resources": {
+    "credentialDocumentation": [
+      {
+        "url": "https://github.com/attocash/integrations/tree/main/n8n-node#credentials"
+      }
+    ],
+    "primaryDocumentation": [
+      {
+        "url": "https://github.com/attocash/integrations/tree/main/n8n-node#usage"
+      }
+    ]
+  }
+}

@@ -11,7 +11,7 @@ import {
 } from '@attocash/commons-core';
 import { AttoNodeMockAsyncBuilder, AttoWorkerMockAsyncBuilder } from '@attocash/commons-test';
 
-import { executeAttoOperation } from '../dist/nodes/Atto/operations.js';
+import { createAttoTriggerSubscription, executeAttoOperation } from '../dist/nodes/Atto/operations.js';
 
 function configureContainerRuntime() {
 	const docker = spawnSync('docker', ['version'], { stdio: 'ignore' });
@@ -73,13 +73,53 @@ if (!hasRuntime && !requireIntegration) {
 
 	async function derive(keyIndex) {
 		return await executeAttoOperation(
-			'deriveAccount',
+			'deriveAddress',
 			{ secretSource: 'credentials' },
 			credentials(keyIndex),
 		);
 	}
 
-	test('uses AttoNodeMock for derive, send, account info, receive, and representative change', async () => {
+	async function waitForTrigger(event, parameters, creds, action = async () => {}) {
+		let subscription;
+		let timer;
+		try {
+			let eventResolved = false;
+			let resolveEvent;
+			let rejectEvent;
+			const eventPromise = new Promise((resolve, reject) => {
+				resolveEvent = resolve;
+				rejectEvent = reject;
+				timer = setTimeout(() => {
+					subscription?.close();
+					reject(new Error(`Timed out waiting for ${event} trigger`));
+				}, 15000);
+			});
+			subscription = await createAttoTriggerSubscription(
+				event,
+				parameters,
+				creds,
+				(data) => {
+					eventResolved = true;
+					clearTimeout(timer);
+					subscription?.close();
+					resolveEvent(data);
+				},
+				(error) => {
+					clearTimeout(timer);
+					subscription?.close();
+					rejectEvent(error);
+				},
+			);
+
+			if (!eventResolved) await action();
+			return await eventPromise;
+		} finally {
+			clearTimeout(timer);
+			subscription?.close();
+		}
+	}
+
+	test('uses AttoNodeMock for derive, send, account info, streams, receive, and representative change', async () => {
 		const account0 = await derive(0);
 		const account1 = await derive(1);
 
@@ -91,7 +131,6 @@ if (!hasRuntime && !requireIntegration) {
 			'sendTransaction',
 			{
 				secretSource: 'credentials',
-				fromAddress: account0.address,
 				destinationAddress: account1.address,
 				amount: '1',
 				amountUnit: 'ATTO',
@@ -101,10 +140,12 @@ if (!hasRuntime && !requireIntegration) {
 
 		assert.equal(send.status, 'published');
 		assert.ok(send.hash);
+		assert.equal(send.fromAddress, account0.address);
+		assert.equal(send.destinationAddress, account1.address);
 
 		const accountInfo = await executeAttoOperation(
 			'getAccount',
-			{ lookupAddress: account0.address },
+			{ address: account0.address },
 			credentials(0),
 		);
 
@@ -113,12 +154,103 @@ if (!hasRuntime && !requireIntegration) {
 		assert.ok(accountInfo.balance.raw);
 		assert.ok(accountInfo.frontier);
 
+		const receivables = await executeAttoOperation(
+			'getReceivables',
+			{
+				addressSource: 'credentials',
+				minAmount: '1',
+				minAmountUnit: 'RAW',
+				maxItems: 1,
+				timeoutMs: 10000,
+			},
+			credentials(1),
+		);
+
+		assert.equal(receivables.length, 1);
+		assert.equal(receivables[0].address, account1.address);
+		assert.ok(receivables[0].hash);
+
+		const transactions = await executeAttoOperation(
+			'getTransactions',
+			{
+				queryMode: 'hash',
+				hash: send.hash,
+				maxItems: 1,
+				timeoutMs: 10000,
+			},
+			credentials(0),
+		);
+
+		assert.equal(transactions.length, 1);
+		assert.equal(transactions[0].hash, send.hash);
+
+		const accountEntries = await executeAttoOperation(
+			'getAccountEntries',
+			{
+				queryMode: 'credentials',
+				fromHeight: '1',
+				maxItems: 1,
+				timeoutMs: 10000,
+			},
+			credentials(0),
+		);
+
+		assert.equal(accountEntries.length, 1);
+		assert.equal(accountEntries[0].address, account0.address);
+		assert.ok(accountEntries[0].hash);
+
+		const receivableEvent = await waitForTrigger(
+			'receivable',
+			{
+				addressSource: 'credentials',
+				minAmount: '1',
+				minAmountUnit: 'RAW',
+			},
+			credentials(1),
+		);
+
+		assert.equal(receivableEvent.address, account1.address);
+		assert.ok(receivableEvent.hash);
+
+		const transactionEvent = await waitForTrigger(
+			'transaction',
+			{
+				queryMode: 'hash',
+				hash: send.hash,
+			},
+			credentials(0),
+		);
+
+		assert.equal(transactionEvent.hash, send.hash);
+
+		const accountEntryEvent = await waitForTrigger(
+			'accountEntry',
+			{
+				queryMode: 'hash',
+				hash: send.hash,
+			},
+			credentials(0),
+		);
+
+		assert.equal(accountEntryEvent.address, account0.address);
+		assert.ok(accountEntryEvent.hash);
+
+		const accountEvent = await waitForTrigger(
+			'account',
+			{
+				addressSource: 'credentials',
+			},
+			credentials(0),
+		);
+
+		assert.equal(accountEvent.address, account0.address);
+		assert.ok(accountEvent.representativeAddress);
+
 		const receive = await executeAttoOperation(
 			'receivePending',
 			{
 				secretSource: 'credentials',
-				receiveAddress: account1.address,
-				receiveRepresentativeAddress: account1.address,
+				representativeAddress: account1.address,
 				minAmount: '1',
 				minAmountUnit: 'RAW',
 				timeoutMs: 10000,
@@ -128,14 +260,13 @@ if (!hasRuntime && !requireIntegration) {
 
 		assert.equal(receive.status, 'received');
 		assert.ok(receive.hash);
-		assert.equal(receive.account, account1.address);
+		assert.equal(receive.address, account1.address);
 		assert.ok(receive.amount.raw);
 
 		const change = await executeAttoOperation(
 			'changeRepresentative',
 			{
 				secretSource: 'credentials',
-				changeAddress: account0.address,
 				representativeAddress: account1.address,
 			},
 			credentials(0),
@@ -143,6 +274,7 @@ if (!hasRuntime && !requireIntegration) {
 
 		assert.equal(change.status, 'representative_changed');
 		assert.ok(change.hash);
-		assert.equal(change.representative, account1.address);
+		assert.equal(change.address, account0.address);
+		assert.equal(change.representativeAddress, account1.address);
 	});
 }

@@ -13,9 +13,9 @@ import {
 import { Atto } from '../dist/nodes/Atto/Atto.node.js';
 import { executeAttoOperation } from '../dist/nodes/Atto/operations.js';
 
-test('derives account from mnemonic without returning the secret', async () => {
+test('derives address from mnemonic without returning the secret', async () => {
 	const mnemonic = AttoMnemonic.generate();
-	const result = await executeAttoOperation('deriveAccount', {
+	const result = await executeAttoOperation('deriveAddress', {
 		secretSource: 'node',
 		walletSecretType: 'mnemonic',
 		walletSecret: mnemonic.phrase,
@@ -29,10 +29,23 @@ test('derives account from mnemonic without returning the secret', async () => {
 	assert.doesNotMatch(JSON.stringify(result), new RegExp(mnemonic.phrase.split(' ')[0]));
 });
 
-test('derives account from private key without returning the private key', async () => {
+test('keeps the derive account operation as a backward-compatible alias', async () => {
+	const mnemonic = AttoMnemonic.generate();
+	const result = await executeAttoOperation('deriveAccount', {
+		secretSource: 'node',
+		walletSecretType: 'mnemonic',
+		walletSecret: mnemonic.phrase,
+		keyIndex: 0,
+	});
+
+	assert.match(result.address, /^atto:\/\//);
+	assert.ok(result.publicKey);
+});
+
+test('derives address from private key without returning the private key', async () => {
 	const privateKey = AttoPrivateKey.Companion.generate();
 	const privateKeyHex = toHex(privateKey.value);
-	const result = await executeAttoOperation('deriveAccount', {
+	const result = await executeAttoOperation('deriveAddress', {
 		secretSource: 'node',
 		walletSecretType: 'privateKey',
 		walletSecret: privateKeyHex,
@@ -47,7 +60,7 @@ test('derives account from private key without returning the private key', async
 test('node execute passes resolved parameters to the operation', async () => {
 	const mnemonic = AttoMnemonic.generate();
 	const params = {
-		operation: 'deriveAccount',
+		operation: 'deriveAddress',
 		secretSource: 'node',
 		walletSecretType: 'mnemonic',
 		walletSecret: mnemonic.phrase,
@@ -78,12 +91,12 @@ test('node execute passes resolved parameters to the operation', async () => {
 
 test('validates required credentials and input fields', async () => {
 	await assert.rejects(
-		() => executeAttoOperation('getAccount', { lookupAddress: 'not-an-address' }, { nodeUrl: 'http://localhost' }),
+		() => executeAttoOperation('getAccount', { address: 'not-an-address' }, { nodeUrl: 'http://localhost' }),
 		/valid Atto address/,
 	);
 
 	await assert.rejects(
-		() => executeAttoOperation('getAccount', { lookupAddress: '' }, {}),
+		() => executeAttoOperation('getAccount', { address: '' }, {}),
 		/Node Base URL/,
 	);
 
@@ -92,14 +105,26 @@ test('validates required credentials and input fields', async () => {
 			executeAttoOperation(
 				'sendTransaction',
 				{
-					fromAddress: 'not-an-address',
 					destinationAddress: 'not-an-address',
 					amount: '1',
 					amountUnit: 'ATTO',
 				},
 				{},
 			),
-		/From Account must be a valid Atto address/,
+		/Destination Address must be a valid Atto address/,
+	);
+
+	await assert.rejects(
+		() =>
+			executeAttoOperation(
+				'getTransactions',
+				{
+					queryMode: 'hash',
+					hash: 'not-a-hash',
+				},
+				{ nodeUrl: 'http://localhost' },
+			),
+		/Hash must be a valid Atto hash/,
 	);
 });
 
@@ -108,7 +133,7 @@ test('validates invalid amounts before connecting to the node', async () => {
 	const seed = await toSeedAsync(mnemonic);
 	const privateKey = toPrivateKey(seed, toAttoIndex(0));
 	const privateKeyHex = toHex(privateKey.value);
-	const address = await executeAttoOperation('deriveAccount', {
+	const address = await executeAttoOperation('deriveAddress', {
 		secretSource: 'node',
 		walletSecretType: 'privateKey',
 		walletSecret: privateKeyHex,
@@ -122,7 +147,6 @@ test('validates invalid amounts before connecting to the node', async () => {
 					secretSource: 'node',
 					walletSecretType: 'privateKey',
 					walletSecret: privateKeyHex,
-					fromAddress: address.address,
 					destinationAddress: address.address,
 					amount: '0',
 					amountUnit: 'ATTO',

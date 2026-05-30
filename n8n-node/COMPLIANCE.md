@@ -2,8 +2,8 @@
 
 This package uses Atto Commons as the protocol boundary.
 
-- Account derivation uses `AttoMnemonic`, `toSeedAsync`, `toPrivateKey`, `toPublicKey`, and `AttoAddress`.
-- Node reads use `AttoNodeClientAsyncBuilder`.
+- Address derivation uses `AttoMnemonic`, `toSeedAsync`, `toPrivateKey`, `toPublicKey`, and `AttoAddress`.
+- Node reads and streams use `AttoNodeClientAsyncBuilder`.
 - Send, receive, and representative-change operations use `AttoWalletAsyncBuilder`.
 - Work generation uses `AttoWorkerAsyncBuilder`.
 - Integration tests use `AttoNodeMockAsyncBuilder` and `AttoWorkerMockAsyncBuilder` from `@attocash/commons-test`.

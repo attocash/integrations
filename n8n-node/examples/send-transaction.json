@@ -11,9 +11,9 @@
     },
     {
       "parameters": {
+        "resource": "transaction",
         "operation": "sendTransaction",
         "secretSource": "credentials",
-        "fromAddress": "atto://sender-address",
         "destinationAddress": "atto://destination-address",
         "amount": "1",
         "amountUnit": "ATTO"

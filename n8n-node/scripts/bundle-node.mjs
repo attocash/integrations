@@ -1,19 +1,25 @@
 import { rename } from 'node:fs/promises';
 import { build } from 'esbuild';
 
-const entryPoint = 'dist/nodes/Atto/Atto.node.js';
-const outfile = 'dist/nodes/Atto/Atto.node.bundle.js';
+const entryPoints = [
+	'dist/nodes/Atto/Atto.node.js',
+	'dist/nodes/AttoTrigger/AttoTrigger.node.js',
+];
 
-await build({
-	entryPoints: [entryPoint],
-	outfile,
-	bundle: true,
-	platform: 'node',
-	format: 'cjs',
-	target: 'node22.16',
-	mainFields: ['module', 'main'],
-	external: ['n8n-workflow'],
-	logLevel: 'silent',
-});
+for (const entryPoint of entryPoints) {
+	const outfile = entryPoint.replace(/\.js$/, '.bundle.js');
 
-await rename(outfile, entryPoint);
+	await build({
+		entryPoints: [entryPoint],
+		outfile,
+		bundle: true,
+		platform: 'node',
+		format: 'cjs',
+		target: 'node22.16',
+		mainFields: ['module', 'main'],
+		external: ['n8n-workflow'],
+		logLevel: 'silent',
+	});
+
+	await rename(outfile, entryPoint);
+}

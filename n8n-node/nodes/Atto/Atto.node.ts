@@ -13,52 +13,55 @@ type AttoParameterName =
 	| 'walletSecretType'
 	| 'walletSecret'
 	| 'keyIndex'
-	| 'lookupAddress'
-	| 'fromAddress'
+	| 'address'
+	| 'addressSource'
+	| 'addresses'
+	| 'queryMode'
+	| 'hash'
+	| 'fromHeight'
+	| 'toHeight'
 	| 'destinationAddress'
 	| 'amount'
 	| 'amountUnit'
-	| 'receiveAddress'
 	| 'minAmount'
 	| 'minAmountUnit'
-	| 'receiveRepresentativeAddress'
+	| 'representativeAddress'
 	| 'timeoutMs'
-	| 'changeAddress'
-	| 'representativeAddress';
+	| 'maxItems';
+
+const SECRET_PARAMETER_NAMES = ['secretSource', 'walletSecretType', 'walletSecret', 'keyIndex'] as const;
 
 const OPERATION_PARAMETER_NAMES: Record<AttoOperation, readonly AttoParameterName[]> = {
-	deriveAccount: ['secretSource', 'walletSecretType', 'walletSecret', 'keyIndex'],
-	getAccount: ['lookupAddress'],
-	sendTransaction: [
-		'secretSource',
-		'walletSecretType',
-		'walletSecret',
-		'keyIndex',
-		'fromAddress',
-		'destinationAddress',
-		'amount',
-		'amountUnit',
-	],
-	receivePending: [
-		'secretSource',
-		'walletSecretType',
-		'walletSecret',
-		'keyIndex',
-		'receiveAddress',
-		'minAmount',
-		'minAmountUnit',
-		'receiveRepresentativeAddress',
-		'timeoutMs',
-	],
-	changeRepresentative: [
-		'secretSource',
-		'walletSecretType',
-		'walletSecret',
-		'keyIndex',
-		'changeAddress',
-		'representativeAddress',
-	],
+	deriveAddress: SECRET_PARAMETER_NAMES,
+	deriveAccount: SECRET_PARAMETER_NAMES,
+	getAccount: ['address'],
+	getReceivables: ['addressSource', 'addresses', 'minAmount', 'minAmountUnit', 'maxItems', 'timeoutMs'],
+	getTransactions: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
+	sendTransaction: [...SECRET_PARAMETER_NAMES, 'destinationAddress', 'amount', 'amountUnit'],
+	receivePending: [...SECRET_PARAMETER_NAMES, 'minAmount', 'minAmountUnit', 'representativeAddress', 'timeoutMs'],
+	getAccountEntries: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
+	changeRepresentative: [...SECRET_PARAMETER_NAMES, 'representativeAddress'],
 };
+
+const SIGNING_OPERATIONS = [
+	'deriveAddress',
+	'sendTransaction',
+	'receivePending',
+	'changeRepresentative',
+];
+
+const STREAM_GET_OPERATIONS = ['getReceivables', 'getTransactions', 'getAccountEntries'];
+
+const AMOUNT_UNITS = [
+	{
+		name: 'ATTO',
+		value: 'ATTO',
+	},
+	{
+		name: 'Raw',
+		value: 'RAW',
+	},
+];
 
 export class Atto implements INodeType {
 	description: INodeTypeDescription = {
@@ -68,7 +71,7 @@ export class Atto implements INodeType {
 		group: ['transform'],
 		version: 1,
 		subtitle: '={{$parameter["operation"]}}',
-		description: 'Create accounts and publish Atto transactions using Atto Commons',
+		description: 'Use Atto addresses, accounts, receivables, transactions, and account entries',
 		defaults: {
 			name: 'Atto',
 		},
@@ -83,33 +86,161 @@ export class Atto implements INodeType {
 		],
 		properties: [
 			{
-				displayName: 'Operation',
-				name: 'operation',
+				displayName: 'Resource',
+				name: 'resource',
 				type: 'options',
 				noDataExpression: true,
 				options: [
 					{
-						name: 'Change Representative',
-						value: 'changeRepresentative',
+						name: 'Account',
+						value: 'account',
 					},
 					{
-						name: 'Derive Account',
-						value: 'deriveAccount',
+						name: 'Account Entry',
+						value: 'accountEntry',
 					},
 					{
-						name: 'Get Account Info',
-						value: 'getAccount',
+						name: 'Address',
+						value: 'address',
 					},
 					{
-						name: 'Receive Pending Transaction',
-						value: 'receivePending',
+						name: 'Receivable',
+						value: 'receivable',
 					},
 					{
-						name: 'Send Transaction',
-						value: 'sendTransaction',
+						name: 'Representative',
+						value: 'representative',
+					},
+					{
+						name: 'Transaction',
+						value: 'transaction',
 					},
 				],
-				default: 'deriveAccount',
+				default: 'address',
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: ['address'],
+					},
+				},
+				options: [
+					{
+						name: 'Derive',
+						value: 'deriveAddress',
+						action: 'Derive an address',
+					},
+				],
+				default: 'deriveAddress',
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: ['account'],
+					},
+				},
+				options: [
+					{
+						name: 'Get',
+						value: 'getAccount',
+						action: 'Get an account',
+					},
+				],
+				default: 'getAccount',
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: ['receivable'],
+					},
+				},
+				options: [
+					{
+						name: 'Get',
+						value: 'getReceivables',
+						action: 'Get a receivable',
+					},
+					{
+						name: 'Receive Pending',
+						value: 'receivePending',
+						action: 'Receive pending a receivable',
+					},
+				],
+				default: 'getReceivables',
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: ['transaction'],
+					},
+				},
+				options: [
+					{
+						name: 'Get',
+						value: 'getTransactions',
+						action: 'Get a transaction',
+					},
+					{
+						name: 'Send',
+						value: 'sendTransaction',
+						action: 'Send a transaction',
+					},
+				],
+				default: 'getTransactions',
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: ['accountEntry'],
+					},
+				},
+				options: [
+					{
+						name: 'Get',
+						value: 'getAccountEntries',
+						action: 'Get an account entry',
+					},
+				],
+				default: 'getAccountEntries',
+			},
+			{
+				displayName: 'Operation',
+				name: 'operation',
+				type: 'options',
+				noDataExpression: true,
+				displayOptions: {
+					show: {
+						resource: ['representative'],
+					},
+				},
+				options: [
+					{
+						name: 'Change',
+						value: 'changeRepresentative',
+						action: 'Change a representative',
+					},
+				],
+				default: 'changeRepresentative',
 			},
 			{
 				displayName: 'Secret Source',
@@ -128,12 +259,7 @@ export class Atto implements INodeType {
 				default: 'credentials',
 				displayOptions: {
 					show: {
-						operation: [
-							'deriveAccount',
-							'sendTransaction',
-							'receivePending',
-							'changeRepresentative',
-						],
+						operation: SIGNING_OPERATIONS,
 					},
 				},
 				description: 'Where to read the wallet secret from. Use credentials for real funds.',
@@ -155,12 +281,7 @@ export class Atto implements INodeType {
 				default: 'mnemonic',
 				displayOptions: {
 					show: {
-						operation: [
-							'deriveAccount',
-							'sendTransaction',
-							'receivePending',
-							'changeRepresentative',
-						],
+						operation: SIGNING_OPERATIONS,
 						secretSource: ['node'],
 					},
 				},
@@ -174,12 +295,7 @@ export class Atto implements INodeType {
 				default: '',
 				displayOptions: {
 					show: {
-						operation: [
-							'deriveAccount',
-							'sendTransaction',
-							'receivePending',
-							'changeRepresentative',
-						],
+						operation: SIGNING_OPERATIONS,
 						secretSource: ['node'],
 					},
 				},
@@ -196,12 +312,7 @@ export class Atto implements INodeType {
 				},
 				displayOptions: {
 					show: {
-						operation: [
-							'deriveAccount',
-							'sendTransaction',
-							'receivePending',
-							'changeRepresentative',
-						],
+						operation: SIGNING_OPERATIONS,
 						secretSource: ['node'],
 						walletSecretType: ['mnemonic'],
 					},
@@ -209,8 +320,8 @@ export class Atto implements INodeType {
 				description: 'Derivation index used when Wallet Secret Type is Mnemonic Phrase',
 			},
 			{
-				displayName: 'Account Address',
-				name: 'lookupAddress',
+				displayName: 'Address',
+				name: 'address',
 				type: 'string',
 				required: true,
 				default: '',
@@ -219,23 +330,134 @@ export class Atto implements INodeType {
 						operation: ['getAccount'],
 					},
 				},
-				description: 'Atto account address to look up',
+				description: 'Atto address to look up',
 			},
 			{
-				displayName: 'From Account',
-				name: 'fromAddress',
+				displayName: 'Address Source',
+				name: 'addressSource',
+				type: 'options',
+				options: [
+					{
+						name: 'Credentials',
+						value: 'credentials',
+					},
+					{
+						name: 'Manual Addresses',
+						value: 'manual',
+					},
+				],
+				default: 'credentials',
+				displayOptions: {
+					show: {
+						operation: ['getReceivables'],
+					},
+				},
+				description: 'Where receivable addresses come from',
+			},
+			{
+				displayName: 'Query Mode',
+				name: 'queryMode',
+				type: 'options',
+				options: [
+					{
+						name: 'All',
+						value: 'all',
+					},
+					{
+						name: 'Credentials Address',
+						value: 'credentials',
+					},
+					{
+						name: 'Hash',
+						value: 'hash',
+					},
+					{
+						name: 'Manual Addresses',
+						value: 'manual',
+					},
+				],
+				default: 'credentials',
+				displayOptions: {
+					show: {
+						operation: ['getTransactions', 'getAccountEntries'],
+					},
+				},
+				description: 'How to select transactions or account entries',
+			},
+			{
+				displayName: 'Addresses',
+				name: 'addresses',
+				type: 'string',
+				typeOptions: {
+					rows: 3,
+				},
+				default: '',
+				displayOptions: {
+					show: {
+						operation: ['getReceivables'],
+						addressSource: ['manual'],
+					},
+				},
+				description: 'Comma-separated or newline-separated Atto addresses',
+			},
+			{
+				displayName: 'Addresses',
+				name: 'addresses',
+				type: 'string',
+				typeOptions: {
+					rows: 3,
+				},
+				default: '',
+				displayOptions: {
+					show: {
+						operation: ['getTransactions', 'getAccountEntries'],
+						queryMode: ['manual'],
+					},
+				},
+				description: 'Comma-separated or newline-separated Atto addresses',
+			},
+			{
+				displayName: 'Hash',
+				name: 'hash',
 				type: 'string',
 				required: true,
 				default: '',
 				displayOptions: {
 					show: {
-						operation: ['sendTransaction'],
+						operation: ['getTransactions', 'getAccountEntries'],
+						queryMode: ['hash'],
 					},
 				},
-				description: 'Sender account address. It must match the wallet secret.',
+				description: 'Transaction or account entry hash',
 			},
 			{
-				displayName: 'Destination Account',
+				displayName: 'From Height',
+				name: 'fromHeight',
+				type: 'string',
+				default: '',
+				displayOptions: {
+					show: {
+						operation: ['getTransactions', 'getAccountEntries'],
+						queryMode: ['credentials', 'manual'],
+					},
+				},
+				description: 'Optional first account height to include',
+			},
+			{
+				displayName: 'To Height',
+				name: 'toHeight',
+				type: 'string',
+				default: '',
+				displayOptions: {
+					show: {
+						operation: ['getTransactions', 'getAccountEntries'],
+						queryMode: ['credentials', 'manual'],
+					},
+				},
+				description: 'Optional last account height to include',
+			},
+			{
+				displayName: 'Destination Address',
 				name: 'destinationAddress',
 				type: 'string',
 				required: true,
@@ -245,7 +467,7 @@ export class Atto implements INodeType {
 						operation: ['sendTransaction'],
 					},
 				},
-				description: 'Recipient Atto account address',
+				description: 'Recipient Atto address',
 			},
 			{
 				displayName: 'Amount',
@@ -264,16 +486,7 @@ export class Atto implements INodeType {
 				displayName: 'Amount Unit',
 				name: 'amountUnit',
 				type: 'options',
-				options: [
-					{
-						name: 'ATTO',
-						value: 'ATTO',
-					},
-					{
-						name: 'Raw',
-						value: 'RAW',
-					},
-				],
+				options: AMOUNT_UNITS,
 				default: 'ATTO',
 				displayOptions: {
 					show: {
@@ -283,54 +496,33 @@ export class Atto implements INodeType {
 				description: 'Unit used for Amount',
 			},
 			{
-				displayName: 'Account Address',
-				name: 'receiveAddress',
-				type: 'string',
-				default: '',
-				displayOptions: {
-					show: {
-						operation: ['receivePending'],
-					},
-				},
-				description: 'Account that receives the pending transaction. Leave empty to use the derived address.',
-			},
-			{
 				displayName: 'Minimum Amount',
 				name: 'minAmount',
 				type: 'string',
 				default: '1',
 				displayOptions: {
 					show: {
-						operation: ['receivePending'],
+						operation: ['getReceivables', 'receivePending'],
 					},
 				},
-				description: 'Smallest receivable amount to accept',
+				description: 'Smallest receivable amount to match',
 			},
 			{
 				displayName: 'Minimum Amount Unit',
 				name: 'minAmountUnit',
 				type: 'options',
-				options: [
-					{
-						name: 'ATTO',
-						value: 'ATTO',
-					},
-					{
-						name: 'Raw',
-						value: 'RAW',
-					},
-				],
+				options: AMOUNT_UNITS,
 				default: 'RAW',
 				displayOptions: {
 					show: {
-						operation: ['receivePending'],
+						operation: ['getReceivables', 'receivePending'],
 					},
 				},
 				description: 'Unit used for Minimum Amount',
 			},
 			{
-				displayName: 'Representative Account',
-				name: 'receiveRepresentativeAddress',
+				displayName: 'Representative Address',
+				name: 'representativeAddress',
 				type: 'string',
 				default: '',
 				displayOptions: {
@@ -338,7 +530,36 @@ export class Atto implements INodeType {
 						operation: ['receivePending'],
 					},
 				},
-				description: 'Representative for opening a new receiving account. Leave empty to use the account itself.',
+				description: 'Representative for opening a receiving address. Leave empty to use the derived address.',
+			},
+			{
+				displayName: 'Representative Address',
+				name: 'representativeAddress',
+				type: 'string',
+				required: true,
+				default: '',
+				displayOptions: {
+					show: {
+						operation: ['changeRepresentative'],
+					},
+				},
+				description: 'New representative address',
+			},
+			{
+				displayName: 'Max Items',
+				name: 'maxItems',
+				type: 'number',
+				default: 25,
+				typeOptions: {
+					minValue: 1,
+					numberPrecision: 0,
+				},
+				displayOptions: {
+					show: {
+						operation: STREAM_GET_OPERATIONS,
+					},
+				},
+				description: 'Maximum number of stream items to collect before returning',
 			},
 			{
 				displayName: 'Timeout',
@@ -351,35 +572,10 @@ export class Atto implements INodeType {
 				},
 				displayOptions: {
 					show: {
-						operation: ['receivePending'],
+						operation: [...STREAM_GET_OPERATIONS, 'receivePending'],
 					},
 				},
-				description: 'Maximum time in milliseconds to wait for a pending transaction',
-			},
-			{
-				displayName: 'Account Address',
-				name: 'changeAddress',
-				type: 'string',
-				default: '',
-				displayOptions: {
-					show: {
-						operation: ['changeRepresentative'],
-					},
-				},
-				description: 'Account whose representative changes. Leave empty to use the derived address.',
-			},
-			{
-				displayName: 'Representative Account',
-				name: 'representativeAddress',
-				type: 'string',
-				required: true,
-				default: '',
-				displayOptions: {
-					show: {
-						operation: ['changeRepresentative'],
-					},
-				},
-				description: 'New representative account address',
+				description: 'Maximum time in milliseconds to wait',
 			},
 		],
 	};
@@ -392,24 +588,27 @@ export class Atto implements INodeType {
 		try {
 			credentials = await this.getCredentials('attoApi');
 		} catch {
-			// Credentials are optional for local account derivation.
+			// Credentials are optional for local address derivation.
 		}
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
 				const operation = this.getNodeParameter('operation', itemIndex) as AttoOperation;
 				const parameters = Object.fromEntries(
-					OPERATION_PARAMETER_NAMES[operation].map((name) => [
+					(OPERATION_PARAMETER_NAMES[operation] ?? []).map((name) => [
 						name,
 						this.getNodeParameter(name, itemIndex, undefined) as unknown,
 					]),
 				);
 				const result = await executeAttoOperation(operation, parameters, credentials);
+				const results = Array.isArray(result) ? result : [result];
 
-				returnData.push({
-					json: result,
-					pairedItem: { item: itemIndex },
-				});
+				for (const json of results) {
+					returnData.push({
+						json,
+						pairedItem: { item: itemIndex },
+					});
+				}
 			} catch (error) {
 				if (this.continueOnFail()) {
 					returnData.push({

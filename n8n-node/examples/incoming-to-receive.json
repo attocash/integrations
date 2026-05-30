@@ -11,12 +11,12 @@
     },
     {
       "parameters": {
+        "resource": "receivable",
         "operation": "receivePending",
         "secretSource": "credentials",
-        "receiveAddress": "",
         "minAmount": "1",
         "minAmountUnit": "RAW",
-        "receiveRepresentativeAddress": "",
+        "representativeAddress": "",
         "timeoutMs": 10000
       },
       "id": "atto-receive",

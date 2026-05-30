@@ -1,6 +1,6 @@
 ---
 name: "n8n-community-node-verification"
-version: "1.0.0"
+version: "1.0.1"
 description: "Verify n8n community node packages in this integrations repo by building the package, checking n8n linter constraints, loading it in n8n with Podman, and executing a small workflow through n8n itself."
 license: "MIT"
 compatibility: "opencode"
@@ -31,6 +31,7 @@ Do not use this skill for ordinary TypeScript library tests, generic Docker chec
 1. Inspect the package before changing behavior.
    - Confirm `package.json` name starts with `n8n-nodes-`.
    - Confirm `package.json` has the `n8n` metadata pointing at built `dist` node and credential files.
+   - When the package has action and trigger nodes, confirm every node entrypoint is listed in `package.json` `n8n.nodes`, included by the bundle/build script, and covered by the smoke import test.
    - Confirm the workflow node type is `<package-name>.<node-description-name>`, for example `n8n-nodes-atto.atto`.
 
 2. Build and lint using n8n tooling.
@@ -39,6 +40,7 @@ Do not use this skill for ordinary TypeScript library tests, generic Docker chec
    - Run `npm run lint`.
    - If the n8n linter rejects runtime dependencies, bundle package-only runtime code into the built node and keep n8n-provided packages external.
    - For CI artifacts, run `npm pack --pack-destination ../artifacts` after tests and upload `artifacts/*.tgz`.
+   - If sandboxed `npm pack` fails writing to the host npm cache, rerun with an isolated cache such as `npm --cache /tmp/npm-cache pack --pack-destination <dir>`.
 
 3. Test the node outside n8n first.
    - Unit-test operation helpers and n8n `execute()` behavior.
@@ -66,16 +68,26 @@ podman run --rm -it --user 0 -p 5678:5678 \
 5. Execute a minimal workflow through n8n.
    - Use `import:workflow --input=<file>` followed by `execute --id=<workflow-id> --rawOutput`.
    - Use a generated local test secret only in temporary files, never in repo files or final output.
+   - Prefer a local-only derive/format workflow for smoke execution when the package supports one; it proves node registration and execution without external service credentials.
+   - Do not run `n8n execute` inside the same live server process/container if the task broker port is already in use. Stop the server after the HTTP/UI load check, then run a one-shot n8n CLI container with the same temporary user folder and package mount.
    - Delete temporary n8n user folders that contain workflow secrets after verification.
+
+6. For checkout-based installs inside an n8n container, keep host installs isolated.
+   - Add a package script that builds, validates, packs, and installs the `.tgz` into `${N8N_USER_FOLDER:-$HOME/.n8n}/nodes`.
+   - Default to build plus a local smoke validation; make full tests opt-in because containerized n8n often lacks Docker or Podman access for integration tests.
+   - Verify installer behavior in an ephemeral Podman container by copying the package source into the container and installing only into the container filesystem.
 
 ## Pitfalls
 
 - Mounting only the package directory can leave `/home/node/.n8n/nodes` unwritable; mount a writable parent user folder too.
 - `N8N_USER_FOLDER=/home/node/.n8n` creates a nested `.n8n` folder; use `N8N_USER_FOLDER=/home/node`.
+- If `curl http://127.0.0.1:5678` cannot reach a container that logs as ready, set `N8N_LISTEN_ADDRESS=0.0.0.0`; if a sandbox still blocks local networking, rerun the local curl check outside the sandbox.
 - n8n CLI execution does not accept `--file` reliably in current images; import the workflow and execute by ID.
+- n8n CLI execution can conflict with a running server on the task broker port; use a one-shot CLI container against the same user folder after stopping the server.
 - n8n may print node parameters on failed CLI executions, so store real wallet/API secrets in credentials and use disposable test secrets only for workflow verification.
 - n8n community node type IDs are package-qualified, for example `n8n-nodes-atto.atto`, even when the UI display name is shorter.
 - GitHub Actions artifact downloads are zip files; for n8n installation testing, extract the downloaded artifact and use the packaged `.tgz` inside it.
+- Do not verify checkout installers against the host `~/.n8n`; use a temporary directory or, preferably, an ephemeral Podman n8n container.
 
 ## Verification
 

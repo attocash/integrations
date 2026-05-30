@@ -28,6 +28,7 @@
     "build:watch": "tsc --watch",
     "clean": "rimraf dist",
     "dev": "n8n-node dev",
+    "install:n8n": "sh scripts/install-into-n8n.sh",
     "lint": "n8n-node lint",
     "lint:fix": "n8n-node lint --fix",
     "test": "npm run build && node --test test/*.test.mjs",
@@ -62,7 +63,8 @@
       "dist/credentials/AttoApi.credentials.js"
     ],
     "nodes": [
-      "dist/nodes/Atto/Atto.node.js"
+      "dist/nodes/Atto/Atto.node.js",
+      "dist/nodes/AttoTrigger/AttoTrigger.node.js"
     ]
   }
 }

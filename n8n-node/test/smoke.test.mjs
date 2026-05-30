@@ -8,6 +8,9 @@ test('build artifacts required by n8n are present', async () => {
 		'dist/nodes/Atto/Atto.node.js',
 		'dist/nodes/Atto/Atto.node.json',
 		'dist/nodes/Atto/atto.svg',
+		'dist/nodes/AttoTrigger/AttoTrigger.node.js',
+		'dist/nodes/AttoTrigger/AttoTrigger.node.json',
+		'dist/nodes/AttoTrigger/atto.svg',
 	];
 
 	for (const file of required) {
@@ -15,8 +18,10 @@ test('build artifacts required by n8n are present', async () => {
 	}
 
 	const node = await import('../dist/nodes/Atto/Atto.node.js');
+	const trigger = await import('../dist/nodes/AttoTrigger/AttoTrigger.node.js');
 	const credentials = await import('../dist/credentials/AttoApi.credentials.js');
 
 	assert.equal(typeof node.Atto, 'function');
+	assert.equal(typeof trigger.AttoTrigger, 'function');
 	assert.equal(typeof credentials.AttoApi, 'function');
 });
