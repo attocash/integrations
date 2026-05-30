@@ -1,6 +1,6 @@
 ---
 name: "n8n-community-node-verification"
-version: "1.0.2"
+version: "1.0.3"
 description: "Verify n8n community node packages in this integrations repo by building the package, checking n8n linter constraints, loading it in n8n with Podman, and executing a small workflow through n8n itself."
 license: "MIT"
 compatibility: "opencode"
@@ -69,6 +69,7 @@ podman run --rm -it --user 0 -p 5678:5678 \
    - Use `import:workflow --input=<file>` followed by `execute --id=<workflow-id> --rawOutput`.
    - Use a generated local test secret only in temporary files, never in repo files or final output.
    - Prefer a local-only derive/format workflow for smoke execution when the package supports one; it proves node registration and execution without external service credentials.
+   - Include at least one workflow that omits UI-defaulted parameters such as `operation` or trigger `event`; this catches `Could not get parameter` failures that unit tests with explicit parameters can miss.
    - Do not run `n8n execute` inside the same live server process/container if the task broker port is already in use. Stop the server after the HTTP/UI load check, then run a one-shot n8n CLI container with the same temporary user folder and package mount.
    - Delete temporary n8n user folders that contain workflow secrets after verification.
 
@@ -92,6 +93,7 @@ podman run --rm -it --user 0 -p 5678:5678 \
 - n8n CLI execution can conflict with a running server on the task broker port; use a one-shot CLI container against the same user folder after stopping the server.
 - n8n may print node parameters on failed CLI executions, so store real wallet/API secrets in credentials and use disposable test secrets only for workflow verification.
 - n8n credential save/test failures can come from the credential `test.request`, even when the credential data itself is valid. Check the exact route in the credential definition before debugging wallet fields.
+- UI-created nodes may not persist default values for every parameter. Use `getNodeParameter(name, itemIndex, fallback)` for defaults and verify that path in real n8n.
 - n8n community node type IDs are package-qualified, for example `n8n-nodes-atto.atto`, even when the UI display name is shorter.
 - GitHub Actions artifact downloads are zip files; for n8n installation testing, extract the downloaded artifact and use the packaged `.tgz` inside it.
 - Do not verify checkout installers against the host `~/.n8n`; use a temporary directory or, preferably, an ephemeral Podman n8n container.

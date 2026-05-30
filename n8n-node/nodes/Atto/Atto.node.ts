@@ -29,6 +29,8 @@ type AttoParameterName =
 	| 'timeoutMs'
 	| 'maxItems';
 
+type AttoResource = 'address' | 'account' | 'receivable' | 'transaction' | 'accountEntry' | 'representative';
+
 const SECRET_PARAMETER_NAMES = ['secretSource', 'walletSecretType', 'walletSecret', 'keyIndex'] as const;
 
 const OPERATION_PARAMETER_NAMES: Record<AttoOperation, readonly AttoParameterName[]> = {
@@ -41,6 +43,15 @@ const OPERATION_PARAMETER_NAMES: Record<AttoOperation, readonly AttoParameterNam
 	receivePending: [...SECRET_PARAMETER_NAMES, 'minAmount', 'minAmountUnit', 'representativeAddress', 'timeoutMs'],
 	getAccountEntries: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
 	changeRepresentative: [...SECRET_PARAMETER_NAMES, 'representativeAddress'],
+};
+
+const DEFAULT_OPERATION_BY_RESOURCE: Record<AttoResource, AttoOperation> = {
+	address: 'deriveAddress',
+	account: 'getAccount',
+	receivable: 'getReceivables',
+	transaction: 'getTransactions',
+	accountEntry: 'getAccountEntries',
+	representative: 'changeRepresentative',
 };
 
 const SIGNING_OPERATIONS = [
@@ -593,7 +604,9 @@ export class Atto implements INodeType {
 
 		for (let itemIndex = 0; itemIndex < items.length; itemIndex++) {
 			try {
-				const operation = this.getNodeParameter('operation', itemIndex) as AttoOperation;
+				const resource = this.getNodeParameter('resource', itemIndex, 'address') as AttoResource;
+				const defaultOperation = DEFAULT_OPERATION_BY_RESOURCE[resource] ?? 'deriveAddress';
+				const operation = this.getNodeParameter('operation', itemIndex, defaultOperation) as AttoOperation;
 				const parameters = Object.fromEntries(
 					(OPERATION_PARAMETER_NAMES[operation] ?? []).map((name) => [
 						name,

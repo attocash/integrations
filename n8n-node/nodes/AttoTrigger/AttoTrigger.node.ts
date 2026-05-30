@@ -258,7 +258,7 @@ export class AttoTrigger implements INodeType {
 	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse | undefined> {
 		try {
 			const credentials = await this.getCredentials('attoApi');
-			const event = this.getNodeParameter('event') as AttoTriggerEvent;
+			const event = this.getNodeParameter('event', 'receivable') as AttoTriggerEvent;
 			const parameters = Object.fromEntries(
 				TRIGGER_PARAMETER_NAMES.map((name) => [
 					name,

@@ -60,6 +60,7 @@ test('derives address from private key without returning the private key', async
 test('node execute passes resolved parameters to the operation', async () => {
 	const mnemonic = AttoMnemonic.generate();
 	const params = {
+		resource: 'address',
 		operation: 'deriveAddress',
 		secretSource: 'node',
 		walletSecretType: 'mnemonic',
@@ -86,7 +87,39 @@ test('node execute passes resolved parameters to the operation', async () => {
 	assert.equal(output[0].length, 1);
 	assert.match(output[0][0].json.address, /^atto:\/\//);
 	assert.deepEqual(output[0][0].pairedItem, { item: 0 });
-	assert.deepEqual(requestedParameters, ['operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
+	assert.deepEqual(requestedParameters, ['resource', 'operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
+});
+
+test('node execute falls back to the default operation when n8n has not persisted it', async () => {
+	const mnemonic = AttoMnemonic.generate();
+	const params = {
+		resource: 'address',
+		secretSource: 'node',
+		walletSecretType: 'mnemonic',
+		walletSecret: mnemonic.phrase,
+		keyIndex: 0,
+	};
+	const requestedParameters = [];
+	const node = new Atto();
+	const ctx = {
+		getInputData: () => [{ json: {} }],
+		getCredentials: async () => ({}),
+		getNodeParameter: (name, _itemIndex, fallbackValue) => {
+			requestedParameters.push(name);
+			if (name in params) return params[name];
+			if (fallbackValue !== undefined) return fallbackValue;
+			throw new Error(`Could not get parameter ${name}`);
+		},
+		getNode: () => ({ name: 'Atto', type: 'n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
+		continueOnFail: () => false,
+	};
+
+	const output = await node.execute.call(ctx);
+
+	assert.equal(output.length, 1);
+	assert.equal(output[0].length, 1);
+	assert.match(output[0][0].json.address, /^atto:\/\//);
+	assert.deepEqual(requestedParameters, ['resource', 'operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
 });
 
 test('validates required credentials and input fields', async () => {
