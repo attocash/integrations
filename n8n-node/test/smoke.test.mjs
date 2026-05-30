@@ -24,4 +24,10 @@ test('build artifacts required by n8n are present', async () => {
 	assert.equal(typeof node.Atto, 'function');
 	assert.equal(typeof trigger.AttoTrigger, 'function');
 	assert.equal(typeof credentials.AttoApi, 'function');
+
+	const attoApi = new credentials.AttoApi();
+	assert.equal(attoApi.test.request.baseURL, '={{$credentials.nodeUrl}}');
+	assert.equal(attoApi.test.request.url, '/');
+	assert.equal(attoApi.test.request.method, 'GET');
+	assert.doesNotMatch(JSON.stringify(attoApi.test), /walletSecret|walletMaterialType|privateKey|mnemonic/i);
 });

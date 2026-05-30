@@ -8,6 +8,8 @@ Output includes `address`, `publicKey`, `keyIndex`, and `secretType`. It does no
 
 Use encrypted credentials for real wallet material. Node-parameter secrets are intended for local derivation, tests, or controlled workflows where n8n execution-record redaction is configured appropriately.
 
+Credential testing only checks reachability with `GET /` against the configured Node Base URL. It does not send the mnemonic or private key.
+
 ## Account: Get
 
 Use **Account > Get** with an Atto address and an **Atto API** credential containing `Node Base URL`.

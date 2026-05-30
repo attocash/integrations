@@ -104,7 +104,7 @@ export class AttoApi implements ICredentialType {
 	test: ICredentialTestRequest = {
 		request: {
 			baseURL: '={{$credentials.nodeUrl}}',
-			url: '/health',
+			url: '/',
 			method: 'GET',
 		},
 	};

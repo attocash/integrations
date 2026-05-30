@@ -32,6 +32,8 @@ Create an **Atto API** credential in n8n:
 - Wallet Secret: encrypted by n8n and used only for signing.
 - Key Index: derivation index for mnemonic secrets.
 
+The n8n credential test performs a read-only `GET /` against **Node Base URL** to verify the configured node endpoint is reachable. It does not send the wallet secret.
+
 For one-off derivation and tests, the action node can read the secret from node parameters instead of credentials. For real funds, prefer encrypted n8n credentials; workflow node parameters can appear in failed execution records depending on n8n redaction settings. Secrets are never returned in successful node output.
 
 Signing actions derive the source address from the wallet secret and key index. Send, receive, and representative-change operations do not require a manual source address.
