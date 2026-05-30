@@ -1,0 +1,56 @@
+name: Package n8n Atto Node
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - ".github/workflows/n8n-node-package.yml"
+      - "n8n-node/**"
+  pull_request:
+    paths:
+      - ".github/workflows/n8n-node-package.yml"
+      - "n8n-node/**"
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-pack:
+    name: Test and pack
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: n8n-node
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.16.0"
+          cache: npm
+          cache-dependency-path: n8n-node/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Pack package
+        run: |
+          mkdir -p ../artifacts
+          npm pack --pack-destination ../artifacts
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: n8n-nodes-atto-package
+          path: artifacts/*.tgz
+          if-no-files-found: error
+          retention-days: 14

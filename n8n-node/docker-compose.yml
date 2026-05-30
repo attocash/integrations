@@ -1,0 +1,13 @@
+services:
+  n8n:
+    image: docker.io/n8nio/n8n:latest
+    user: "0"
+    ports:
+      - "5678:5678"
+    environment:
+      N8N_USER_FOLDER: /home/node
+      N8N_COMMUNITY_PACKAGES_ENABLED: "true"
+      N8N_SECURE_COOKIE: "false"
+    volumes:
+      - /tmp/n8n-atto-local:/home/node:Z
+      - ./:/home/node/.n8n/nodes/node_modules/n8n-nodes-atto:ro,Z

@@ -1,0 +1,5 @@
+.firecrawl/
+/artifacts/
+.idea
+*.iml
+integrations.iml

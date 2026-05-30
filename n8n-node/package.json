@@ -1,0 +1,68 @@
+{
+  "name": "n8n-nodes-atto",
+  "version": "0.1.0",
+  "description": "n8n community node for Atto cryptocurrency operations backed by Atto Commons",
+  "license": "MIT",
+  "keywords": [
+    "n8n-community-node-package",
+    "n8n",
+    "atto",
+    "atto-commons"
+  ],
+  "author": {
+    "name": "Atto"
+  },
+  "homepage": "https://atto.cash",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attocash/integrations.git"
+  },
+  "main": "dist/nodes/Atto/Atto.node.js",
+  "types": "dist/nodes/Atto/Atto.node.d.ts",
+  "files": [
+    "dist",
+    "examples"
+  ],
+  "scripts": {
+    "build": "n8n-node build && node scripts/bundle-node.mjs",
+    "build:watch": "tsc --watch",
+    "clean": "rimraf dist",
+    "dev": "n8n-node dev",
+    "lint": "n8n-node lint",
+    "lint:fix": "n8n-node lint --fix",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:integration": "npm run build && ATTO_TEST_INTEGRATION=1 node --test test/integration.test.mjs",
+    "validate:local": "node scripts/validate-local.mjs"
+  },
+  "engines": {
+    "node": ">=22.16"
+  },
+  "devDependencies": {
+    "@attocash/commons-core": "6.7.1-patch.1",
+    "@attocash/commons-node": "6.7.1-patch.1",
+    "@attocash/commons-node-remote": "6.7.1-patch.1",
+    "@attocash/commons-test": "6.7.1-patch.1",
+    "@attocash/commons-wallet": "6.7.1-patch.1",
+    "@attocash/commons-worker-remote": "6.7.1-patch.1",
+    "@n8n/node-cli": "0.32.1",
+    "@types/node": "^22.15.21",
+    "esbuild": "0.27.1",
+    "eslint": "9.29.0",
+    "n8n-workflow": "^2.16.0",
+    "prettier": "3.8.3",
+    "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "n8n-workflow": "*"
+  },
+  "n8n": {
+    "n8nNodesApiVersion": 1,
+    "strict": true,
+    "credentials": [
+      "dist/credentials/AttoApi.credentials.js"
+    ],
+    "nodes": [
+      "dist/nodes/Atto/Atto.node.js"
+    ]
+  }
+}
