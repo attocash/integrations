@@ -1,6 +1,20 @@
 # n8n-nodes-atto
 
-n8n community node package for Atto cryptocurrency operations. The nodes delegate address derivation, signing, node access, wallet operations, streams, and test mocks to Atto Commons packages instead of implementing Atto protocol logic locally.
+[![npm version](https://img.shields.io/npm/v/n8n-nodes-atto.svg)](https://www.npmjs.com/package/n8n-nodes-atto)
+[![n8n Atto Node CI](https://github.com/attocash/integrations/actions/workflows/n8n-node-package.yml/badge.svg)](https://github.com/attocash/integrations/actions/workflows/n8n-node-package.yml)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/attocash/integrations/blob/main/LICENSE)
+
+n8n community node package for Atto cryptocurrency wallet, transaction, account, and trigger automation. The nodes delegate address derivation, signing, node access, wallet operations, streams, and test mocks to Atto Commons packages instead of implementing Atto protocol logic locally.
+
+## Install in n8n
+
+Install the npm package from **Settings** > **Community Nodes** in a self-hosted n8n instance:
+
+```text
+n8n-nodes-atto
+```
+
+n8n's **Browse** button opens npm search for packages tagged with `n8n-community-node-package`. This package includes that keyword so it is discoverable from the n8n community-node flow after it is published to npm.
 
 ## Nodes
 
@@ -92,7 +106,22 @@ Restart n8n after the script finishes.
 
 ## Usage
 
-See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, and `examples/receivable-trigger.json` for importable workflow shapes. `incoming-to-receive.json` pipes the **Atto Trigger** receivable output into **Atto** → **Receivable** → **Receive Pending** with **Receivable Source** set to **Input Item**. Replace placeholder addresses and attach an **Atto API** credential before running transaction operations.
+See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, `examples/ping-pong-receivable.json`, and `examples/receivable-trigger.json` for importable workflow shapes. `incoming-to-receive.json` pipes the **Atto Trigger** receivable output into **Atto** → **Receivable** → **Receive Pending** with **Receivable Source** set to **Input Item**. Replace placeholder addresses and attach an **Atto API** credential before running transaction operations.
+
+## Release
+
+The n8n package is versioned independently from other integrations in this repository. Release tags must use the scoped format `n8n-node-vX.Y.Z`, where `X.Y.Z` exactly matches `n8n-node/package.json`.
+
+```bash
+cd n8n-node
+npm version patch --no-git-tag-version
+git add package.json package-lock.json
+git commit -m "Release n8n Atto node vX.Y.Z"
+git tag n8n-node-vX.Y.Z
+git push origin main n8n-node-vX.Y.Z
+```
+
+The GitHub Actions workflow runs lint, tests, and packing for pull requests and pushes. On `n8n-node-v*.*.*` tags it also publishes the package to npm with provenance. Configure npm Trusted Publishing for this repository and workflow file, or set the `NPM_TOKEN` repository secret as a fallback.
 
 ## Implementation Notes
 

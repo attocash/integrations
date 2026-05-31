@@ -1,21 +1,40 @@
 {
   "name": "n8n-nodes-atto",
   "version": "0.1.0",
-  "description": "n8n community node for Atto cryptocurrency operations backed by Atto Commons",
+  "description": "Atto cryptocurrency wallet, transaction, account, and trigger nodes for n8n, powered by Atto Commons",
   "license": "MIT",
   "keywords": [
     "n8n-community-node-package",
     "n8n",
+    "n8n-node",
+    "n8n-nodes",
+    "n8n-community-node",
     "atto",
-    "atto-commons"
+    "atto-cash",
+    "attocash",
+    "atto-commons",
+    "cryptocurrency",
+    "crypto",
+    "blockchain",
+    "wallet",
+    "payments",
+    "automation"
   ],
   "author": {
     "name": "Atto"
   },
-  "homepage": "https://atto.cash",
+  "homepage": "https://github.com/attocash/integrations/tree/main/n8n-node#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/attocash/integrations.git"
+    "url": "git+https://github.com/attocash/integrations.git",
+    "directory": "n8n-node"
+  },
+  "bugs": {
+    "url": "https://github.com/attocash/integrations/issues"
+  },
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "main": "dist/nodes/Atto/Atto.node.js",
   "types": "dist/nodes/Atto/Atto.node.d.ts",
@@ -33,7 +52,8 @@
     "lint:fix": "n8n-node lint --fix",
     "test": "npm run build && node --test test/*.test.mjs",
     "test:integration": "npm run build && ATTO_TEST_INTEGRATION=1 node --test test/integration.test.mjs",
-    "validate:local": "node scripts/validate-local.mjs"
+    "validate:local": "node scripts/validate-local.mjs",
+    "validate:release-tag": "node scripts/validate-release-tag.mjs"
   },
   "engines": {
     "node": ">=22.16"
