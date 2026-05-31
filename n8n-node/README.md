@@ -4,55 +4,99 @@
 [![n8n Atto Node CI](https://github.com/attocash/integrations/actions/workflows/n8n-node-package.yml/badge.svg)](https://github.com/attocash/integrations/actions/workflows/n8n-node-package.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/attocash/integrations/blob/main/LICENSE)
 
-n8n community node package for Atto cryptocurrency wallet, transaction, account, and trigger automation. The nodes delegate address derivation, signing, node access, wallet operations, streams, and test mocks to Atto Commons packages instead of implementing Atto protocol logic locally.
+Use Atto from n8n workflows.
 
-## Install in n8n
+This package adds action and trigger nodes for Atto addresses, accounts, receivables, transactions, and representatives. Signing, address derivation, node calls, wallet operations, streams, and test mocks come from Atto Commons.
 
-Install the npm package from **Settings** > **Community Nodes** in a self-hosted n8n instance:
+## Install
+
+In self-hosted n8n, open **Settings** > **Community Nodes** and install:
 
 ```text
 @attocash/n8n-nodes-atto
 ```
 
-n8n's **Browse** button opens npm search for packages tagged with `n8n-community-node-package`. This package includes that keyword so it is discoverable from the n8n community-node flow after it is published to npm.
+Restart n8n if the nodes do not appear right away.
+
+## What You Can Build
+
+The package includes two nodes:
+
+- **Atto**: derive addresses, read account state, list receivables, receive an incoming receivable, list transactions/account entries, send transactions, and change representatives.
+- **Atto Trigger**: start workflows from receivables, account updates, transactions, or account entries.
+
+Typical workflows:
+
+- Receive a payment when a receivable appears.
+- Send a payment from the address derived from your credential.
+- Build a ping/pong flow that receives an incoming amount and sends the same amount back.
+- Watch an address for account entries or transaction updates.
+
+## Credentials
+
+Create an **Atto API** credential in n8n.
+
+Required for node access:
+
+- **Node Base URL**: Atto node HTTP API, for example `http://localhost:8080`.
+- **Worker Base URL**: Atto work server HTTP API, for example `http://localhost:8085`.
+
+Optional API auth:
+
+- **API Key**
+- **API Key Header**
+- **API Key Prefix**
+
+Required for signing actions:
+
+- **Wallet Secret Type**: mnemonic phrase or private key.
+- **Wallet Secret**: encrypted by n8n and used only when signing.
+- **Key Index**: derivation index for mnemonic secrets.
+
+The credential test only checks that **Node Base URL** responds to `GET /`. It does not send the wallet secret.
+
+For real funds, store wallet material in n8n credentials. Node-parameter secrets are useful for local derivation and tests, but n8n may keep node parameters in execution records depending on your instance settings.
 
 ## Nodes
 
 ### Atto
 
-- Address: Derive an Atto address and public key from a mnemonic or hex private key.
-- Account: Get balance, representative, height, and frontier for an address.
-- Receivable: Get receivable entries or receive the receivable from the incoming item.
-- Transaction: Get transactions by hash or bounded stream query, or send from the credentials-derived address.
-- Account Entry: Get account entries by hash or bounded stream query.
-- Representative: Change the representative for the credentials-derived address.
+Resources and operations:
+
+- **Address > Derive**: derive an Atto address and public key from a mnemonic or hex private key.
+- **Account > Get**: read balance, representative, height, and frontier for an address.
+- **Receivable > Get**: collect receivables for the credential-derived address or manual addresses.
+- **Receivable > Receive**: receive the receivable from the incoming item.
+- **Transaction > Get**: fetch by hash or collect a bounded transaction stream.
+- **Transaction > Send**: send from the credential-derived address.
+- **Account Entry > Get**: fetch by hash or collect a bounded account-entry stream.
+- **Representative > Change**: change the representative for the credential-derived address.
+
+Signing actions derive the source address from the wallet secret and key index. You do not need to pass a manual source address. Send and receive use a 60 second publish timeout by default.
 
 ### Atto Trigger
 
-- Receivable: Trigger when a receivable is available for the credentials-derived address or manual addresses.
-- Account Update: Trigger from account state updates.
-- Transaction: Trigger from transactions by hash, address stream, or all stream.
-- Account Entry: Trigger from account entries by hash, address stream, or all stream.
+Trigger events:
 
-## Credentials
+- **Receivable**: fires when a receivable appears for the credential-derived address or manual addresses.
+- **Account Update**: fires when account state changes.
+- **Transaction**: watches by hash, address stream, or all supported transactions.
+- **Account Entry**: watches by hash, address stream, or all supported account entries.
 
-Create an **Atto API** credential in n8n:
+## Example Workflows
 
-- Node Base URL: Atto node HTTP API, for example `http://localhost:8080`.
-- Worker Base URL: Atto work server HTTP API, for example `http://localhost:8085`.
-- API Key: optional key sent to both services.
-- API Key Header and Prefix: defaults to `Authorization: Bearer <key>`.
-- Wallet Secret Type: mnemonic phrase or private key. Atto Commons currently expects 24-word mnemonic phrases.
-- Wallet Secret: encrypted by n8n and used only for signing.
-- Key Index: derivation index for mnemonic secrets.
+Importable examples live in [`examples`](./examples):
 
-The n8n credential test performs a read-only `GET /` against **Node Base URL** to verify the configured node endpoint is reachable. It does not send the wallet secret.
+- [`send-transaction.json`](./examples/send-transaction.json): manual trigger to send Atto.
+- [`incoming-to-receive.json`](./examples/incoming-to-receive.json): receivable trigger piped into **Receivable > Receive**.
+- [`ping-pong-receivable.json`](./examples/ping-pong-receivable.json): receive an incoming amount and send the same raw amount back to the sender.
+- [`receivable-trigger.json`](./examples/receivable-trigger.json): trigger-only receivable watcher.
 
-For one-off derivation and tests, the action node can read the secret from node parameters instead of credentials. For real funds, prefer encrypted n8n credentials; workflow node parameters can appear in failed execution records depending on n8n redaction settings. Secrets are never returned in successful node output.
+After importing an example, attach your **Atto API** credential and replace any placeholder addresses before running transaction operations.
 
-Signing actions derive the source address from the wallet secret and key index. Send, receive, and representative-change operations do not require a manual source address. Send and receive use a 60 second publish timeout by default.
+## Local Development
 
-## Build And Test
+Install dependencies and run the checks:
 
 ```bash
 npm install
@@ -69,9 +113,9 @@ To require the mock-container integration path:
 ATTO_TEST_INTEGRATION=1 npm run test:integration
 ```
 
-## Local n8n
+### Run n8n With Podman
 
-Build first, then mount this package as a community node package:
+From this package directory:
 
 ```bash
 npm run build
@@ -87,11 +131,11 @@ podman run --rm -it \
   docker.io/n8nio/n8n:latest
 ```
 
-Open `http://localhost:5678`, create a workflow, and add the **Atto** or **Atto Trigger** node.
+Open `http://localhost:5678`, create a workflow, and add **Atto** or **Atto Trigger**.
 
-### Install from a checkout inside the n8n container
+### Install From A Checkout Inside n8n
 
-If you have shell access inside the n8n container, clone this repository and run the installer from the package directory:
+If you have shell access inside the n8n container:
 
 ```bash
 cd /tmp
@@ -100,17 +144,20 @@ cd integrations/n8n-node
 npm run install:n8n
 ```
 
-The script installs build dependencies, builds and validates the package, packs it, and installs the generated `.tgz` into `${N8N_USER_FOLDER:-$HOME/.n8n}/nodes`. Override the destination with `N8N_NODES_DIR=/path/to/nodes npm run install:n8n`. Use `RUN_TESTS=1 npm run install:n8n` only when the container can run the test dependencies.
+The installer builds, validates, packs, and installs the generated `.tgz` into `${N8N_USER_FOLDER:-$HOME/.n8n}/nodes`.
+
+Optional overrides:
+
+```bash
+N8N_NODES_DIR=/path/to/nodes npm run install:n8n
+RUN_TESTS=1 npm run install:n8n
+```
 
 Restart n8n after the script finishes.
 
-## Usage
+## Maintainers
 
-See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, `examples/ping-pong-receivable.json`, and `examples/receivable-trigger.json` for importable workflow shapes. `incoming-to-receive.json` pipes the **Atto Trigger** receivable output into **Atto** → **Receivable** → **Receive**. `ping-pong-receivable.json` receives the incoming receivable and sends the same raw amount back to the original sender from the trigger payload. Replace placeholder addresses and attach an **Atto API** credential before running transaction operations.
-
-## Release
-
-The n8n package is versioned independently from other integrations in this repository. Update `n8n-node/package.json` with normal semver when you want to attempt a new release. Multiple commits can keep the same attempted version until the release is approved.
+This package is versioned independently from other integrations in this repository. Use normal semver in `n8n-node/package.json`; release tags use the package-specific format `n8n-node-vX.Y.Z`.
 
 ```bash
 cd n8n-node
@@ -120,11 +167,12 @@ git commit -m "Release n8n Atto node vX.Y.Z"
 git push origin main
 ```
 
-The GitHub Actions workflow runs lint, tests, and packing for pull requests and n8n-related pushes to `main`. Main pushes upload the attempted package artifact immediately, then wait for approval in the GitHub environment named `release`. After approval, the workflow creates the package-specific tag `n8n-node-vX.Y.Z`, publishes `@attocash/n8n-nodes-atto@X.Y.Z` to npm with provenance, and creates the GitHub Release with the `.tgz` attached. Configure npm Trusted Publishing for this repository and workflow file, or set the `NPM_TOKEN` repository secret as a fallback.
+On pushes to `main`, GitHub Actions tests and packs the attempted version, uploads the `.tgz` artifact, then waits for approval in the `release` environment. After approval, it creates the tag, publishes `@attocash/n8n-nodes-atto` to npm, and creates the GitHub release.
 
-## Implementation Notes
+Configure npm Trusted Publishing for `.github/workflows/n8n-node-package.yml`. `NPM_TOKEN` is supported as a fallback.
 
-- Runtime protocol behavior comes from Atto Commons split packages: `@attocash/commons-core`, `@attocash/commons-node`, `@attocash/commons-node-remote`, `@attocash/commons-wallet`, and `@attocash/commons-worker-remote`.
-- The Atto Commons package code is bundled into the action and trigger node files so the published n8n community node has no runtime dependencies beyond n8n.
-- The aggregate `@attocash/commons-js@6.7.1-patch.1` package was not used because its published runtime entrypoint does not expose the APIs used by the current Commons JS example.
-- Hex private keys should use the format accepted by `AttoPrivateKey.Companion.parse`.
+## Notes
+
+- Runtime Atto behavior comes from Atto Commons split packages: `@attocash/commons-core`, `@attocash/commons-node`, `@attocash/commons-node-remote`, `@attocash/commons-wallet`, and `@attocash/commons-worker-remote`.
+- Atto Commons code is bundled into the built action and trigger node files, so the published n8n package has no runtime dependencies beyond n8n.
+- Hex private keys must use the format accepted by `AttoPrivateKey.Companion.parse`.
