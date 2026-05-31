@@ -1,5 +1,5 @@
 {
-  "node": "n8n-nodes-atto.attoTrigger",
+  "node": "@attocash/n8n-nodes-atto.attoTrigger",
   "nodeVersion": "1.0",
   "codexVersion": "1.0",
   "categories": ["Finance & Accounting"],

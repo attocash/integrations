@@ -10,7 +10,7 @@
       },
       "id": "atto-receivable-trigger",
       "name": "Atto Receivable Trigger",
-      "type": "n8n-nodes-atto.attoTrigger",
+      "type": "@attocash/n8n-nodes-atto.attoTrigger",
       "typeVersion": 1,
       "position": [220, 260],
       "credentials": {
@@ -33,7 +33,7 @@
       },
       "id": "atto-receive",
       "name": "Receive Atto",
-      "type": "n8n-nodes-atto.atto",
+      "type": "@attocash/n8n-nodes-atto.atto",
       "typeVersion": 1,
       "position": [500, 260],
       "credentials": {
@@ -54,7 +54,7 @@
       },
       "id": "atto-get-receive-entry",
       "name": "Get Receive Account Entry",
-      "type": "n8n-nodes-atto.atto",
+      "type": "@attocash/n8n-nodes-atto.atto",
       "typeVersion": 1,
       "position": [780, 260],
       "credentials": {
@@ -76,7 +76,7 @@
       },
       "id": "atto-send-pong",
       "name": "Send Pong",
-      "type": "n8n-nodes-atto.atto",
+      "type": "@attocash/n8n-nodes-atto.atto",
       "typeVersion": 1,
       "position": [1060, 260],
       "credentials": {

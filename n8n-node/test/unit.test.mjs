@@ -78,7 +78,7 @@ test('node execute passes resolved parameters to the operation', async () => {
 			if (!(name in params)) throw new Error(`Unexpected parameter ${name}`);
 			return params[name];
 		},
-		getNode: () => ({ name: 'Atto', type: 'n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
+		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
 		continueOnFail: () => false,
 	};
 
@@ -111,7 +111,7 @@ test('node execute falls back to the default operation when n8n has not persiste
 			if (fallbackValue !== undefined) return fallbackValue;
 			throw new Error(`Could not get parameter ${name}`);
 		},
-		getNode: () => ({ name: 'Atto', type: 'n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
+		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
 		continueOnFail: () => false,
 	};
 
@@ -156,7 +156,7 @@ test('trigger execution falls back when n8n has not persisted hidden default par
 			if (fallbackValue !== undefined) return fallbackValue;
 			throw new Error(`Could not get parameter ${name}`);
 		},
-		getNode: () => ({ name: 'Atto Trigger', type: 'n8n-nodes-atto.attoTrigger', typeVersion: 1, parameters: {} }),
+		getNode: () => ({ name: 'Atto Trigger', type: '@attocash/n8n-nodes-atto.attoTrigger', typeVersion: 1, parameters: {} }),
 		emit: () => {},
 		emitError: () => {},
 	};

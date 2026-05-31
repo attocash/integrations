@@ -21,7 +21,7 @@
       },
       "id": "atto-send",
       "name": "Send Atto",
-      "type": "n8n-nodes-atto.atto",
+      "type": "@attocash/n8n-nodes-atto.atto",
       "typeVersion": 1,
       "position": [520, 260],
       "credentials": {

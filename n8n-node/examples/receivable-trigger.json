@@ -10,7 +10,7 @@
       },
       "id": "atto-receivable-trigger",
       "name": "Atto Receivable",
-      "type": "n8n-nodes-atto.attoTrigger",
+      "type": "@attocash/n8n-nodes-atto.attoTrigger",
       "typeVersion": 1,
       "position": [260, 260],
       "credentials": {

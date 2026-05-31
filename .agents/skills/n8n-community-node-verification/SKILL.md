@@ -1,6 +1,6 @@
 ---
 name: "n8n-community-node-verification"
-version: "1.0.6"
+version: "1.0.7"
 description: "Verify n8n community node packages in this integrations repo by building the package, checking n8n linter constraints, loading it in n8n with Podman, and executing a small workflow through n8n itself."
 license: "MIT"
 compatibility: "opencode"
@@ -29,10 +29,10 @@ Do not use this skill for ordinary TypeScript library tests, generic Docker chec
 ## Procedure
 
 1. Inspect the package before changing behavior.
-   - Confirm `package.json` name starts with `n8n-nodes-`.
+   - Confirm `package.json` name is either `n8n-nodes-*` or a scoped package whose unscoped name starts with `n8n-nodes-*`, such as `@scope/n8n-nodes-*`.
    - Confirm `package.json` has the `n8n` metadata pointing at built `dist` node and credential files.
    - When the package has action and trigger nodes, confirm every node entrypoint is listed in `package.json` `n8n.nodes`, included by the bundle/build script, and covered by the smoke import test.
-   - Confirm the workflow node type is `<package-name>.<node-description-name>`, for example `n8n-nodes-atto.atto`.
+   - Confirm the workflow node type is `<package-name>.<node-description-name>`, for example `n8n-nodes-atto.atto` or `@attocash/n8n-nodes-atto.atto`.
 
 2. Build and lint using n8n tooling.
    - Run `npm install` if dependencies changed or a clean install is required.
@@ -98,7 +98,7 @@ podman run --rm -it --user 0 -p 5678:5678 \
 - n8n may print node parameters on failed CLI executions, so store real wallet/API secrets in credentials and use disposable test secrets only for workflow verification.
 - n8n credential save/test failures can come from the credential `test.request`, even when the credential data itself is valid. Check the exact route in the credential definition before debugging wallet fields.
 - UI-created nodes may not persist default values for every parameter. Use `getNodeParameter(name, itemIndex, fallback)` for action-node defaults and `getNodeParameter(name, fallback)` for trigger-node defaults.
-- n8n community node type IDs are package-qualified, for example `n8n-nodes-atto.atto`, even when the UI display name is shorter.
+- n8n community node type IDs are package-qualified, for example `n8n-nodes-atto.atto` or `@attocash/n8n-nodes-atto.atto`, even when the UI display name is shorter.
 - GitHub Actions artifact downloads are zip files; for n8n installation testing, extract the downloaded artifact and use the packaged `.tgz` inside it.
 - Do not verify checkout installers against the host `~/.n8n`; use a temporary directory or, preferably, an ephemeral Podman n8n container.
 - For npm Trusted Publishing, configure npm with the exact GitHub workflow filename used by the publish job.

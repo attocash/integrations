@@ -32,7 +32,7 @@ fi
 package_name=$(node -p "require('./package.json').name")
 package_version=$(node -p "require('./package.json').version")
 
-[ "$package_name" = "n8n-nodes-atto" ] || fail "Unexpected package name: $package_name"
+[ "$package_name" = "@attocash/n8n-nodes-atto" ] || fail "Unexpected package name: $package_name"
 
 if [ -n "${N8N_NODES_DIR:-}" ]; then
 	n8n_nodes_dir=$N8N_NODES_DIR

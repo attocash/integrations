@@ -1,6 +1,6 @@
-# n8n-nodes-atto
+# @attocash/n8n-nodes-atto
 
-[![npm version](https://img.shields.io/npm/v/n8n-nodes-atto.svg)](https://www.npmjs.com/package/n8n-nodes-atto)
+[![npm version](https://img.shields.io/npm/v/@attocash/n8n-nodes-atto.svg)](https://www.npmjs.com/package/@attocash/n8n-nodes-atto)
 [![n8n Atto Node CI](https://github.com/attocash/integrations/actions/workflows/n8n-node-package.yml/badge.svg)](https://github.com/attocash/integrations/actions/workflows/n8n-node-package.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/attocash/integrations/blob/main/LICENSE)
 
@@ -11,7 +11,7 @@ n8n community node package for Atto cryptocurrency wallet, transaction, account,
 Install the npm package from **Settings** > **Community Nodes** in a self-hosted n8n instance:
 
 ```text
-n8n-nodes-atto
+@attocash/n8n-nodes-atto
 ```
 
 n8n's **Browse** button opens npm search for packages tagged with `n8n-community-node-package`. This package includes that keyword so it is discoverable from the n8n community-node flow after it is published to npm.
@@ -83,7 +83,7 @@ podman run --rm -it \
   -e N8N_COMMUNITY_PACKAGES_ENABLED=true \
   -e N8N_SECURE_COOKIE=false \
   -v /tmp/n8n-atto-local:/home/node:Z \
-  -v "$PWD:/home/node/.n8n/nodes/node_modules/n8n-nodes-atto:ro,Z" \
+  -v "$PWD:/home/node/.n8n/nodes/node_modules/@attocash/n8n-nodes-atto:ro,Z" \
   docker.io/n8nio/n8n:latest
 ```
 
@@ -110,7 +110,7 @@ See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, `exam
 
 ## Release
 
-The n8n package is versioned independently from other integrations in this repository. Release tags must use the scoped format `n8n-node-vX.Y.Z`, where `X.Y.Z` exactly matches `n8n-node/package.json`.
+The n8n package is versioned independently from other integrations in this repository. Release tags must use the package-specific format `n8n-node-vX.Y.Z`, where `X.Y.Z` exactly matches `n8n-node/package.json`.
 
 ```bash
 cd n8n-node
