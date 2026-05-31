@@ -142,9 +142,7 @@ jobs:
           echo "tag-name=n8n-node-v$package_version" >> "$GITHUB_OUTPUT"
 
       - name: Validate release tag
-        run: npm run validate:release-tag
-        env:
-          GITHUB_REF_NAME: ${{ steps.release.outputs.tag-name }}
+        run: npm run validate:release-tag -- "${{ steps.release.outputs.tag-name }}"
 
       - name: Download package artifact
         uses: actions/download-artifact@v4
