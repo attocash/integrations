@@ -1,6 +1,6 @@
 ---
 name: "n8n-community-node-verification"
-version: "1.0.7"
+version: "1.0.8"
 description: "Verify n8n community node packages in this integrations repo by building the package, checking n8n linter constraints, loading it in n8n with Podman, and executing a small workflow through n8n itself."
 license: "MIT"
 compatibility: "opencode"
@@ -42,6 +42,7 @@ Do not use this skill for ordinary TypeScript library tests, generic Docker chec
    - For CI artifacts, run `npm pack --pack-destination ../artifacts` after tests and upload `artifacts/*.tgz`.
    - If sandboxed `npm pack` fails writing to the host npm cache, rerun with an isolated cache such as `npm --cache /tmp/npm-cache pack --pack-destination <dir>`.
    - For npm releases, use package-scoped semver tags such as `n8n-node-vX.Y.Z` and validate the tag against `n8n-node/package.json` before publishing.
+   - On main pushes, create the attempted package artifact before release approval, then gate tag creation, npm publish, and GitHub Release creation behind the GitHub environment named `release`.
    - Publish n8n community nodes from GitHub Actions with `npm publish --provenance --access public`; support npm Trusted Publisher first and `NPM_TOKEN` only as a fallback.
    - Trusted Publishing requires a new enough CI toolchain. Use Node 24 for the publish workflow, install npm `^11.5.1`, and fail early if `node` or `npm` is below npm's current OIDC minimums.
 
@@ -104,6 +105,7 @@ podman run --rm -it --user 0 -p 5678:5678 \
 - For npm Trusted Publishing, configure npm with the exact GitHub workflow filename used by the publish job.
 - Do not assume Node 22's bundled npm supports Trusted Publishing; Node can satisfy the runtime requirement while npm is still too old for OIDC publishing.
 - In a multi-integration repository, avoid repo-wide `vX.Y.Z` tags for n8n releases; they collide with unrelated integration versions.
+- Do not let package-created release tags retrigger the package workflow; the approved release job should create the tag after the artifact has already been tested and packed.
 
 ## Verification
 

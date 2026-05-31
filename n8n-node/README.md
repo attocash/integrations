@@ -110,18 +110,17 @@ See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, `exam
 
 ## Release
 
-The n8n package is versioned independently from other integrations in this repository. Release tags must use the package-specific format `n8n-node-vX.Y.Z`, where `X.Y.Z` exactly matches `n8n-node/package.json`.
+The n8n package is versioned independently from other integrations in this repository. Update `n8n-node/package.json` with normal semver when you want to attempt a new release. Multiple commits can keep the same attempted version until the release is approved.
 
 ```bash
 cd n8n-node
 npm version patch --no-git-tag-version
 git add package.json package-lock.json
 git commit -m "Release n8n Atto node vX.Y.Z"
-git tag n8n-node-vX.Y.Z
-git push origin main n8n-node-vX.Y.Z
+git push origin main
 ```
 
-The GitHub Actions workflow runs lint, tests, and packing for pull requests and pushes. On `n8n-node-v*.*.*` tags it also publishes the package to npm with provenance. Configure npm Trusted Publishing for this repository and workflow file, or set the `NPM_TOKEN` repository secret as a fallback.
+The GitHub Actions workflow runs lint, tests, and packing for pull requests and n8n-related pushes to `main`. Main pushes upload the attempted package artifact immediately, then wait for approval in the GitHub environment named `release`. After approval, the workflow creates the package-specific tag `n8n-node-vX.Y.Z`, publishes `@attocash/n8n-nodes-atto@X.Y.Z` to npm with provenance, and creates the GitHub Release with the `.tgz` attached. Configure npm Trusted Publishing for this repository and workflow file, or set the `NPM_TOKEN` repository secret as a fallback.
 
 ## Implementation Notes
 
