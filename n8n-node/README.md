@@ -22,7 +22,7 @@ n8n's **Browse** button opens npm search for packages tagged with `n8n-community
 
 - Address: Derive an Atto address and public key from a mnemonic or hex private key.
 - Account: Get balance, representative, height, and frontier for an address.
-- Receivable: Get receivable entries, receive the receivable from the incoming item, or wait for the next pending entry for the credentials address.
+- Receivable: Get receivable entries or receive the receivable from the incoming item.
 - Transaction: Get transactions by hash or bounded stream query, or send from the credentials-derived address.
 - Account Entry: Get account entries by hash or bounded stream query.
 - Representative: Change the representative for the credentials-derived address.
@@ -106,7 +106,7 @@ Restart n8n after the script finishes.
 
 ## Usage
 
-See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, `examples/ping-pong-receivable.json`, and `examples/receivable-trigger.json` for importable workflow shapes. `incoming-to-receive.json` pipes the **Atto Trigger** receivable output into **Atto** → **Receivable** → **Receive Pending** with **Receivable Source** set to **Input Item**. Replace placeholder addresses and attach an **Atto API** credential before running transaction operations.
+See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, `examples/ping-pong-receivable.json`, and `examples/receivable-trigger.json` for importable workflow shapes. `incoming-to-receive.json` pipes the **Atto Trigger** receivable output into **Atto** → **Receivable** → **Receive**. `ping-pong-receivable.json` receives the incoming receivable and sends the same raw amount back to the original sender from the trigger payload. Replace placeholder addresses and attach an **Atto API** credential before running transaction operations.
 
 ## Release
 

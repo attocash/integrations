@@ -25,9 +25,6 @@
         "resource": "receivable",
         "operation": "receivePending",
         "secretSource": "credentials",
-        "receivableSource": "input",
-        "minAmount": "1",
-        "minAmountUnit": "RAW",
         "representativeAddress": "",
         "timeoutMs": 60000
       },
@@ -36,27 +33,6 @@
       "type": "@attocash/n8n-nodes-atto.atto",
       "typeVersion": 1,
       "position": [500, 260],
-      "credentials": {
-        "attoApi": {
-          "id": "1",
-          "name": "Atto Local"
-        }
-      }
-    },
-    {
-      "parameters": {
-        "resource": "accountEntry",
-        "operation": "getAccountEntries",
-        "queryMode": "hash",
-        "hash": "={{ $json.hash }}",
-        "maxItems": 1,
-        "timeoutMs": 5000
-      },
-      "id": "atto-get-receive-entry",
-      "name": "Get Receive Account Entry",
-      "type": "@attocash/n8n-nodes-atto.atto",
-      "typeVersion": 1,
-      "position": [780, 260],
       "credentials": {
         "attoApi": {
           "id": "1",
@@ -78,7 +54,7 @@
       "name": "Send Pong",
       "type": "@attocash/n8n-nodes-atto.atto",
       "typeVersion": 1,
-      "position": [1060, 260],
+      "position": [780, 260],
       "credentials": {
         "attoApi": {
           "id": "1",
@@ -100,17 +76,6 @@
       ]
     },
     "Receive Atto": {
-      "main": [
-        [
-          {
-            "node": "Get Receive Account Entry",
-            "type": "main",
-            "index": 0
-          }
-        ]
-      ]
-    },
-    "Get Receive Account Entry": {
       "main": [
         [
           {

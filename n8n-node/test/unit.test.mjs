@@ -123,6 +123,42 @@ test('node execute falls back to the default operation when n8n has not persiste
 	assert.deepEqual(requestedParameters, ['resource', 'operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
 });
 
+test('receive action reads only parameters needed for input receivables', async () => {
+	const params = {
+		resource: 'receivable',
+		operation: 'receivePending',
+		secretSource: 'credentials',
+		representativeAddress: '',
+		timeoutMs: 60000,
+	};
+	const requestedParameters = [];
+	const node = new Atto();
+	const ctx = {
+		getInputData: () => [{ json: {} }],
+		getCredentials: async () => ({}),
+		getNodeParameter: (name, _itemIndex, fallbackValue) => {
+			requestedParameters.push(name);
+			if (name in params) return params[name];
+			if (fallbackValue !== undefined) return fallbackValue;
+			throw new Error(`Could not get parameter ${name}`);
+		},
+		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
+		continueOnFail: () => false,
+	};
+
+	await assert.rejects(() => node.execute.call(ctx), /valid Atto receivable object/);
+	assert.deepEqual(requestedParameters, [
+		'resource',
+		'operation',
+		'secretSource',
+		'walletSecretType',
+		'walletSecret',
+		'keyIndex',
+		'representativeAddress',
+		'timeoutMs',
+	]);
+});
+
 test('send and receive expose a one minute publish timeout by default', () => {
 	const node = new Atto();
 	const publishTimeout = node.description.properties.find(
@@ -138,12 +174,14 @@ test('send and receive expose a one minute publish timeout by default', () => {
 			property.displayOptions.show.operation.includes('getReceivables'),
 	);
 	const receivableSource = node.description.properties.find((property) => property.name === 'receivableSource');
+	const minAmount = node.description.properties.find((property) => property.name === 'minAmount');
 
 	assert.equal(publishTimeout.default, 60000);
 	assert.deepEqual(publishTimeout.displayOptions.show.operation, ['sendTransaction', 'receivePending']);
 	assert.equal(streamTimeout.default, 5000);
 	assert.deepEqual(streamTimeout.displayOptions.show.operation, ['getReceivables', 'getTransactions', 'getAccountEntries']);
-	assert.equal(receivableSource.default, 'input');
+	assert.equal(receivableSource, undefined);
+	assert.deepEqual(minAmount.displayOptions.show.operation, ['getReceivables']);
 });
 
 test('trigger execution falls back when n8n has not persisted hidden default parameters', async () => {
@@ -211,6 +249,16 @@ test('validates required credentials and input fields', async () => {
 				{ nodeUrl: 'http://localhost' },
 			),
 		/Hash must be a valid Atto hash/,
+	);
+
+	await assert.rejects(
+		() => executeAttoOperation('receivePending', { inputItem: undefined }),
+		/Input item must contain a receivable object/,
+	);
+
+	await assert.rejects(
+		() => executeAttoOperation('receivePending', { inputItem: { receivable: { invalid: true } } }),
+		/Input item must contain a valid Atto receivable object/,
 	);
 });
 

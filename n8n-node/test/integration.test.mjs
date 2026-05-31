@@ -246,15 +246,25 @@ if (!hasRuntime && !requireIntegration) {
 		assert.equal(accountEvent.address, account0.address);
 		assert.ok(accountEvent.representativeAddress);
 
+		await assert.rejects(
+			() =>
+				executeAttoOperation(
+					'receivePending',
+					{
+						secretSource: 'credentials',
+						inputItem: receivables[0],
+					},
+					credentials(0),
+				),
+			/Receivable Address must match/,
+		);
+
 		const receive = await executeAttoOperation(
 			'receivePending',
 			{
 				secretSource: 'credentials',
-				receivableSource: 'input',
 				inputItem: receivables[0],
 				representativeAddress: account1.address,
-				minAmount: '1',
-				minAmountUnit: 'RAW',
 			},
 			credentials(1),
 		);

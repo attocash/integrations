@@ -51,7 +51,6 @@ export type AttoTriggerEvent = 'receivable' | 'account' | 'transaction' | 'accou
 type SecretType = 'mnemonic' | 'privateKey';
 type AddressSource = 'credentials' | 'manual' | 'all';
 type StreamQueryMode = 'credentials' | 'manual' | 'all' | 'hash';
-type ReceivableSource = 'input' | 'wait';
 
 export type AttoParameters = Record<string, unknown>;
 export type AttoOperationResult = IDataObject | IDataObject[];
@@ -117,12 +116,6 @@ function positiveTimeout(value: unknown, fieldName: string): number {
 	const timeoutMs = positiveInteger(value, fieldName);
 	if (timeoutMs < 1) throw new Error(`${fieldName} must be greater than zero`);
 	return timeoutMs;
-}
-
-function parseReceivableSource(value: unknown): ReceivableSource {
-	const source = text(value || 'input');
-	if (source === 'input' || source === 'wait') return source;
-	throw new Error('Receivable Source must be input or wait');
 }
 
 function parseSecretType(value: unknown, fieldName: string): SecretType {
@@ -496,22 +489,6 @@ async function collectStream<T>(start: StreamStarter<T>, options: { maxItems: nu
 	});
 }
 
-async function firstReceivable(
-	node: AttoNodeClientAsync,
-	address: AttoAddress,
-	minAmount: AttoAmount,
-	timeoutMs: number,
-): Promise<AttoReceivable> {
-	const [receivable] = await collectStream<AttoReceivable>(
-		(onItem, onCancel) =>
-			node.onReceivableByAddresses([address] as never, minAmount as never, onItem as never, onCancel as never) as AttoJob,
-		{ maxItems: 1, timeoutMs },
-	);
-
-	if (!receivable) throw new Error(`No receivable Atto transaction found within ${timeoutMs}ms`);
-	return receivable;
-}
-
 function inputItem(parameters: AttoParameters): IDataObject {
 	const item = parameters.inputItem;
 	if (!item || typeof item !== 'object' || Array.isArray(item)) {
@@ -530,12 +507,6 @@ function parseInputReceivable(parameters: AttoParameters): AttoReceivable {
 		return receivableFromJson(json) as never;
 	} catch {
 		throw new Error('Input item must contain a valid Atto receivable object');
-	}
-}
-
-function assertMinimumAmount(receivable: AttoReceivable, minAmount: AttoAmount) {
-	if (BigInt(receivable.amount.toString()) < BigInt(minAmount.toString())) {
-		throw new Error('Input receivable amount is below Minimum Amount');
 	}
 }
 
@@ -760,22 +731,15 @@ export async function executeAttoOperation(
 	}
 
 	if (operation === 'receivePending') {
-		const minAmount = parseAmount(parameters.minAmount ?? '1', parameters.minAmountUnit ?? 'RAW', 'Minimum Amount');
 		const timeoutMs = positiveTimeout(parameters.timeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS, 'Timeout');
-		const receivableSource = parseReceivableSource(parameters.receivableSource);
+		const receivable = parseInputReceivable(parameters);
 		const requestedRepresentative = parseOptionalAddress(
 			parameters.receiveRepresentativeAddress ?? parameters.representativeAddress,
 			'Representative Address',
 		);
 		const runtime = await createWalletRuntime(parameters, attoCredentials);
 		assertOptionalSameAddress(runtime.derived.address, parseOptionalAddress(parameters.receiveAddress, 'Address'), 'Address');
-
-		const receivable =
-			receivableSource === 'input'
-				? parseInputReceivable(parameters)
-				: await firstReceivable(runtime.node, runtime.derived.address, minAmount, timeoutMs);
 		assertSameAddress(runtime.derived.address, receivable.receiverAddress, 'Receivable Address');
-		assertMinimumAmount(receivable, minAmount);
 
 		const representative = requestedRepresentative ?? runtime.derived.address;
 		const transaction = await withTimeout(

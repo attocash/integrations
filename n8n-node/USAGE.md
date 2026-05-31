@@ -38,9 +38,9 @@ Use **Transaction > Send** with:
 
 The source address is derived from the wallet secret and key index. The node signs through Atto Commons wallet APIs and returns the published transaction hash, status, source address, destination address, and amount.
 
-## Receivable: Receive Pending
+## Receivable: Receive
 
-Use **Receivable > Receive Pending** with a signing wallet. The receiving address is derived from the wallet secret and key index. The node listens for the first receivable above the configured minimum amount, publishes a receive block, and returns the receive hash, amount, and receivable JSON.
+Use **Receivable > Receive** with a signing wallet after an **Atto Trigger** receivable event or **Receivable > Get** node. The receiving address is derived from the wallet secret and key index. The node receives the incoming item's `receivable` payload, publishes a receive block, and returns the receive hash, amount, and receivable JSON.
 
 ## Representative: Change
 

@@ -25,9 +25,6 @@
         "resource": "receivable",
         "operation": "receivePending",
         "secretSource": "credentials",
-        "receivableSource": "input",
-        "minAmount": "1",
-        "minAmountUnit": "RAW",
         "representativeAddress": "",
         "timeoutMs": 60000
       },

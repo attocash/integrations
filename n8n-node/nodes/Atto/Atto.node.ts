@@ -23,7 +23,6 @@ type AttoParameterName =
 	| 'destinationAddress'
 	| 'amount'
 	| 'amountUnit'
-	| 'receivableSource'
 	| 'minAmount'
 	| 'minAmountUnit'
 	| 'representativeAddress'
@@ -41,7 +40,7 @@ const OPERATION_PARAMETER_NAMES: Record<AttoOperation, readonly AttoParameterNam
 	getReceivables: ['addressSource', 'addresses', 'minAmount', 'minAmountUnit', 'maxItems', 'timeoutMs'],
 	getTransactions: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
 	sendTransaction: [...SECRET_PARAMETER_NAMES, 'destinationAddress', 'amount', 'amountUnit', 'timeoutMs'],
-	receivePending: [...SECRET_PARAMETER_NAMES, 'receivableSource', 'minAmount', 'minAmountUnit', 'representativeAddress', 'timeoutMs'],
+	receivePending: [...SECRET_PARAMETER_NAMES, 'representativeAddress', 'timeoutMs'],
 	getAccountEntries: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
 	changeRepresentative: [...SECRET_PARAMETER_NAMES, 'representativeAddress'],
 };
@@ -80,7 +79,6 @@ const DEFAULT_PARAMETER_VALUES: Record<AttoParameterName, string | number> = {
 	destinationAddress: '',
 	amount: '',
 	amountUnit: 'ATTO',
-	receivableSource: 'input',
 	minAmount: '1',
 	minAmountUnit: 'RAW',
 	representativeAddress: '',
@@ -214,9 +212,9 @@ export class Atto implements INodeType {
 						action: 'Get a receivable',
 					},
 					{
-						name: 'Receive Pending',
+						name: 'Receive',
 						value: 'receivePending',
-						action: 'Receive pending a receivable',
+						action: 'Receive a receivable',
 					},
 				],
 				default: 'getReceivables',
@@ -537,35 +535,13 @@ export class Atto implements INodeType {
 				description: 'Unit used for Amount',
 			},
 			{
-				displayName: 'Receivable Source',
-				name: 'receivableSource',
-				type: 'options',
-				options: [
-					{
-						name: 'Input Item',
-						value: 'input',
-					},
-					{
-						name: 'Wait for Next Receivable',
-						value: 'wait',
-					},
-				],
-				default: 'input',
-				displayOptions: {
-					show: {
-						operation: ['receivePending'],
-					},
-				},
-				description: 'Whether to receive the receivable in the incoming item or wait for the next matching receivable',
-			},
-			{
 				displayName: 'Minimum Amount',
 				name: 'minAmount',
 				type: 'string',
 				default: '1',
 				displayOptions: {
 					show: {
-						operation: ['getReceivables', 'receivePending'],
+						operation: ['getReceivables'],
 					},
 				},
 				description: 'Smallest receivable amount to match',
@@ -578,7 +554,7 @@ export class Atto implements INodeType {
 				default: 'RAW',
 				displayOptions: {
 					show: {
-						operation: ['getReceivables', 'receivePending'],
+						operation: ['getReceivables'],
 					},
 				},
 				description: 'Unit used for Minimum Amount',
