@@ -1,29 +1,41 @@
 {
-  "name": "Atto Receive Pending",
+  "name": "Atto Receive Incoming Receivable",
   "nodes": [
     {
-      "parameters": {},
-      "id": "manual-trigger",
-      "name": "Manual Trigger",
-      "type": "n8n-nodes-base.manualTrigger",
+      "parameters": {
+        "event": "receivable",
+        "addressSource": "credentials",
+        "minAmount": "1",
+        "minAmountUnit": "RAW"
+      },
+      "id": "atto-receivable-trigger",
+      "name": "Atto Receivable Trigger",
+      "type": "n8n-nodes-atto.attoTrigger",
       "typeVersion": 1,
-      "position": [260, 260]
+      "position": [260, 260],
+      "credentials": {
+        "attoApi": {
+          "id": "1",
+          "name": "Atto Local"
+        }
+      }
     },
     {
       "parameters": {
         "resource": "receivable",
         "operation": "receivePending",
         "secretSource": "credentials",
+        "receivableSource": "input",
         "minAmount": "1",
         "minAmountUnit": "RAW",
         "representativeAddress": "",
-        "timeoutMs": 10000
+        "timeoutMs": 60000
       },
       "id": "atto-receive",
       "name": "Receive Atto",
       "type": "n8n-nodes-atto.atto",
       "typeVersion": 1,
-      "position": [520, 260],
+      "position": [540, 260],
       "credentials": {
         "attoApi": {
           "id": "1",
@@ -33,7 +45,7 @@
     }
   ],
   "connections": {
-    "Manual Trigger": {
+    "Atto Receivable Trigger": {
       "main": [
         [
           {

@@ -16,7 +16,8 @@
         "secretSource": "credentials",
         "destinationAddress": "atto://destination-address",
         "amount": "1",
-        "amountUnit": "ATTO"
+        "amountUnit": "ATTO",
+        "timeoutMs": 60000
       },
       "id": "atto-send",
       "name": "Send Atto",

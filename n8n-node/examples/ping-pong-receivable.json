@@ -1,0 +1,125 @@
+{
+  "name": "Atto Ping Pong Receivable",
+  "nodes": [
+    {
+      "parameters": {
+        "event": "receivable",
+        "addressSource": "credentials",
+        "minAmount": "1",
+        "minAmountUnit": "RAW"
+      },
+      "id": "atto-receivable-trigger",
+      "name": "Atto Receivable Trigger",
+      "type": "n8n-nodes-atto.attoTrigger",
+      "typeVersion": 1,
+      "position": [220, 260],
+      "credentials": {
+        "attoApi": {
+          "id": "1",
+          "name": "Atto Local"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "receivable",
+        "operation": "receivePending",
+        "secretSource": "credentials",
+        "receivableSource": "input",
+        "minAmount": "1",
+        "minAmountUnit": "RAW",
+        "representativeAddress": "",
+        "timeoutMs": 60000
+      },
+      "id": "atto-receive",
+      "name": "Receive Atto",
+      "type": "n8n-nodes-atto.atto",
+      "typeVersion": 1,
+      "position": [500, 260],
+      "credentials": {
+        "attoApi": {
+          "id": "1",
+          "name": "Atto Local"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "accountEntry",
+        "operation": "getAccountEntries",
+        "queryMode": "hash",
+        "hash": "={{ $json.hash }}",
+        "maxItems": 1,
+        "timeoutMs": 5000
+      },
+      "id": "atto-get-receive-entry",
+      "name": "Get Receive Account Entry",
+      "type": "n8n-nodes-atto.atto",
+      "typeVersion": 1,
+      "position": [780, 260],
+      "credentials": {
+        "attoApi": {
+          "id": "1",
+          "name": "Atto Local"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "transaction",
+        "operation": "sendTransaction",
+        "secretSource": "credentials",
+        "destinationAddress": "={{ $node[\"Atto Receivable Trigger\"].json[\"fromAddress\"] }}",
+        "amount": "={{ $node[\"Atto Receivable Trigger\"].json[\"amount\"][\"raw\"] }}",
+        "amountUnit": "RAW",
+        "timeoutMs": 60000
+      },
+      "id": "atto-send-pong",
+      "name": "Send Pong",
+      "type": "n8n-nodes-atto.atto",
+      "typeVersion": 1,
+      "position": [1060, 260],
+      "credentials": {
+        "attoApi": {
+          "id": "1",
+          "name": "Atto Local"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Atto Receivable Trigger": {
+      "main": [
+        [
+          {
+            "node": "Receive Atto",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Receive Atto": {
+      "main": [
+        [
+          {
+            "node": "Get Receive Account Entry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Receive Account Entry": {
+      "main": [
+        [
+          {
+            "node": "Send Pong",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  }
+}

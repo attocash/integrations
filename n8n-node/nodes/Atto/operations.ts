@@ -26,6 +26,7 @@ import {
 	HeightSearch,
 	accountEntryToJson,
 	accountToJson,
+	receivableFromJson,
 	receivableToJson,
 	transactionToJson,
 } from '@attocash/commons-node';
@@ -50,9 +51,13 @@ export type AttoTriggerEvent = 'receivable' | 'account' | 'transaction' | 'accou
 type SecretType = 'mnemonic' | 'privateKey';
 type AddressSource = 'credentials' | 'manual' | 'all';
 type StreamQueryMode = 'credentials' | 'manual' | 'all' | 'hash';
+type ReceivableSource = 'input' | 'wait';
 
 export type AttoParameters = Record<string, unknown>;
 export type AttoOperationResult = IDataObject | IDataObject[];
+
+const DEFAULT_STREAM_TIMEOUT_MS = 5000;
+const DEFAULT_PUBLISH_TIMEOUT_MS = 60000;
 
 type AttoCredentials = {
 	nodeUrl?: string;
@@ -112,6 +117,12 @@ function positiveTimeout(value: unknown, fieldName: string): number {
 	const timeoutMs = positiveInteger(value, fieldName);
 	if (timeoutMs < 1) throw new Error(`${fieldName} must be greater than zero`);
 	return timeoutMs;
+}
+
+function parseReceivableSource(value: unknown): ReceivableSource {
+	const source = text(value || 'input');
+	if (source === 'input' || source === 'wait') return source;
+	throw new Error('Receivable Source must be input or wait');
 }
 
 function parseSecretType(value: unknown, fieldName: string): SecretType {
@@ -428,7 +439,7 @@ function accountEntryOutput(accountEntry: AttoAccountEntry): IDataObject {
 function streamOptions(parameters: AttoParameters): { maxItems: number; timeoutMs: number } {
 	return {
 		maxItems: positiveInteger(parameters.maxItems ?? 25, 'Max Items') || 1,
-		timeoutMs: positiveTimeout(parameters.timeoutMs ?? 5000, 'Timeout'),
+		timeoutMs: positiveTimeout(parameters.timeoutMs ?? DEFAULT_STREAM_TIMEOUT_MS, 'Timeout'),
 	};
 }
 
@@ -497,6 +508,48 @@ async function firstReceivable(
 
 	if (!receivable) throw new Error(`No receivable Atto transaction found within ${timeoutMs}ms`);
 	return receivable;
+}
+
+function inputItem(parameters: AttoParameters): IDataObject {
+	const item = parameters.inputItem;
+	if (!item || typeof item !== 'object' || Array.isArray(item)) {
+		throw new Error('Input item must contain a receivable object from Atto Trigger or Get Receivables');
+	}
+
+	return item as IDataObject;
+}
+
+function parseInputReceivable(parameters: AttoParameters): AttoReceivable {
+	const item = inputItem(parameters);
+	const value = item.receivable ?? item;
+	const json = typeof value === 'string' ? value : JSON.stringify(value);
+
+	try {
+		return receivableFromJson(json) as never;
+	} catch {
+		throw new Error('Input item must contain a valid Atto receivable object');
+	}
+}
+
+function assertMinimumAmount(receivable: AttoReceivable, minAmount: AttoAmount) {
+	if (BigInt(receivable.amount.toString()) < BigInt(minAmount.toString())) {
+		throw new Error('Input receivable amount is below Minimum Amount');
+	}
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operationName: string): Promise<T> {
+	let timer: ReturnType<typeof setTimeout> | undefined;
+
+	try {
+		return await Promise.race([
+			promise,
+			new Promise<never>((_resolve, reject) => {
+				timer = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
+			}),
+		]);
+	} finally {
+		if (timer) clearTimeout(timer);
+	}
 }
 
 function heightSearch(addresses: AttoAddress[], parameters: AttoParameters): HeightSearch {
@@ -680,13 +733,20 @@ export async function executeAttoOperation(
 	if (operation === 'sendTransaction') {
 		const destinationAddress = parseAddress(parameters.destinationAddress, 'Destination Address');
 		const amount = parseAmount(parameters.amount, parameters.amountUnit, 'Amount');
+		const timeoutMs = positiveTimeout(parameters.timeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS, 'Timeout');
 		const runtime = await createWalletRuntime(parameters, attoCredentials);
 		assertOptionalSameAddress(runtime.derived.address, parseOptionalAddress(parameters.fromAddress, 'From Address'), 'From Address');
-		const transaction = await runtime.wallet.sendByAddress(
-			runtime.derived.address as never,
-			destinationAddress as never,
-			amount as never,
-			null,
+		const transaction = await withTimeout(
+			Promise.resolve(
+				runtime.wallet.sendByAddress(
+					runtime.derived.address as never,
+					destinationAddress as never,
+					amount as never,
+					null,
+				),
+			),
+			timeoutMs,
+			'Send transaction',
 		);
 
 		return {
@@ -699,7 +759,8 @@ export async function executeAttoOperation(
 
 	if (operation === 'receivePending') {
 		const minAmount = parseAmount(parameters.minAmount ?? '1', parameters.minAmountUnit ?? 'RAW', 'Minimum Amount');
-		const timeoutMs = positiveTimeout(parameters.timeoutMs ?? 5000, 'Timeout');
+		const timeoutMs = positiveTimeout(parameters.timeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS, 'Timeout');
+		const receivableSource = parseReceivableSource(parameters.receivableSource);
 		const requestedRepresentative = parseOptionalAddress(
 			parameters.receiveRepresentativeAddress ?? parameters.representativeAddress,
 			'Representative Address',
@@ -707,9 +768,19 @@ export async function executeAttoOperation(
 		const runtime = await createWalletRuntime(parameters, attoCredentials);
 		assertOptionalSameAddress(runtime.derived.address, parseOptionalAddress(parameters.receiveAddress, 'Address'), 'Address');
 
-		const receivable = await firstReceivable(runtime.node, runtime.derived.address, minAmount, timeoutMs);
+		const receivable =
+			receivableSource === 'input'
+				? parseInputReceivable(parameters)
+				: await firstReceivable(runtime.node, runtime.derived.address, minAmount, timeoutMs);
+		assertSameAddress(runtime.derived.address, receivable.receiverAddress, 'Receivable Address');
+		assertMinimumAmount(receivable, minAmount);
+
 		const representative = requestedRepresentative ?? runtime.derived.address;
-		const transaction = await runtime.wallet.receive(receivable as never, representative as never, null);
+		const transaction = await withTimeout(
+			Promise.resolve(runtime.wallet.receive(receivable as never, representative as never, null)),
+			timeoutMs,
+			'Receive transaction',
+		);
 
 		return {
 			...transactionOutput(transaction as never, 'received'),

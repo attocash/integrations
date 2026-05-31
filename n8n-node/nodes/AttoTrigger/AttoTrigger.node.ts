@@ -19,6 +19,19 @@ const TRIGGER_PARAMETER_NAMES = [
 	'minAmountUnit',
 ] as const;
 
+type AttoTriggerParameterName = (typeof TRIGGER_PARAMETER_NAMES)[number];
+
+const TRIGGER_PARAMETER_DEFAULTS: Record<AttoTriggerParameterName, string> = {
+	addressSource: 'credentials',
+	addresses: '',
+	queryMode: 'credentials',
+	hash: '',
+	fromHeight: '',
+	toHeight: '',
+	minAmount: '1',
+	minAmountUnit: 'RAW',
+};
+
 const AMOUNT_UNITS = [
 	{
 		name: 'ATTO',
@@ -262,7 +275,7 @@ export class AttoTrigger implements INodeType {
 			const parameters = Object.fromEntries(
 				TRIGGER_PARAMETER_NAMES.map((name) => [
 					name,
-					this.getNodeParameter(name, undefined) as unknown,
+					this.getNodeParameter(name, TRIGGER_PARAMETER_DEFAULTS[name]) as unknown,
 				]),
 			) as AttoParameters;
 			const subscription = await createAttoTriggerSubscription(

@@ -250,10 +250,11 @@ if (!hasRuntime && !requireIntegration) {
 			'receivePending',
 			{
 				secretSource: 'credentials',
+				receivableSource: 'input',
+				inputItem: receivables[0],
 				representativeAddress: account1.address,
 				minAmount: '1',
 				minAmountUnit: 'RAW',
-				timeoutMs: 10000,
 			},
 			credentials(1),
 		);
@@ -262,6 +263,7 @@ if (!hasRuntime && !requireIntegration) {
 		assert.ok(receive.hash);
 		assert.equal(receive.address, account1.address);
 		assert.ok(receive.amount.raw);
+		assert.equal(receive.receivable.hash, receivables[0].hash);
 
 		const change = await executeAttoOperation(
 			'changeRepresentative',

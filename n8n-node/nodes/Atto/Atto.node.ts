@@ -23,6 +23,7 @@ type AttoParameterName =
 	| 'destinationAddress'
 	| 'amount'
 	| 'amountUnit'
+	| 'receivableSource'
 	| 'minAmount'
 	| 'minAmountUnit'
 	| 'representativeAddress'
@@ -39,8 +40,8 @@ const OPERATION_PARAMETER_NAMES: Record<AttoOperation, readonly AttoParameterNam
 	getAccount: ['address'],
 	getReceivables: ['addressSource', 'addresses', 'minAmount', 'minAmountUnit', 'maxItems', 'timeoutMs'],
 	getTransactions: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
-	sendTransaction: [...SECRET_PARAMETER_NAMES, 'destinationAddress', 'amount', 'amountUnit'],
-	receivePending: [...SECRET_PARAMETER_NAMES, 'minAmount', 'minAmountUnit', 'representativeAddress', 'timeoutMs'],
+	sendTransaction: [...SECRET_PARAMETER_NAMES, 'destinationAddress', 'amount', 'amountUnit', 'timeoutMs'],
+	receivePending: [...SECRET_PARAMETER_NAMES, 'receivableSource', 'minAmount', 'minAmountUnit', 'representativeAddress', 'timeoutMs'],
 	getAccountEntries: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
 	changeRepresentative: [...SECRET_PARAMETER_NAMES, 'representativeAddress'],
 };
@@ -62,6 +63,30 @@ const SIGNING_OPERATIONS = [
 ];
 
 const STREAM_GET_OPERATIONS = ['getReceivables', 'getTransactions', 'getAccountEntries'];
+const PUBLISH_OPERATIONS = ['sendTransaction', 'receivePending'];
+
+const DEFAULT_PARAMETER_VALUES: Record<AttoParameterName, string | number> = {
+	secretSource: 'credentials',
+	walletSecretType: 'mnemonic',
+	walletSecret: '',
+	keyIndex: 0,
+	address: '',
+	addressSource: 'credentials',
+	addresses: '',
+	queryMode: 'credentials',
+	hash: '',
+	fromHeight: '',
+	toHeight: '',
+	destinationAddress: '',
+	amount: '',
+	amountUnit: 'ATTO',
+	receivableSource: 'input',
+	minAmount: '1',
+	minAmountUnit: 'RAW',
+	representativeAddress: '',
+	timeoutMs: 5000,
+	maxItems: 25,
+};
 
 const AMOUNT_UNITS = [
 	{
@@ -73,6 +98,11 @@ const AMOUNT_UNITS = [
 		value: 'RAW',
 	},
 ];
+
+function defaultParameterValue(name: AttoParameterName, operation: AttoOperation): string | number {
+	if (name === 'timeoutMs' && PUBLISH_OPERATIONS.includes(operation)) return 60000;
+	return DEFAULT_PARAMETER_VALUES[name];
+}
 
 export class Atto implements INodeType {
 	description: INodeTypeDescription = {
@@ -507,6 +537,28 @@ export class Atto implements INodeType {
 				description: 'Unit used for Amount',
 			},
 			{
+				displayName: 'Receivable Source',
+				name: 'receivableSource',
+				type: 'options',
+				options: [
+					{
+						name: 'Input Item',
+						value: 'input',
+					},
+					{
+						name: 'Wait for Next Receivable',
+						value: 'wait',
+					},
+				],
+				default: 'input',
+				displayOptions: {
+					show: {
+						operation: ['receivePending'],
+					},
+				},
+				description: 'Whether to receive the receivable in the incoming item or wait for the next matching receivable',
+			},
+			{
 				displayName: 'Minimum Amount',
 				name: 'minAmount',
 				type: 'string',
@@ -583,10 +635,26 @@ export class Atto implements INodeType {
 				},
 				displayOptions: {
 					show: {
-						operation: [...STREAM_GET_OPERATIONS, 'receivePending'],
+						operation: STREAM_GET_OPERATIONS,
 					},
 				},
 				description: 'Maximum time in milliseconds to wait',
+			},
+			{
+				displayName: 'Timeout',
+				name: 'timeoutMs',
+				type: 'number',
+				default: 60000,
+				typeOptions: {
+					minValue: 1,
+					numberPrecision: 0,
+				},
+				displayOptions: {
+					show: {
+						operation: PUBLISH_OPERATIONS,
+					},
+				},
+				description: 'Maximum time in milliseconds to wait for the transaction to publish',
 			},
 		],
 	};
@@ -610,9 +678,10 @@ export class Atto implements INodeType {
 				const parameters = Object.fromEntries(
 					(OPERATION_PARAMETER_NAMES[operation] ?? []).map((name) => [
 						name,
-						this.getNodeParameter(name, itemIndex, undefined) as unknown,
+						this.getNodeParameter(name, itemIndex, defaultParameterValue(name, operation)) as unknown,
 					]),
 				);
+				if (operation === 'receivePending') parameters.inputItem = items[itemIndex].json;
 				const result = await executeAttoOperation(operation, parameters, credentials);
 				const results = Array.isArray(result) ? result : [result];
 

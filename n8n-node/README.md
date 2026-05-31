@@ -8,7 +8,7 @@ n8n community node package for Atto cryptocurrency operations. The nodes delegat
 
 - Address: Derive an Atto address and public key from a mnemonic or hex private key.
 - Account: Get balance, representative, height, and frontier for an address.
-- Receivable: Get receivable entries, or receive the next pending entry for the credentials address.
+- Receivable: Get receivable entries, receive the receivable from the incoming item, or wait for the next pending entry for the credentials address.
 - Transaction: Get transactions by hash or bounded stream query, or send from the credentials-derived address.
 - Account Entry: Get account entries by hash or bounded stream query.
 - Representative: Change the representative for the credentials-derived address.
@@ -36,7 +36,7 @@ The n8n credential test performs a read-only `GET /` against **Node Base URL** t
 
 For one-off derivation and tests, the action node can read the secret from node parameters instead of credentials. For real funds, prefer encrypted n8n credentials; workflow node parameters can appear in failed execution records depending on n8n redaction settings. Secrets are never returned in successful node output.
 
-Signing actions derive the source address from the wallet secret and key index. Send, receive, and representative-change operations do not require a manual source address.
+Signing actions derive the source address from the wallet secret and key index. Send, receive, and representative-change operations do not require a manual source address. Send and receive use a 60 second publish timeout by default.
 
 ## Build And Test
 
@@ -92,7 +92,7 @@ Restart n8n after the script finishes.
 
 ## Usage
 
-See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, and `examples/receivable-trigger.json` for importable workflow shapes. Replace placeholder addresses and attach an **Atto API** credential before running transaction operations.
+See `examples/send-transaction.json`, `examples/incoming-to-receive.json`, and `examples/receivable-trigger.json` for importable workflow shapes. `incoming-to-receive.json` pipes the **Atto Trigger** receivable output into **Atto** → **Receivable** → **Receive Pending** with **Receivable Source** set to **Input Item**. Replace placeholder addresses and attach an **Atto API** credential before running transaction operations.
 
 ## Implementation Notes
 

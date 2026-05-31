@@ -11,6 +11,7 @@ import {
 } from '@attocash/commons-core';
 
 import { Atto } from '../dist/nodes/Atto/Atto.node.js';
+import { AttoTrigger } from '../dist/nodes/AttoTrigger/AttoTrigger.node.js';
 import { executeAttoOperation } from '../dist/nodes/Atto/operations.js';
 
 test('derives address from mnemonic without returning the secret', async () => {
@@ -120,6 +121,58 @@ test('node execute falls back to the default operation when n8n has not persiste
 	assert.equal(output[0].length, 1);
 	assert.match(output[0][0].json.address, /^atto:\/\//);
 	assert.deepEqual(requestedParameters, ['resource', 'operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
+});
+
+test('send and receive expose a one minute publish timeout by default', () => {
+	const node = new Atto();
+	const publishTimeout = node.description.properties.find(
+		(property) =>
+			property.name === 'timeoutMs' &&
+			Array.isArray(property.displayOptions?.show?.operation) &&
+			property.displayOptions.show.operation.includes('sendTransaction'),
+	);
+	const streamTimeout = node.description.properties.find(
+		(property) =>
+			property.name === 'timeoutMs' &&
+			Array.isArray(property.displayOptions?.show?.operation) &&
+			property.displayOptions.show.operation.includes('getReceivables'),
+	);
+	const receivableSource = node.description.properties.find((property) => property.name === 'receivableSource');
+
+	assert.equal(publishTimeout.default, 60000);
+	assert.deepEqual(publishTimeout.displayOptions.show.operation, ['sendTransaction', 'receivePending']);
+	assert.equal(streamTimeout.default, 5000);
+	assert.deepEqual(streamTimeout.displayOptions.show.operation, ['getReceivables', 'getTransactions', 'getAccountEntries']);
+	assert.equal(receivableSource.default, 'input');
+});
+
+test('trigger execution falls back when n8n has not persisted hidden default parameters', async () => {
+	const requestedParameters = [];
+	const trigger = new AttoTrigger();
+	const ctx = {
+		getCredentials: async () => ({ nodeUrl: 'http://localhost' }),
+		getNodeParameter: (name, fallbackValue) => {
+			requestedParameters.push(name);
+			if (fallbackValue !== undefined) return fallbackValue;
+			throw new Error(`Could not get parameter ${name}`);
+		},
+		getNode: () => ({ name: 'Atto Trigger', type: 'n8n-nodes-atto.attoTrigger', typeVersion: 1, parameters: {} }),
+		emit: () => {},
+		emitError: () => {},
+	};
+
+	await assert.rejects(() => trigger.trigger.call(ctx), /Wallet Secret/);
+	assert.deepEqual(requestedParameters, [
+		'event',
+		'addressSource',
+		'addresses',
+		'queryMode',
+		'hash',
+		'fromHeight',
+		'toHeight',
+		'minAmount',
+		'minAmountUnit',
+	]);
 });
 
 test('validates required credentials and input fields', async () => {
