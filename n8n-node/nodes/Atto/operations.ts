@@ -237,7 +237,9 @@ async function createWalletRuntime(
 }> {
 	const derived = await deriveAddressFromSecret(parameters, credentials as ICredentialDataDecryptedObject);
 	const node = createNodeClient(credentials);
-	const worker = applyHeaders(new AttoWorkerAsyncBuilder(requireWorkerUrl(credentials)), credentials).build();
+	const worker = applyHeaders(new AttoWorkerAsyncBuilder(requireWorkerUrl(credentials)), credentials)
+		.cached(true)
+		.build();
 
 	const builder = new AttoWalletAsyncBuilder(node as never, worker as never);
 	if (derived.seed) {
