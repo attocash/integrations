@@ -1,6 +1,6 @@
 ---
 name: "n8n-community-node-verification"
-version: "1.0.8"
+version: "1.0.9"
 description: "Verify n8n community node packages in this integrations repo by building the package, checking n8n linter constraints, loading it in n8n with Podman, and executing a small workflow through n8n itself."
 license: "MIT"
 compatibility: "opencode"
@@ -41,8 +41,11 @@ Do not use this skill for ordinary TypeScript library tests, generic Docker chec
    - If the n8n linter rejects runtime dependencies, bundle package-only runtime code into the built node and keep n8n-provided packages external.
    - For CI artifacts, run `npm pack --pack-destination ../artifacts` after tests and upload `artifacts/*.tgz`.
    - If sandboxed `npm pack` fails writing to the host npm cache, rerun with an isolated cache such as `npm --cache /tmp/npm-cache pack --pack-destination <dir>`.
-   - For npm releases, use package-scoped semver tags such as `n8n-node-vX.Y.Z` and validate the tag against `n8n-node/package.json` before publishing.
-   - On main pushes, create the attempted package artifact before release approval, then gate tag creation, npm publish, and GitHub Release creation behind the GitHub environment named `release`.
+   - For npm releases, use package-scoped semantic-release tags such as `n8n-node-vX.Y.Z`; do not use `n8n-node/package.json` as the CI release source of truth.
+   - Compute the release with `cycjimmy/semantic-release-action` in dry-run mode using `working_directory: n8n-node` and `tagFormat: n8n-node-v${version}`.
+   - In this repo, release-producing commits should use the `n8n-node` conventional-commit scope, such as `fix(n8n-node): ...`, `perf(n8n-node): ...`, or `feat(n8n-node): ...`.
+   - Before packing in CI, apply the computed package version with `npm version "$VERSION" --no-git-tag-version --allow-same-version`; the repository package version may remain a placeholder or previous release.
+   - On main pushes, create the attempted package artifact before release approval, then gate semantic-release tag creation, GitHub Release creation, and npm publish behind the GitHub environment named `release`.
    - Publish n8n community nodes from GitHub Actions with `npm publish --provenance --access public`; support npm Trusted Publisher first and `NPM_TOKEN` only as a fallback.
    - Trusted Publishing requires a new enough CI toolchain. Use Node 24 for the publish workflow, install npm `^11.5.1`, and fail early if `node` or `npm` is below npm's current OIDC minimums.
 
@@ -106,6 +109,7 @@ podman run --rm -it --user 0 -p 5678:5678 \
 - Do not assume Node 22's bundled npm supports Trusted Publishing; Node can satisfy the runtime requirement while npm is still too old for OIDC publishing.
 - In a multi-integration repository, avoid repo-wide `vX.Y.Z` tags for n8n releases; they collide with unrelated integration versions.
 - Do not let package-created release tags retrigger the package workflow; the approved release job should create the tag after the artifact has already been tested and packed.
+- Do not make release jobs derive the next n8n version from `package.json`; that will retry an already-created tag after the first successful release.
 
 ## Verification
 
@@ -114,7 +118,8 @@ Before finishing, run:
 - `npm run lint`
 - `npm test`
 - `npm pack --pack-destination <temporary-artifact-directory>`
-- the release-tag validator with a matching tag and, when changed, one intentionally mismatched tag
+- load `n8n-node/release.config.cjs` and confirm `tagFormat` is `n8n-node-v${version}`
+- parse or lint the GitHub Actions workflow after release-flow edits; use `actionlint` when available
 - `npm publish <tarball> --dry-run --access public` with an isolated npm cache when the host cache is read-only
 - a Podman n8n start check that reaches `http://127.0.0.1:5678`
 - a minimal n8n workflow execution that uses the community node type

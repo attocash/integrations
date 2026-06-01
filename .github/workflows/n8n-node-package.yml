@@ -17,14 +17,85 @@ permissions:
   contents: read
 
 jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      has_release: ${{ steps.metadata.outputs.has_release }}
+      package_version: ${{ steps.metadata.outputs.package_version }}
+      release_version: ${{ steps.metadata.outputs.release_version }}
+      release_tag: ${{ steps.metadata.outputs.release_tag }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - id: semantic
+        name: Semantic Release Dry Run
+        if: ${{ !(github.event_name == 'pull_request' && github.event.pull_request.user.login == 'dependabot[bot]') }}
+        uses: cycjimmy/semantic-release-action@v6
+        with:
+          semantic_version: 24.2.7
+          working_directory: n8n-node
+          dry_run: true
+          ci: ${{ github.event_name == 'pull_request' && 'false' || 'true' }}
+          unset_gha_env: ${{ github.event_name == 'pull_request' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute package version
+        id: metadata
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF_NAME_FULL: ${{ github.ref }}
+          NEW_RELEASE_VERSION: ${{ steps.semantic.outputs.new_release_version }}
+          LAST_RELEASE_VERSION: ${{ steps.semantic.outputs.last_release_version }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.sha }}
+        run: |
+          base_version="${NEW_RELEASE_VERSION:-${LAST_RELEASE_VERSION:-0.0.0}}"
+          short_sha="${SHA:0:12}"
+          has_release=false
+          release_version="$base_version"
+          release_tag=""
+
+          if [ -n "$NEW_RELEASE_VERSION" ]; then
+            package_version="$NEW_RELEASE_VERSION"
+          elif [ "$EVENT_NAME" = "pull_request" ]; then
+            package_version="${base_version}-pr.${PR_NUMBER}.sha${short_sha}"
+          else
+            package_version="${base_version}-snapshot.sha${short_sha}"
+          fi
+
+          if [ "$EVENT_NAME" = "push" ] && [ "$GITHUB_REF_NAME_FULL" = "refs/heads/main" ] && [ -n "$NEW_RELEASE_VERSION" ]; then
+            has_release=true
+            release_version="$NEW_RELEASE_VERSION"
+            release_tag="n8n-node-v$NEW_RELEASE_VERSION"
+          fi
+
+          echo "has_release=$has_release" >> "$GITHUB_OUTPUT"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
+          echo "release_version=$release_version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$release_tag" >> "$GITHUB_OUTPUT"
+
   test-and-pack:
     name: Test and pack
     runs-on: ubuntu-latest
+    needs: version
     permissions:
       contents: read
     outputs:
-      package-name: ${{ steps.package.outputs.package-name }}
-      package-version: ${{ steps.package.outputs.package-version }}
+      package_name: ${{ steps.package.outputs.package_name }}
+      package_version: ${{ steps.package.outputs.package_version }}
     defaults:
       run:
         working-directory: n8n-node
@@ -53,11 +124,30 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Apply computed package version
+        run: npm version "${{ needs.version.outputs.package_version }}" --no-git-tag-version --allow-same-version
+
       - name: Read package metadata
         id: package
+        env:
+          EXPECTED_VERSION: ${{ needs.version.outputs.package_version }}
         run: |
-          echo "package-name=$(node -p "require('./package.json').name")" >> "$GITHUB_OUTPUT"
-          echo "package-version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+          package_name="$(node -p "require('./package.json').name")"
+          package_version="$(node -p "require('./package.json').version")"
+          expected_package="@attocash/n8n-nodes-atto"
+
+          if [ "$package_name" != "$expected_package" ]; then
+            echo "Expected package name $expected_package, got $package_name" >&2
+            exit 1
+          fi
+
+          if [ "$package_version" != "$EXPECTED_VERSION" ]; then
+            echo "Expected package version $EXPECTED_VERSION, got $package_version" >&2
+            exit 1
+          fi
+
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
 
       - name: Lint
         run: npm run lint
@@ -80,15 +170,19 @@ jobs:
 
   release:
     name: Release
-    needs: test-and-pack
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs:
+      - version
+      - test-and-pack
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.version.outputs.has_release == 'true'
     runs-on: ubuntu-latest
     environment: release
     concurrency:
-      group: n8n-node-release-${{ needs.test-and-pack.outputs.package-version }}
+      group: n8n-node-release-${{ needs.version.outputs.release_version }}
       cancel-in-progress: true
     permissions:
       contents: write
+      issues: write
+      pull-requests: write
       id-token: write
     defaults:
       run:
@@ -115,83 +209,46 @@ jobs:
           npm_version="$(npm --version)"
           node -e 'const version = process.argv[1]; const [major, minor, patch] = version.split(".").map(Number); if (major < 11 || (major === 11 && minor < 5) || (major === 11 && minor === 5 && patch < 1)) throw new Error("Trusted Publishing requires npm >=11.5.1, got " + version);' "$npm_version"
 
-      - name: Read release metadata
-        id: release
-        run: |
-          package_name="$(node -p "require('./package.json').name")"
-          package_version="$(node -p "require('./package.json').version")"
-          expected_package="@attocash/n8n-nodes-atto"
-
-          if [ "$package_name" != "$expected_package" ]; then
-            echo "Expected package name $expected_package, got $package_name" >&2
-            exit 1
-          fi
-
-          if [ "$package_name" != "${{ needs.test-and-pack.outputs.package-name }}" ]; then
-            echo "Packed package name changed between jobs" >&2
-            exit 1
-          fi
-
-          if [ "$package_version" != "${{ needs.test-and-pack.outputs.package-version }}" ]; then
-            echo "Packed package version changed between jobs" >&2
-            exit 1
-          fi
-
-          echo "package-name=$package_name" >> "$GITHUB_OUTPUT"
-          echo "package-version=$package_version" >> "$GITHUB_OUTPUT"
-          echo "tag-name=n8n-node-v$package_version" >> "$GITHUB_OUTPUT"
-
-      - name: Validate release tag
-        run: npm run validate:release-tag -- "${{ steps.release.outputs.tag-name }}"
-
       - name: Download package artifact
         uses: actions/download-artifact@v4
         with:
           name: attocash-n8n-nodes-atto-package
-          path: artifacts
+          path: n8n-node/artifacts
 
       - name: Verify package artifact
         id: artifact
+        env:
+          EXPECTED_NAME: ${{ needs.test-and-pack.outputs.package_name }}
+          EXPECTED_VERSION: ${{ needs.version.outputs.release_version }}
         run: |
-          tarball_count="$(find ../artifacts -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')"
+          tarball_count="$(find artifacts -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')"
           if [ "$tarball_count" != "1" ]; then
             echo "Expected one package artifact, found $tarball_count" >&2
-            find ../artifacts -maxdepth 1 -type f -print >&2
+            find artifacts -maxdepth 1 -type f -print >&2
             exit 1
           fi
 
-          tarball="$(find ../artifacts -maxdepth 1 -name '*.tgz' -print -quit)"
+          tarball="$(find artifacts -maxdepth 1 -name '*.tgz' -print -quit)"
           tar -xOf "$tarball" package/package.json > /tmp/n8n-node-package.json
-          node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("/tmp/n8n-node-package.json", "utf8")); const expectedName = process.argv[1]; const expectedVersion = process.argv[2]; if (pkg.name !== expectedName || pkg.version !== expectedVersion) throw new Error(`Artifact contains ${pkg.name}@${pkg.version}, expected ${expectedName}@${expectedVersion}`);' "${{ steps.release.outputs.package-name }}" "${{ steps.release.outputs.package-version }}"
+          node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("/tmp/n8n-node-package.json", "utf8")); const expectedName = process.argv[1]; const expectedVersion = process.argv[2]; if (pkg.name !== expectedName || pkg.version !== expectedVersion) throw new Error(`Artifact contains ${pkg.name}@${pkg.version}, expected ${expectedName}@${expectedVersion}`);' "$EXPECTED_NAME" "$EXPECTED_VERSION"
 
           echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
-      - name: Create release tag
-        run: |
-          tag_name="${{ steps.release.outputs.tag-name }}"
-          git fetch --tags origin
-
-          existing_tag_sha="$(git rev-parse -q --verify "refs/tags/$tag_name" || true)"
-          if [ -n "$existing_tag_sha" ]; then
-            if [ "$existing_tag_sha" != "$GITHUB_SHA" ]; then
-              echo "Tag $tag_name already exists at $existing_tag_sha, expected $GITHUB_SHA" >&2
-              exit 1
-            fi
-
-            echo "Tag $tag_name already exists at $GITHUB_SHA"
-            exit 0
-          fi
-
-          git tag "$tag_name" "$GITHUB_SHA"
-          git push origin "refs/tags/$tag_name"
+      - name: Create GitHub release
+        uses: cycjimmy/semantic-release-action@v6
+        with:
+          semantic_version: 24.2.7
+          working_directory: n8n-node
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check npm publication
         id: npm
+        env:
+          PACKAGE_NAME: ${{ needs.test-and-pack.outputs.package_name }}
+          PACKAGE_VERSION: ${{ needs.version.outputs.release_version }}
         run: |
-          package_name="${{ steps.release.outputs.package-name }}"
-          package_version="${{ steps.release.outputs.package-version }}"
-
-          if npm view "$package_name@$package_version" version --json > /tmp/npm-view.json 2> /tmp/npm-view.err; then
+          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version --json > /tmp/npm-view.json 2> /tmp/npm-view.err; then
             echo "published=true" >> "$GITHUB_OUTPUT"
             cat /tmp/npm-view.json
             exit 0
@@ -214,21 +271,3 @@ jobs:
           npm publish "${{ steps.artifact.outputs.tarball }}" --provenance --access public
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Create GitHub release
-        run: |
-          tag_name="${{ steps.release.outputs.tag-name }}"
-          package_name="${{ steps.release.outputs.package-name }}"
-          package_version="${{ steps.release.outputs.package-version }}"
-          tarball="${{ steps.artifact.outputs.tarball }}"
-
-          if gh release view "$tag_name" >/dev/null 2>&1; then
-            gh release upload "$tag_name" "$tarball" --clobber
-            exit 0
-          fi
-
-          gh release create "$tag_name" "$tarball" \
-            --title "$package_name $package_version" \
-            --notes "Release $package_name@$package_version."
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
