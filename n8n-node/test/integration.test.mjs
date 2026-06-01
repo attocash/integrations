@@ -11,7 +11,7 @@ import {
 } from '@attocash/commons-core';
 import { AttoNodeMockAsyncBuilder, AttoWorkerMockAsyncBuilder } from '@attocash/commons-test';
 
-import { createAttoTriggerSubscription, executeAttoOperation } from '../dist/nodes/Atto/operations.js';
+import { clearWorkerClientCache, createAttoTriggerSubscription, executeAttoOperation } from '../dist/nodes/Atto/operations.js';
 
 function configureContainerRuntime() {
 	const docker = spawnSync('docker', ['version'], { stdio: 'ignore' });
@@ -57,6 +57,7 @@ if (!hasRuntime && !requireIntegration) {
 	});
 
 	test.after(async () => {
+		clearWorkerClientCache();
 		await nodeMock.close();
 		await workerMock.close();
 	});

@@ -1,6 +1,7 @@
 /* eslint-disable @n8n/community-nodes/no-restricted-globals */
 /* eslint-disable @n8n/community-nodes/no-restricted-imports */
 /* eslint-disable @n8n/community-nodes/require-node-api-error */
+import { createHash } from 'node:crypto';
 import {
 	AttoAddress,
 	AttoAlgorithm,
@@ -32,7 +33,7 @@ import {
 } from '@attocash/commons-node';
 import { AttoNodeClientAsyncBuilder, type AttoNodeClientAsync } from '@attocash/commons-node-remote';
 import { AttoWalletAsyncBuilder } from '@attocash/commons-wallet';
-import { AttoWorkerAsyncBuilder } from '@attocash/commons-worker-remote';
+import { AttoWorkerAsyncBuilder, type AttoWorkerAsync } from '@attocash/commons-worker-remote';
 import type { ICredentialDataDecryptedObject, IDataObject } from 'n8n-workflow';
 
 export type AttoOperation =
@@ -57,6 +58,9 @@ export type AttoOperationResult = IDataObject | IDataObject[];
 
 const DEFAULT_STREAM_TIMEOUT_MS = 5000;
 const DEFAULT_PUBLISH_TIMEOUT_MS = 60000;
+const MAX_WORKER_CLIENT_CACHE_SIZE = 32;
+
+const workerClientCache = new Map<string, AttoWorkerAsync>();
 
 type AttoCredentials = {
 	nodeUrl?: string;
@@ -215,9 +219,68 @@ function applyHeaders<T extends { header(name: string, value: string): T }>(
 	return builder.header(header, prefix ? `${prefix} ${apiKey}` : apiKey);
 }
 
+function sha256(value: string): string {
+	return createHash('sha256').update(value).digest('hex');
+}
+
+function workerClientCacheKey(credentials: AttoCredentials): string {
+	const workerUrl = requireWorkerUrl(credentials);
+	const apiKey = text(credentials.apiKey);
+
+	if (!apiKey) {
+		return JSON.stringify({
+			workerUrl,
+			auth: 'none',
+		});
+	}
+
+	const header = text(credentials.authHeaderName || 'Authorization');
+	if (!header) throw new Error('API Key Header is required when API Key is set');
+
+	const prefix = text(credentials.authHeaderPrefix);
+	const headerValue = prefix ? `${prefix} ${apiKey}` : apiKey;
+
+	return JSON.stringify({
+		workerUrl,
+		header,
+		headerValueHash: sha256(headerValue),
+	});
+}
+
 export function createNodeClient(credentials: ICredentialDataDecryptedObject | AttoCredentials | undefined): AttoNodeClientAsync {
 	const attoCredentials = normalizeCredentials(credentials as ICredentialDataDecryptedObject | undefined);
 	return applyHeaders(new AttoNodeClientAsyncBuilder(requireNodeUrl(attoCredentials)), attoCredentials).build();
+}
+
+export function createWorkerClient(credentials: ICredentialDataDecryptedObject | AttoCredentials | undefined): AttoWorkerAsync {
+	const attoCredentials = normalizeCredentials(credentials as ICredentialDataDecryptedObject | undefined);
+	const cacheKey = workerClientCacheKey(attoCredentials);
+	const cachedWorker = workerClientCache.get(cacheKey);
+	if (cachedWorker) return cachedWorker;
+
+	const worker = applyHeaders(new AttoWorkerAsyncBuilder(requireWorkerUrl(attoCredentials)), attoCredentials)
+		.cached(true)
+		.build();
+
+	if (workerClientCache.size >= MAX_WORKER_CLIENT_CACHE_SIZE) {
+		const oldestKey = workerClientCache.keys().next().value;
+		if (typeof oldestKey === 'string') workerClientCache.delete(oldestKey);
+	}
+
+	workerClientCache.set(cacheKey, worker);
+	return worker;
+}
+
+export function clearWorkerClientCache(): void {
+	for (const worker of workerClientCache.values()) {
+		try {
+			(worker as { close?: () => void }).close?.();
+		} catch {
+			// The remote worker close hook is best-effort and currently a no-op in Atto Commons.
+		}
+	}
+
+	workerClientCache.clear();
 }
 
 async function createWalletRuntime(
@@ -230,9 +293,7 @@ async function createWalletRuntime(
 }> {
 	const derived = await deriveAddressFromSecret(parameters, credentials as ICredentialDataDecryptedObject);
 	const node = createNodeClient(credentials);
-	const worker = applyHeaders(new AttoWorkerAsyncBuilder(requireWorkerUrl(credentials)), credentials)
-		.cached(true)
-		.build();
+	const worker = createWorkerClient(credentials);
 
 	const builder = new AttoWalletAsyncBuilder(node as never, worker as never);
 	if (derived.seed) {

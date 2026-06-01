@@ -12,7 +12,11 @@ import {
 
 import { Atto } from '../dist/nodes/Atto/Atto.node.js';
 import { AttoTrigger } from '../dist/nodes/AttoTrigger/AttoTrigger.node.js';
-import { executeAttoOperation } from '../dist/nodes/Atto/operations.js';
+import { clearWorkerClientCache, createWorkerClient, executeAttoOperation } from '../dist/nodes/Atto/operations.js';
+
+test.after(() => {
+	clearWorkerClientCache();
+});
 
 test('derives address from mnemonic without returning the secret', async () => {
 	const mnemonic = AttoMnemonic.generate();
@@ -56,6 +60,24 @@ test('derives address from private key without returning the private key', async
 	assert.match(result.address, /^atto:\/\//);
 	assert.ok(result.publicKey);
 	assert.doesNotMatch(JSON.stringify(result), new RegExp(privateKeyHex));
+});
+
+test('reuses worker clients for matching non-secret worker configuration', () => {
+	const credentials = {
+		workerUrl: 'http://worker-cache.test/',
+		apiKey: 'first-secret',
+		authHeaderName: 'Authorization',
+		authHeaderPrefix: 'Bearer',
+	};
+
+	const first = createWorkerClient(credentials);
+	const second = createWorkerClient({ ...credentials, workerUrl: 'http://worker-cache.test' });
+	const differentSecret = createWorkerClient({ ...credentials, apiKey: 'second-secret' });
+	const differentHeader = createWorkerClient({ ...credentials, authHeaderName: 'X-Api-Key' });
+
+	assert.strictEqual(first, second);
+	assert.notStrictEqual(first, differentSecret);
+	assert.notStrictEqual(first, differentHeader);
 });
 
 test('node execute passes resolved parameters to the operation', async () => {
