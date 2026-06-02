@@ -46,7 +46,7 @@ Do not use this skill for ordinary TypeScript library tests, generic Docker chec
    - In this repo, release-producing commits should use the `n8n-node` conventional-commit scope, such as `fix(n8n-node): ...`, `perf(n8n-node): ...`, or `feat(n8n-node): ...`.
    - Before packing in CI, apply the computed package version with `npm version "$VERSION" --no-git-tag-version --allow-same-version`; the repository package version may remain a placeholder or previous release.
    - On main pushes, create the attempted package artifact before release approval, then gate semantic-release tag creation, GitHub Release creation, and npm publish behind the GitHub environment named `release`.
-   - Publish n8n community nodes from GitHub Actions with `npm publish --provenance --access public`; support npm Trusted Publisher first and `NPM_TOKEN` only as a fallback.
+   - Publish n8n community nodes from GitHub Actions with `npm publish --provenance --access public` using npm Trusted Publishing; do not add `NPM_TOKEN` fallback paths.
    - Trusted Publishing requires a new enough CI toolchain. Use Node 24 for the publish workflow, install npm `^11.5.1`, and fail early if `node` or `npm` is below npm's current OIDC minimums.
 
 3. Test the node outside n8n first.
@@ -107,6 +107,7 @@ podman run --rm -it --user 0 -p 5678:5678 \
 - Do not verify checkout installers against the host `~/.n8n`; use a temporary directory or, preferably, an ephemeral Podman n8n container.
 - For npm Trusted Publishing, configure npm with the exact GitHub workflow filename used by the publish job.
 - Do not assume Node 22's bundled npm supports Trusted Publishing; Node can satisfy the runtime requirement while npm is still too old for OIDC publishing.
+- Do not add an `NPM_TOKEN` secret fallback for this package; token auth hides Trusted Publishing misconfiguration and is not the intended release path.
 - In a multi-integration repository, avoid repo-wide `vX.Y.Z` tags for n8n releases; they collide with unrelated integration versions.
 - Do not let package-created release tags retrigger the package workflow; the approved release job should create the tag after the artifact has already been tested and packed.
 - Do not make release jobs derive the next n8n version from `package.json`; that will retry an already-created tag after the first successful release.

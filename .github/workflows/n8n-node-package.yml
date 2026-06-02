@@ -228,7 +228,7 @@ jobs:
             exit 1
           fi
 
-          tarball="$(find artifacts -maxdepth 1 -name '*.tgz' -print -quit)"
+          tarball="$(find "$PWD/artifacts" -maxdepth 1 -name '*.tgz' -print -quit)"
           tar -xOf "$tarball" package/package.json > /tmp/n8n-node-package.json
           node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("/tmp/n8n-node-package.json", "utf8")); const expectedName = process.argv[1]; const expectedVersion = process.argv[2]; if (pkg.name !== expectedName || pkg.version !== expectedVersion) throw new Error(`Artifact contains ${pkg.name}@${pkg.version}, expected ${expectedName}@${expectedVersion}`);' "$EXPECTED_NAME" "$EXPECTED_VERSION"
 
@@ -264,10 +264,4 @@ jobs:
 
       - name: Publish to npm
         if: steps.npm.outputs.published != 'true'
-        run: |
-          if [ -n "${NPM_TOKEN:-}" ]; then
-            npm config set //registry.npmjs.org/:_authToken "$NPM_TOKEN"
-          fi
-          npm publish "${{ steps.artifact.outputs.tarball }}" --provenance --access public
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish "${{ steps.artifact.outputs.tarball }}" --provenance --access public
