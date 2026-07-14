@@ -1,7 +1,7 @@
 ---
 name: "n8n-community-node-verification"
-version: "1.0.9"
-description: "Verify n8n community node packages in this integrations repo by building the package, checking n8n linter constraints, loading it in n8n with Podman, and executing a small workflow through n8n itself."
+version: "1.0.10"
+description: "Verify and diagnose n8n community node packages in this integrations repo, including Creator Portal npm-metadata failures, builds, n8n linter constraints, Podman loading, and real workflow execution."
 license: "MIT"
 compatibility: "opencode"
 metadata:
@@ -23,6 +23,7 @@ Use this skill when the task asks to:
 - prove n8n loads a local custom node package
 - execute a basic n8n workflow against a local community node
 - debug package naming, node type IDs, credentials, or community-node linter failures
+- debug Creator Portal submission errors involving npm package metadata, authors, or maintainers
 
 Do not use this skill for ordinary TypeScript library tests, generic Docker checks, or n8n workflow design that does not involve a local community node package.
 
@@ -31,6 +32,9 @@ Do not use this skill for ordinary TypeScript library tests, generic Docker chec
 1. Inspect the package before changing behavior.
    - Confirm `package.json` name is either `n8n-nodes-*` or a scoped package whose unscoped name starts with `n8n-nodes-*`, such as `@scope/n8n-nodes-*`.
    - Confirm `package.json` has the `n8n` metadata pointing at built `dist` node and credential files.
+   - For Creator Portal submission failures, inspect the live latest-version metadata from the npm registry as well as the local `package.json`; a published version can differ from the checkout.
+   - Confirm `author` includes both `name` and `email`. Treat npm-generated `maintainers` and `_npmUser.email` as separate fields; do not assume the Creator Portal will use them when `author.email` is absent.
+   - After correcting published metadata, release a new package version because npm versions are immutable, then verify the new latest metadata before retrying the submission.
    - When the package has action and trigger nodes, confirm every node entrypoint is listed in `package.json` `n8n.nodes`, included by the bundle/build script, and covered by the smoke import test.
    - Confirm the workflow node type is `<package-name>.<node-description-name>`, for example `n8n-nodes-atto.atto` or `@attocash/n8n-nodes-atto.atto`.
 
@@ -111,6 +115,7 @@ podman run --rm -it --user 0 -p 5678:5678 \
 - In a multi-integration repository, avoid repo-wide `vX.Y.Z` tags for n8n releases; they collide with unrelated integration versions.
 - Do not let package-created release tags retrigger the package workflow; the approved release job should create the tag after the artifact has already been tested and packed.
 - Do not make release jobs derive the next n8n version from `package.json`; that will retry an already-created tag after the first successful release.
+- Do not diagnose `Error getting author email from npm` from the npm website sidebar or maintainer profile alone. Inspect the live latest-version `author.email` field directly.
 
 ## Verification
 
@@ -122,6 +127,7 @@ Before finishing, run:
 - load `n8n-node/release.config.cjs` and confirm `tagFormat` is `n8n-node-v${version}`
 - parse or lint the GitHub Actions workflow after release-flow edits; use `actionlint` when available
 - `npm publish <tarball> --dry-run --access public` with an isolated npm cache when the host cache is read-only
+- `npm view "$PACKAGE_NAME@latest" author maintainers --json` and confirm `author.email` is present for Creator Portal submissions
 - a Podman n8n start check that reaches `http://127.0.0.1:5678`
 - a minimal n8n workflow execution that uses the community node type
 
@@ -133,6 +139,7 @@ Should use:
 - "verify this n8n community node loads in n8n"
 - "run a real n8n workflow against the local custom node"
 - "why is my n8n community node type called n8n-nodes-foo.bar?"
+- "why does creators.n8n.io say Error getting author email from npm?"
 
 Should not use:
 - "write a generic TypeScript unit test"
