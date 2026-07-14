@@ -21,7 +21,8 @@
     "automation"
   ],
   "author": {
-    "name": "Atto"
+    "name": "Atto",
+    "email": "contact@atto.cash"
   },
   "homepage": "https://github.com/attocash/integrations/tree/main/n8n-node#readme",
   "repository": {
