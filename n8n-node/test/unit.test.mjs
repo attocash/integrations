@@ -2,89 +2,201 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+	AttoAlgorithm,
 	AttoMnemonic,
 	AttoPrivateKey,
 	toAttoIndex,
 	toHex,
 	toPrivateKey,
+	toPublicKey,
 	toSeedAsync,
 } from '@attocash/commons-core';
 
 import { Atto } from '../dist/nodes/Atto/Atto.node.js';
 import { AttoTrigger } from '../dist/nodes/AttoTrigger/AttoTrigger.node.js';
-import { clearWorkerClientCache, createWorkerClient, executeAttoOperation } from '../dist/nodes/Atto/operations.js';
+import { executeAttoOperation } from '../dist/nodes/Atto/operations.js';
+import {
+	addressFromPublicKey,
+	blockHash,
+	createSendBlock,
+	deriveAddressFromSecret,
+	parseAddress,
+	parseAmount,
+	parseAttoJson,
+} from '../dist/nodes/Atto/protocol.js';
 
-test.after(() => {
-	clearWorkerClientCache();
-});
+test('derives the same mnemonic key and address as Atto Commons', async () => {
+	const phrase = 'edge defense waste choose enrich upon flee junk siren film clown finish luggage leader kid quick brick print evidence swap drill paddle truly occur';
+	const mnemonic = await AttoMnemonic.fromPhrase(phrase);
+	const seed = await toSeedAsync(mnemonic);
+	const expectedPrivateKey = await toPrivateKey(seed, toAttoIndex(0));
+	const expectedPublicKey = await toPublicKey(expectedPrivateKey);
+	const expectedAddress = addressFromPublicKey(expectedPublicKey.toString());
 
-test('derives address from mnemonic without returning the secret', async () => {
-	const mnemonic = AttoMnemonic.generate();
-	const result = await executeAttoOperation('deriveAddress', {
+	const result = await deriveAddressFromSecret({
 		secretSource: 'node',
 		walletSecretType: 'mnemonic',
-		walletSecret: mnemonic.phrase,
+		walletSecret: phrase,
 		keyIndex: 0,
 	});
 
-	assert.equal(result.secretType, 'mnemonic');
-	assert.equal(result.keyIndex, 0);
-	assert.match(result.address, /^atto:\/\//);
-	assert.ok(result.publicKey);
-	assert.doesNotMatch(JSON.stringify(result), new RegExp(mnemonic.phrase.split(' ')[0]));
+	assert.equal(result.signer.publicKey.toString(), expectedPublicKey.toString());
+	assert.equal(result.publicKey, expectedPublicKey.toString());
+	assert.equal(result.value, expectedAddress.value);
+	assert.equal(parseAddress(result.value, 'Address').publicKey, result.publicKey);
+	assert.equal('privateKey' in result, false);
 });
 
-test('keeps the derive account operation as a backward-compatible alias', async () => {
-	const mnemonic = AttoMnemonic.generate();
-	const result = await executeAttoOperation('deriveAccount', {
-		secretSource: 'node',
-		walletSecretType: 'mnemonic',
-		walletSecret: mnemonic.phrase,
-		keyIndex: 0,
-	});
-
-	assert.match(result.address, /^atto:\/\//);
-	assert.ok(result.publicKey);
-});
-
-test('derives address from private key without returning the private key', async () => {
+test('derives a private-key address without returning the secret', async () => {
 	const privateKey = AttoPrivateKey.Companion.generate();
 	const privateKeyHex = toHex(privateKey.value);
-	const result = await executeAttoOperation('deriveAddress', {
-		secretSource: 'node',
-		walletSecretType: 'privateKey',
-		walletSecret: privateKeyHex,
-	});
+	const result = await executeAttoOperation(
+		undefined,
+		'deriveAddress',
+		{
+			secretSource: 'node',
+			walletSecretType: 'privateKey',
+			walletSecret: privateKeyHex,
+		},
+	);
 
 	assert.equal(result.secretType, 'privateKey');
 	assert.match(result.address, /^atto:\/\//);
-	assert.ok(result.publicKey);
+	assert.equal(result.publicKey, (await toPublicKey(privateKey)).toString());
 	assert.doesNotMatch(JSON.stringify(result), new RegExp(privateKeyHex));
 });
 
-test('reuses worker clients for matching non-secret worker configuration', () => {
-	const credentials = {
-		workerUrl: 'http://worker-cache.test/',
-		apiKey: 'first-secret',
-		authHeaderName: 'Authorization',
-		authHeaderPrefix: 'Bearer',
+test('serializes every Atto block type with hashes matching Atto Commons', () => {
+	const common = {
+		network: 'LOCAL',
+		version: 0,
+		algorithm: 'V1',
+		publicKey: '9979705D9F9588F46667697329947688E5FFC4DF36F5D0C6A4E29D023E7BF2CE',
+		balance: '12000000000',
+		timestamp: 1705517157478,
 	};
+	const previous = '0AF0F63BFE4DBC588F95FC3B154DE848AA9A5DD5604BAC99AE9E21C5EA8B4F64';
+	const otherPublicKey = '0C400961629D759176F009249A33899440900ABCE275F6C5C01C6F7F37A2C59A';
+	const blocks = [
+		{
+			...common,
+			type: 'OPEN',
+			sendHashAlgorithm: 'V1',
+			sendHash: previous,
+			representativeAlgorithm: 'V1',
+			representativePublicKey: otherPublicKey,
+		},
+		{
+			...common,
+			type: 'RECEIVE',
+			height: '2',
+			previous,
+			sendHashAlgorithm: 'V1',
+			sendHash: previous,
+		},
+		{
+			...common,
+			type: 'SEND',
+			height: '2',
+			previous,
+			receiverAlgorithm: 'V1',
+			receiverPublicKey: otherPublicKey,
+			amount: '1000000000',
+		},
+		{
+			...common,
+			type: 'CHANGE',
+			height: '2',
+			previous,
+			representativeAlgorithm: 'V1',
+			representativePublicKey: otherPublicKey,
+		},
+	];
 
-	const first = createWorkerClient(credentials);
-	const second = createWorkerClient({ ...credentials, workerUrl: 'http://worker-cache.test' });
-	const differentSecret = createWorkerClient({ ...credentials, apiKey: 'second-secret' });
-	const differentHeader = createWorkerClient({ ...credentials, authHeaderName: 'X-Api-Key' });
-
-	assert.strictEqual(first, second);
-	assert.notStrictEqual(first, differentSecret);
-	assert.notStrictEqual(first, differentHeader);
+	const expectedHashes = [
+		'0ECEF1E379CB300961966CF96DA4C95BD3AADEEED7DA109160BD3951695A37F0',
+		'729C468816C5570A9C4D51150E24EFB5F4E8C440AEB7033CC0BE3086AAF54A98',
+		'B3507515BD5399EE4788AD8396C070521BF6A767227AFF71DA679695A8FCA90C',
+		'D8BE2F658BAA4B2E96C19915225F2264FFE7A0E48D263DF716E4765E5B6EA339',
+	];
+	assert.deepEqual(blocks.map(blockHash), expectedHashes);
 });
 
-test('node execute passes resolved parameters to the operation', async () => {
-	const mnemonic = AttoMnemonic.generate();
+test('preserves protocol-sized integers while parsing API JSON', () => {
+	const parsed = parseAttoJson('{"height":18446744073709551615,"balance":18000000000000000000,"timestamp":1705517157478}');
+	assert.equal(parsed.height, '18446744073709551615');
+	assert.equal(parsed.balance, '18000000000000000000');
+	assert.equal(parsed.timestamp, 1705517157478);
+});
+
+test('keeps simplified output as the default and preserves raw API output', async () => {
+	const account = {
+		publicKey: '9979705D9F9588F46667697329947688E5FFC4DF36F5D0C6A4E29D023E7BF2CE',
+		network: 'LOCAL',
+		version: 0,
+		algorithm: 'V1',
+		height: '2',
+		balance: '12000000000',
+		lastTransactionHash: '0AF0F63BFE4DBC588F95FC3B154DE848AA9A5DD5604BAC99AE9E21C5EA8B4F64',
+		lastTransactionTimestamp: 1705517157478,
+		representativeAlgorithm: 'V1',
+		representativePublicKey: '0C400961629D759176F009249A33899440900ABCE275F6C5C01C6F7F37A2C59A',
+		serverMetadata: 'preserved',
+	};
+	const address = addressFromPublicKey(account.publicKey).value;
+	const context = {
+		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: {} }),
+		helpers: {
+			httpRequest: async () => JSON.stringify(account),
+		},
+	};
+	const credentials = { nodeUrl: 'http://localhost' };
+
+	const simplified = await executeAttoOperation(context, 'getAccount', { address }, credentials);
+	const raw = await executeAttoOperation(context, 'getAccount', { address, simplify: false }, credentials);
+
+	assert.deepEqual(simplified, {
+		found: true,
+		address,
+		publicKey: account.publicKey,
+		balance: { raw: '12000000000', atto: '12' },
+		representativeAddress: addressFromPublicKey(account.representativePublicKey).value,
+		height: '2',
+		frontier: account.lastTransactionHash,
+	});
+	assert.deepEqual(raw, account);
+});
+
+test('keeps field-specific amount and send validation around Commons', () => {
+	const account = {
+		publicKey: '9979705D9F9588F46667697329947688E5FFC4DF36F5D0C6A4E29D023E7BF2CE',
+		network: 'LOCAL',
+		version: 0,
+		algorithm: 'V1',
+		height: '2',
+		balance: '12000000000',
+		lastTransactionHash: '0AF0F63BFE4DBC588F95FC3B154DE848AA9A5DD5604BAC99AE9E21C5EA8B4F64',
+		lastTransactionTimestamp: 1705517157478,
+		representativeAlgorithm: 'V1',
+		representativePublicKey: '0C400961629D759176F009249A33899440900ABCE275F6C5C01C6F7F37A2C59A',
+	};
+
+	assert.throws(() => parseAmount('0', 'ATTO', 'Amount'), /positive Atto amount/);
+	assert.throws(() => parseAmount('0.0000000001', 'ATTO', 'Amount'), /positive Atto amount/);
+	assert.throws(
+		() => createSendBlock(account, addressFromPublicKey(account.publicKey), parseAmount('1', 'ATTO', 'Amount'), 1705517158478),
+		/Destination Address must differ/,
+	);
+	assert.throws(
+		() => createSendBlock(account, addressFromPublicKey(account.representativePublicKey), parseAmount('13', 'ATTO', 'Amount'), 1705517158478),
+		/Account balance 12000000000 is not enough to send 13000000000/,
+	);
+});
+
+test('node execute passes resolved parameters and supports n8n defaults', async () => {
+	const mnemonic = await AttoMnemonic.generate();
 	const params = {
 		resource: 'address',
-		operation: 'deriveAddress',
 		secretSource: 'node',
 		walletSecretType: 'mnemonic',
 		walletSecret: mnemonic.phrase,
@@ -92,124 +204,44 @@ test('node execute passes resolved parameters to the operation', async () => {
 	};
 	const requestedParameters = [];
 	const node = new Atto();
-	const ctx = {
+	const context = {
 		getInputData: () => [{ json: {} }],
 		getCredentials: async () => ({}),
-		getNodeParameter: (name) => {
+		getNodeParameter: (name, _itemIndex, fallbackValue) => {
 			requestedParameters.push(name);
-			if (!(name in params)) throw new Error(`Unexpected parameter ${name}`);
-			return params[name];
+			if (name in params) return params[name];
+			if (fallbackValue !== undefined) return fallbackValue;
+			throw new Error(`Could not get parameter ${name}`);
 		},
 		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
 		continueOnFail: () => false,
+		helpers: {},
 	};
 
-	const output = await node.execute.call(ctx);
+	const output = await node.execute.call(context);
 
-	assert.equal(output.length, 1);
-	assert.equal(output[0].length, 1);
 	assert.match(output[0][0].json.address, /^atto:\/\//);
 	assert.deepEqual(output[0][0].pairedItem, { item: 0 });
 	assert.deepEqual(requestedParameters, ['resource', 'operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
 });
 
-test('node execute falls back to the default operation when n8n has not persisted it', async () => {
-	const mnemonic = AttoMnemonic.generate();
-	const params = {
-		resource: 'address',
-		secretSource: 'node',
-		walletSecretType: 'mnemonic',
-		walletSecret: mnemonic.phrase,
-		keyIndex: 0,
-	};
-	const requestedParameters = [];
+test('node descriptions expose compliant output and polling controls', () => {
 	const node = new Atto();
-	const ctx = {
-		getInputData: () => [{ json: {} }],
-		getCredentials: async () => ({}),
-		getNodeParameter: (name, _itemIndex, fallbackValue) => {
-			requestedParameters.push(name);
-			if (name in params) return params[name];
-			if (fallbackValue !== undefined) return fallbackValue;
-			throw new Error(`Could not get parameter ${name}`);
-		},
-		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
-		continueOnFail: () => false,
-	};
+	const trigger = new AttoTrigger();
+	const simplify = node.description.properties.find((property) => property.name === 'simplify');
+	const pollTimes = trigger.description.properties.find((property) => property.name === 'pollTimes');
 
-	const output = await node.execute.call(ctx);
-
-	assert.equal(output.length, 1);
-	assert.equal(output[0].length, 1);
-	assert.match(output[0][0].json.address, /^atto:\/\//);
-	assert.deepEqual(requestedParameters, ['resource', 'operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
+	assert.equal(node.description.usableAsTool, true);
+	assert.equal(trigger.description.usableAsTool, true);
+	assert.equal(simplify.default, true);
+	assert.equal(trigger.description.polling, true);
+	assert.deepEqual(pollTimes.default, { item: [{ mode: 'everyMinute' }] });
 });
 
-test('receive action reads only parameters needed for input receivables', async () => {
-	const params = {
-		resource: 'receivable',
-		operation: 'receivePending',
-		secretSource: 'credentials',
-		representativeAddress: '',
-		timeoutMs: 60000,
-	};
-	const requestedParameters = [];
-	const node = new Atto();
-	const ctx = {
-		getInputData: () => [{ json: {} }],
-		getCredentials: async () => ({}),
-		getNodeParameter: (name, _itemIndex, fallbackValue) => {
-			requestedParameters.push(name);
-			if (name in params) return params[name];
-			if (fallbackValue !== undefined) return fallbackValue;
-			throw new Error(`Could not get parameter ${name}`);
-		},
-		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
-		continueOnFail: () => false,
-	};
-
-	await assert.rejects(() => node.execute.call(ctx), /valid Atto receivable object/);
-	assert.deepEqual(requestedParameters, [
-		'resource',
-		'operation',
-		'secretSource',
-		'walletSecretType',
-		'walletSecret',
-		'keyIndex',
-		'representativeAddress',
-		'timeoutMs',
-	]);
-});
-
-test('send and receive expose a one minute publish timeout by default', () => {
-	const node = new Atto();
-	const publishTimeout = node.description.properties.find(
-		(property) =>
-			property.name === 'timeoutMs' &&
-			Array.isArray(property.displayOptions?.show?.operation) &&
-			property.displayOptions.show.operation.includes('sendTransaction'),
-	);
-	const streamTimeout = node.description.properties.find(
-		(property) =>
-			property.name === 'timeoutMs' &&
-			Array.isArray(property.displayOptions?.show?.operation) &&
-			property.displayOptions.show.operation.includes('getReceivables'),
-	);
-	const receivableSource = node.description.properties.find((property) => property.name === 'receivableSource');
-	const minAmount = node.description.properties.find((property) => property.name === 'minAmount');
-
-	assert.equal(publishTimeout.default, 60000);
-	assert.deepEqual(publishTimeout.displayOptions.show.operation, ['sendTransaction', 'receivePending']);
-	assert.equal(streamTimeout.default, 5000);
-	assert.deepEqual(streamTimeout.displayOptions.show.operation, ['getReceivables', 'getTransactions', 'getAccountEntries']);
-	assert.equal(receivableSource, undefined);
-	assert.deepEqual(minAmount.displayOptions.show.operation, ['getReceivables']);
-});
-
-test('trigger execution falls back when n8n has not persisted hidden default parameters', async () => {
+test('trigger polling supplies fallbacks for hidden parameters', async () => {
 	const requestedParameters = [];
 	const trigger = new AttoTrigger();
-	const ctx = {
+	const context = {
 		getCredentials: async () => ({ nodeUrl: 'http://localhost' }),
 		getNodeParameter: (name, fallbackValue) => {
 			requestedParameters.push(name);
@@ -217,11 +249,12 @@ test('trigger execution falls back when n8n has not persisted hidden default par
 			throw new Error(`Could not get parameter ${name}`);
 		},
 		getNode: () => ({ name: 'Atto Trigger', type: '@attocash/n8n-nodes-atto.attoTrigger', typeVersion: 1, parameters: {} }),
-		emit: () => {},
-		emitError: () => {},
+		getMode: () => 'manual',
+		getWorkflowStaticData: () => ({}),
+		helpers: {},
 	};
 
-	await assert.rejects(() => trigger.trigger.call(ctx), /Wallet Secret/);
+	await assert.rejects(() => trigger.poll.call(context), /Wallet Secret/);
 	assert.deepEqual(requestedParameters, [
 		'event',
 		'addressSource',
@@ -235,80 +268,11 @@ test('trigger execution falls back when n8n has not persisted hidden default par
 	]);
 });
 
-test('validates required credentials and input fields', async () => {
+test('rejects malformed addresses and mnemonic input', async () => {
+	assert.throws(() => parseAddress('not-an-address', 'Address'), /valid Atto address/);
 	await assert.rejects(
-		() => executeAttoOperation('getAccount', { address: 'not-an-address' }, { nodeUrl: 'http://localhost' }),
-		/valid Atto address/,
+		() => deriveAddressFromSecret({ secretSource: 'node', walletSecretType: 'mnemonic', walletSecret: 'too short', keyIndex: 0 }),
+		/24 words/,
 	);
-
-	await assert.rejects(
-		() => executeAttoOperation('getAccount', { address: '' }, {}),
-		/Node Base URL/,
-	);
-
-	await assert.rejects(
-		() =>
-			executeAttoOperation(
-				'sendTransaction',
-				{
-					destinationAddress: 'not-an-address',
-					amount: '1',
-					amountUnit: 'ATTO',
-				},
-				{},
-			),
-		/Destination Address must be a valid Atto address/,
-	);
-
-	await assert.rejects(
-		() =>
-			executeAttoOperation(
-				'getTransactions',
-				{
-					queryMode: 'hash',
-					hash: 'not-a-hash',
-				},
-				{ nodeUrl: 'http://localhost' },
-			),
-		/Hash must be a valid Atto hash/,
-	);
-
-	await assert.rejects(
-		() => executeAttoOperation('receivePending', { inputItem: undefined }),
-		/Input item must contain a receivable object/,
-	);
-
-	await assert.rejects(
-		() => executeAttoOperation('receivePending', { inputItem: { receivable: { invalid: true } } }),
-		/Input item must contain a valid Atto receivable object/,
-	);
-});
-
-test('validates invalid amounts before connecting to the node', async () => {
-	const mnemonic = AttoMnemonic.generate();
-	const seed = await toSeedAsync(mnemonic);
-	const privateKey = toPrivateKey(seed, toAttoIndex(0));
-	const privateKeyHex = toHex(privateKey.value);
-	const address = await executeAttoOperation('deriveAddress', {
-		secretSource: 'node',
-		walletSecretType: 'privateKey',
-		walletSecret: privateKeyHex,
-	});
-
-	await assert.rejects(
-		() =>
-			executeAttoOperation(
-				'sendTransaction',
-				{
-					secretSource: 'node',
-					walletSecretType: 'privateKey',
-					walletSecret: privateKeyHex,
-					destinationAddress: address.address,
-					amount: '0',
-					amountUnit: 'ATTO',
-				},
-				{ nodeUrl: 'http://127.0.0.1:1', workerUrl: 'http://127.0.0.1:1' },
-			),
-		/positive Atto amount/,
-	);
+	assert.equal(AttoAlgorithm.V1.name, 'V1');
 });

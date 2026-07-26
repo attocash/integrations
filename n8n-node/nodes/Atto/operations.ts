@@ -1,40 +1,36 @@
-/* eslint-disable @n8n/community-nodes/no-restricted-globals */
-/* eslint-disable @n8n/community-nodes/no-restricted-imports */
-/* eslint-disable @n8n/community-nodes/require-node-api-error */
-import { createHash } from 'node:crypto';
 import {
-	AttoAddress,
-	AttoAlgorithm,
-	AttoAmount,
-	AttoHash,
-	AttoMnemonic,
-	AttoPrivateKey,
-	AttoUnit,
-	privateKeyToSigner,
-	toAttoHeight,
-	toAttoIndex,
-	toPrivateKey,
-	toPublicKey,
-	toSeedAsync,
-	type AttoAccount,
-	type AttoAccountEntry,
-	type AttoHeight,
-	type AttoReceivable,
-	type AttoTransaction,
-} from '@attocash/commons-core';
+	NodeApiError,
+	type ICredentialDataDecryptedObject,
+	type IDataObject,
+	type IExecuteFunctions,
+	type IHttpRequestOptions,
+	type IPollFunctions,
+	type JsonObject,
+} from 'n8n-workflow';
 import {
-	AccountHeightSearch,
-	HeightSearch,
-	accountEntryToJson,
-	accountToJson,
-	receivableFromJson,
-	receivableToJson,
-	transactionToJson,
-} from '@attocash/commons-node';
-import { AttoNodeClientAsyncBuilder, type AttoNodeClientAsync } from '@attocash/commons-node-remote';
-import { AttoWalletAsyncBuilder } from '@attocash/commons-wallet';
-import { AttoWorkerAsyncBuilder, type AttoWorkerAsync } from '@attocash/commons-worker-remote';
-import type { ICredentialDataDecryptedObject, IDataObject } from 'n8n-workflow';
+	accountEntryOutput,
+	accountOutput,
+	addressFromPublicKey,
+	amountOutput,
+	blockHash,
+	createChangeBlock,
+	createReceiveBlock,
+	createSendBlock,
+	deriveAddressFromSecret,
+	parseAddress,
+	parseAmount,
+	parseAttoJson,
+	parseHash,
+	receivableOutput,
+	signedTransaction,
+	stringifyAttoJson,
+	transactionOutput,
+	workTarget,
+	type AttoAddress,
+	type AttoBlockModel,
+	type AttoCredentials,
+	type DerivedAddress,
+} from './protocol';
 
 export type AttoOperation =
 	| 'deriveAddress'
@@ -48,53 +44,29 @@ export type AttoOperation =
 	| 'changeRepresentative';
 
 export type AttoTriggerEvent = 'receivable' | 'account' | 'transaction' | 'accountEntry';
-
-type SecretType = 'mnemonic' | 'privateKey';
-type AddressSource = 'credentials' | 'manual' | 'all';
-type StreamQueryMode = 'credentials' | 'manual' | 'all' | 'hash';
-
 export type AttoParameters = Record<string, unknown>;
 export type AttoOperationResult = IDataObject | IDataObject[];
 
+type AttoContext = IExecuteFunctions | IPollFunctions;
+type AddressSource = 'credentials' | 'manual' | 'all';
+type QueryMode = 'credentials' | 'manual' | 'all' | 'hash';
+
+type StreamRequest = {
+	method: 'GET' | 'POST';
+	path: string;
+	body?: IDataObject;
+	maxItems: number;
+	timeoutMs: number;
+};
+
 const DEFAULT_STREAM_TIMEOUT_MS = 5000;
 const DEFAULT_PUBLISH_TIMEOUT_MS = 60000;
-const MAX_WORKER_CLIENT_CACHE_SIZE = 32;
+const POLL_MAX_ITEMS = 100;
+const POLL_TIMEOUT_MS = 2000;
+const MAX_SEEN_POLL_ITEMS = 500;
 
-const workerClientCache = new Map<string, AttoWorkerAsync>();
-
-type AttoCredentials = {
-	nodeUrl?: string;
-	workerUrl?: string;
-	apiKey?: string;
-	authHeaderName?: string;
-	authHeaderPrefix?: string;
-	walletMaterialType?: SecretType;
-	walletSecret?: string;
-	keyIndex?: number | string;
-};
-
-type DerivedAddress = {
-	secretType: SecretType;
-	keyIndex: number;
-	privateKey: AttoPrivateKey;
-	publicKey: ReturnType<typeof toPublicKey>;
-	address: AttoAddress;
-	seed?: Awaited<ReturnType<typeof toSeedAsync>>;
-};
-
-type AttoJob = {
-	cancel?: () => void;
-	close?: () => void;
-};
-
-type StreamStarter<T> = (onItem: (item: T) => void, onCancel: (error?: Error | null) => void) => AttoJob;
-
-export type AttoTriggerSubscription = {
-	close: () => void;
-};
-
-function normalizeCredentials(credentials: ICredentialDataDecryptedObject | undefined): AttoCredentials {
-	return (credentials ?? {}) as AttoCredentials;
+function credentials(value: ICredentialDataDecryptedObject | undefined): AttoCredentials {
+	return (value ?? {}) as AttoCredentials;
 }
 
 function text(value: unknown): string {
@@ -102,838 +74,607 @@ function text(value: unknown): string {
 }
 
 function optionalText(value: unknown): string | undefined {
-	const normalized = text(value);
-	return normalized ? normalized : undefined;
+	const valueText = text(value);
+	return valueText || undefined;
 }
 
-function positiveInteger(value: unknown, fieldName: string): number {
+function nonNegativeInteger(value: unknown, fieldName: string): number {
 	const numberValue = typeof value === 'number' ? value : Number(value);
-
-	if (!Number.isInteger(numberValue) || numberValue < 0) {
-		throw new Error(`${fieldName} must be a non-negative integer`);
-	}
-
+	if (!Number.isSafeInteger(numberValue) || numberValue < 0) throw new Error(`${fieldName} must be a non-negative integer`);
 	return numberValue;
 }
 
-function positiveTimeout(value: unknown, fieldName: string): number {
-	const timeoutMs = positiveInteger(value, fieldName);
-	if (timeoutMs < 1) throw new Error(`${fieldName} must be greater than zero`);
-	return timeoutMs;
+function positiveInteger(value: unknown, fieldName: string): number {
+	const numberValue = nonNegativeInteger(value, fieldName);
+	if (numberValue < 1) throw new Error(`${fieldName} must be greater than zero`);
+	return numberValue;
 }
 
-function parseSecretType(value: unknown, fieldName: string): SecretType {
-	if (value === 'mnemonic' || value === 'privateKey') return value;
-	throw new Error(`${fieldName} must be either mnemonic or privateKey`);
+function positiveHeight(value: unknown, fieldName: string): string | undefined {
+	const valueText = optionalText(value);
+	if (!valueText) return undefined;
+	if (!/^\d+$/.test(valueText) || BigInt(valueText) < 1n) throw new Error(`${fieldName} must be a positive integer`);
+	return valueText;
 }
 
-function secretInput(
-	parameters: AttoParameters,
-	credentials: AttoCredentials,
-): { secretType: SecretType; walletSecret: string; keyIndex: number } {
-	const source = text(parameters.secretSource || 'credentials');
+function simplifyOutput(parameters: AttoParameters): boolean {
+	return parameters.simplify !== false;
+}
 
-	if (source === 'node') {
-		const walletSecret = text(parameters.walletSecret);
-		if (!walletSecret) throw new Error('Wallet Secret is required');
+function requireNodeUrl(value: AttoCredentials): string {
+	const url = text(value.nodeUrl);
+	if (!url) throw new Error('Atto credentials must include a Node Base URL');
+	return url.replace(/\/+$/, '');
+}
 
-		return {
-			secretType: parseSecretType(parameters.walletSecretType ?? 'mnemonic', 'Wallet Secret Type'),
-			walletSecret,
-			keyIndex: positiveInteger(parameters.keyIndex ?? 0, 'Key Index'),
-		};
-	}
+function requireWorkerUrl(value: AttoCredentials): string {
+	const url = text(value.workerUrl);
+	if (!url) throw new Error('Atto credentials must include a Worker Base URL');
+	return url.replace(/\/+$/, '');
+}
 
-	const walletSecret = text(credentials.walletSecret);
-	if (!walletSecret) throw new Error('Atto credentials must include a Wallet Secret');
+function requestHeaders(value: AttoCredentials, accept = 'application/json'): IDataObject {
+	const headers: IDataObject = { Accept: accept };
+	const apiKey = text(value.apiKey);
+	if (!apiKey) return headers;
+	const headerName = text(value.authHeaderName || 'Authorization');
+	if (!headerName) throw new Error('API Key Header is required when API Key is set');
+	const prefix = text(value.authHeaderPrefix);
+	headers[headerName] = prefix ? `${prefix} ${apiKey}` : apiKey;
+	return headers;
+}
 
-	return {
-		secretType: parseSecretType(credentials.walletMaterialType ?? 'mnemonic', 'Credential Wallet Secret Type'),
-		walletSecret,
-		keyIndex: positiveInteger(credentials.keyIndex ?? 0, 'Credential Key Index'),
+function apiError(context: AttoContext, error: unknown, message: string): NodeApiError {
+	const cause = error && typeof error === 'object' ? error : { message: String(error) };
+	return new NodeApiError(context.getNode(), cause as JsonObject, { message });
+}
+
+function responseStatus(response: unknown): number | undefined {
+	if (!response || typeof response !== 'object') return undefined;
+	const value = response as { status?: unknown; statusCode?: unknown };
+	const status = Number(value.statusCode ?? value.status);
+	return Number.isFinite(status) ? status : undefined;
+}
+
+function responseBody(response: unknown): unknown {
+	if (!response || typeof response !== 'object' || !('body' in response)) return response;
+	return (response as { body: unknown }).body;
+}
+
+async function requestText(
+	context: AttoContext,
+	value: AttoCredentials,
+	baseUrl: string,
+	method: 'GET' | 'POST',
+	path: string,
+	options: { body?: IDataObject; timeoutMs?: number; allowNotFound?: boolean } = {},
+): Promise<string | undefined> {
+	const request: IHttpRequestOptions = {
+		url: `${baseUrl}/${path}`,
+		method,
+		headers: {
+			...requestHeaders(value),
+			...(options.body ? { 'Content-Type': 'application/json' } : {}),
+		},
+		encoding: 'text',
+		json: false,
+		timeout: options.timeoutMs ?? 10_000,
+		returnFullResponse: options.allowNotFound,
+		ignoreHttpStatusErrors: options.allowNotFound,
+		...(options.body ? { body: stringifyAttoJson(options.body) } : {}),
 	};
-}
-
-export async function deriveAddressFromSecret(
-	parameters: AttoParameters,
-	credentials?: ICredentialDataDecryptedObject,
-): Promise<DerivedAddress> {
-	const input = secretInput(parameters, normalizeCredentials(credentials));
-	const index = toAttoIndex(input.keyIndex);
-
-	if (input.secretType === 'mnemonic') {
-		const mnemonic = AttoMnemonic.fromPhrase(input.walletSecret);
-		const seed = await toSeedAsync(mnemonic);
-		const privateKey = toPrivateKey(seed, index);
-		const publicKey = toPublicKey(privateKey);
-		const address = new AttoAddress(AttoAlgorithm.V1, publicKey);
-
-		return {
-			secretType: input.secretType,
-			keyIndex: input.keyIndex,
-			privateKey,
-			publicKey,
-			address,
-			seed,
-		};
-	}
-
-	const privateKey = AttoPrivateKey.Companion.parse(input.walletSecret);
-	const publicKey = toPublicKey(privateKey);
-	const address = new AttoAddress(AttoAlgorithm.V1, publicKey);
-
-	return {
-		secretType: input.secretType,
-		keyIndex: input.keyIndex,
-		privateKey,
-		publicKey,
-		address,
-	};
-}
-
-export const deriveAccountFromSecret = deriveAddressFromSecret;
-
-function requireNodeUrl(credentials: AttoCredentials): string {
-	const nodeUrl = text(credentials.nodeUrl);
-	if (!nodeUrl) throw new Error('Atto credentials must include a Node Base URL');
-	return nodeUrl.replace(/\/+$/, '');
-}
-
-function requireWorkerUrl(credentials: AttoCredentials): string {
-	const workerUrl = text(credentials.workerUrl);
-	if (!workerUrl) throw new Error('Atto credentials must include a Worker Base URL');
-	return workerUrl.replace(/\/+$/, '');
-}
-
-function applyHeaders<T extends { header(name: string, value: string): T }>(
-	builder: T,
-	credentials: AttoCredentials,
-): T {
-	const apiKey = text(credentials.apiKey);
-	if (!apiKey) return builder;
-
-	const header = text(credentials.authHeaderName || 'Authorization');
-	if (!header) throw new Error('API Key Header is required when API Key is set');
-
-	const prefix = text(credentials.authHeaderPrefix);
-	return builder.header(header, prefix ? `${prefix} ${apiKey}` : apiKey);
-}
-
-function sha256(value: string): string {
-	return createHash('sha256').update(value).digest('hex');
-}
-
-function workerClientCacheKey(credentials: AttoCredentials): string {
-	const workerUrl = requireWorkerUrl(credentials);
-	const apiKey = text(credentials.apiKey);
-
-	if (!apiKey) {
-		return JSON.stringify({
-			workerUrl,
-			auth: 'none',
-		});
-	}
-
-	const header = text(credentials.authHeaderName || 'Authorization');
-	if (!header) throw new Error('API Key Header is required when API Key is set');
-
-	const prefix = text(credentials.authHeaderPrefix);
-	const headerValue = prefix ? `${prefix} ${apiKey}` : apiKey;
-
-	return JSON.stringify({
-		workerUrl,
-		header,
-		headerValueHash: sha256(headerValue),
-	});
-}
-
-export function createNodeClient(credentials: ICredentialDataDecryptedObject | AttoCredentials | undefined): AttoNodeClientAsync {
-	const attoCredentials = normalizeCredentials(credentials as ICredentialDataDecryptedObject | undefined);
-	return applyHeaders(new AttoNodeClientAsyncBuilder(requireNodeUrl(attoCredentials)), attoCredentials).build();
-}
-
-export function createWorkerClient(credentials: ICredentialDataDecryptedObject | AttoCredentials | undefined): AttoWorkerAsync {
-	const attoCredentials = normalizeCredentials(credentials as ICredentialDataDecryptedObject | undefined);
-	const cacheKey = workerClientCacheKey(attoCredentials);
-	const cachedWorker = workerClientCache.get(cacheKey);
-	if (cachedWorker) return cachedWorker;
-
-	const worker = applyHeaders(new AttoWorkerAsyncBuilder(requireWorkerUrl(attoCredentials)), attoCredentials)
-		.cached(true)
-		.build();
-
-	if (workerClientCache.size >= MAX_WORKER_CLIENT_CACHE_SIZE) {
-		const oldestKey = workerClientCache.keys().next().value;
-		if (typeof oldestKey === 'string') workerClientCache.delete(oldestKey);
-	}
-
-	workerClientCache.set(cacheKey, worker);
-	return worker;
-}
-
-export function clearWorkerClientCache(): void {
-	for (const worker of workerClientCache.values()) {
-		try {
-			(worker as { close?: () => void }).close?.();
-		} catch {
-			// The remote worker close hook is best-effort and currently a no-op in Atto Commons.
-		}
-	}
-
-	workerClientCache.clear();
-}
-
-async function createWalletRuntime(
-	parameters: AttoParameters,
-	credentials: AttoCredentials,
-): Promise<{
-	node: AttoNodeClientAsync;
-	derived: DerivedAddress;
-	wallet: ReturnType<AttoWalletAsyncBuilder['build']>;
-}> {
-	const derived = await deriveAddressFromSecret(parameters, credentials as ICredentialDataDecryptedObject);
-	const node = createNodeClient(credentials);
-	const worker = createWorkerClient(credentials);
-
-	const builder = new AttoWalletAsyncBuilder(node as never, worker as never);
-	if (derived.seed) {
-		builder.signerProviderSeed(derived.seed as never);
-	} else {
-		builder.signerProviderFunction({
-			get: async () => privateKeyToSigner(derived.privateKey) as never,
-		} as never);
-	}
-
-	const wallet = builder.build();
-	await wallet.openAccount(toAttoIndex(derived.keyIndex) as never);
-
-	return { node, derived, wallet };
-}
-
-function parseAddress(value: unknown, fieldName: string): AttoAddress {
-	const raw = text(value);
-	if (!raw) throw new Error(`${fieldName} is required`);
 
 	try {
-		return AttoAddress.parse(raw);
-	} catch {
-		throw new Error(`${fieldName} must be a valid Atto address`);
+		const response = await context.helpers.httpRequest(request);
+		if (options.allowNotFound && responseStatus(response) === 404) return undefined;
+		const status = responseStatus(response);
+		if (status !== undefined && status >= 400) throw new Error(`Atto API returned HTTP ${status}`);
+		const body = responseBody(response);
+		return typeof body === 'string' ? body : JSON.stringify(body);
+	} catch (error) {
+		throw apiError(context, error, `Atto API request failed: ${method} /${path}`);
 	}
 }
 
-function parseOptionalAddress(value: unknown, fieldName: string): AttoAddress | undefined {
-	const raw = optionalText(value);
-	return raw ? parseAddress(raw, fieldName) : undefined;
+async function requestJson(
+	context: AttoContext,
+	value: AttoCredentials,
+	baseUrl: string,
+	method: 'GET' | 'POST',
+	path: string,
+	options: { body?: IDataObject; timeoutMs?: number; allowNotFound?: boolean } = {},
+): Promise<unknown | undefined> {
+	const body = await requestText(context, value, baseUrl, method, path, options);
+	if (body === undefined || !body.trim()) return undefined;
+	try {
+		return parseAttoJson(body);
+	} catch (error) {
+		throw apiError(context, error, `Atto API returned invalid JSON for ${method} /${path}`);
+	}
 }
 
-function parseAddressList(value: unknown, fieldName: string): AttoAddress[] {
-	const raw =
-		typeof value === 'string'
-			? value
-			: Array.isArray(value)
-				? value.join('\n')
-				: '';
-	const addresses = raw
-		.split(/[\n,]+/)
-		.map((address) => address.trim())
-		.filter(Boolean)
-		.map((address) => parseAddress(address, fieldName));
-
-	if (addresses.length === 0) throw new Error(`${fieldName} is required`);
-	return addresses;
+function streamChunk(value: unknown): string {
+	if (typeof value === 'string') return value;
+	if (Buffer.isBuffer(value)) return value.toString('utf8');
+	if (value instanceof Uint8Array) return Buffer.from(value).toString('utf8');
+	return String(value);
 }
 
-function parseAddressSource(value: unknown, allowAll: boolean): AddressSource {
+function isExpectedStreamEnd(error: unknown): boolean {
+	if (!error || typeof error !== 'object') return false;
+	const value = error as { code?: unknown; message?: unknown; name?: unknown };
+	const message = String(value.message ?? '').toLowerCase();
+	return (
+		value.code === 'ECONNABORTED' ||
+		value.name === 'AbortError' ||
+		message.includes('aborted') ||
+		message.includes('timeout') ||
+		message.includes('timed out')
+	);
+}
+
+async function requestStream(
+	context: AttoContext,
+	value: AttoCredentials,
+	request: StreamRequest,
+): Promise<IDataObject[]> {
+	const controller = new AbortController();
+	const options: IHttpRequestOptions = {
+		url: `${requireNodeUrl(value)}/${request.path}`,
+		method: request.method,
+		headers: {
+			...requestHeaders(value, 'application/x-ndjson'),
+			...(request.body ? { 'Content-Type': 'application/json' } : {}),
+		},
+		encoding: 'stream',
+		json: false,
+		timeout: request.timeoutMs,
+		abortSignal: controller.signal,
+		...(request.body ? { body: stringifyAttoJson(request.body) } : {}),
+	};
+	const items: IDataObject[] = [];
+	let pending = '';
+
+	try {
+		const response = await context.helpers.httpRequest(options);
+		if (!response || typeof response !== 'object' || !(Symbol.asyncIterator in response)) {
+			throw new Error('Atto stream response is not readable');
+		}
+		for await (const chunk of response as AsyncIterable<unknown>) {
+			pending += streamChunk(chunk);
+			const lines = pending.split('\n');
+			pending = lines.pop() ?? '';
+			for (const line of lines) {
+				if (!line.trim()) continue;
+				const parsed = parseAttoJson(line) as IDataObject;
+				items.push(parsed);
+				if (items.length >= request.maxItems) {
+					controller.abort();
+					return items;
+				}
+			}
+		}
+		if (pending.trim() && items.length < request.maxItems) items.push(parseAttoJson(pending) as IDataObject);
+		return items;
+	} catch (error) {
+		if (controller.signal.aborted || isExpectedStreamEnd(error)) return items;
+		throw apiError(context, error, `Atto API stream failed: ${request.method} /${request.path}`);
+	}
+}
+
+function contextRequired(context: AttoContext | undefined): AttoContext {
+	if (!context) throw new Error('This Atto operation requires an n8n execution context');
+	return context;
+}
+
+function addressSource(value: unknown, allowAll: boolean): AddressSource {
 	const source = text(value || 'credentials');
 	if (source === 'credentials' || source === 'manual') return source;
 	if (allowAll && source === 'all') return source;
 	throw new Error('Address Source must be credentials, manual, or all');
 }
 
-function parseQueryMode(value: unknown): StreamQueryMode {
+function queryMode(value: unknown): QueryMode {
 	const mode = text(value || 'credentials');
 	if (mode === 'credentials' || mode === 'manual' || mode === 'all' || mode === 'hash') return mode;
 	throw new Error('Query Mode must be credentials, manual, all, or hash');
 }
 
-async function addressesFromSource(
+function parseAddresses(value: unknown, fieldName: string): AttoAddress[] {
+	const source = typeof value === 'string' ? value : Array.isArray(value) ? value.join('\n') : '';
+	const result = source
+		.split(/[\n,]+/)
+		.map((address) => address.trim())
+		.filter(Boolean)
+		.map((address) => parseAddress(address, fieldName));
+	if (result.length === 0) throw new Error(`${fieldName} is required`);
+	return result;
+}
+
+async function derivedAddress(value: AttoCredentials): Promise<AttoAddress> {
+	return await deriveAddressFromSecret({ secretSource: 'credentials' }, value);
+}
+
+async function addressesForSource(
 	parameters: AttoParameters,
-	credentials: AttoCredentials,
+	value: AttoCredentials,
 	allowAll = false,
 ): Promise<AttoAddress[] | undefined> {
-	const source = parseAddressSource(parameters.addressSource, allowAll);
+	const source = addressSource(parameters.addressSource, allowAll);
 	if (source === 'all') return undefined;
-	if (source === 'manual') return parseAddressList(parameters.addresses ?? parameters.address, 'Address');
-
-	const derived = await deriveAddressFromSecret({ secretSource: 'credentials' }, credentials as ICredentialDataDecryptedObject);
-	return [derived.address];
+	if (source === 'manual') return parseAddresses(parameters.addresses ?? parameters.address, 'Address');
+	return [await derivedAddress(value)];
 }
 
-async function addressForCredentials(credentials: AttoCredentials): Promise<AttoAddress> {
-	const derived = await deriveAddressFromSecret({ secretSource: 'credentials' }, credentials as ICredentialDataDecryptedObject);
-	return derived.address;
+async function addressesForQuery(
+	parameters: AttoParameters,
+	value: AttoCredentials,
+): Promise<AttoAddress[] | undefined> {
+	const mode = queryMode(parameters.queryMode);
+	if (mode === 'all' || mode === 'hash') return undefined;
+	return mode === 'manual'
+		? parseAddresses(parameters.addresses ?? parameters.address, 'Address')
+		: [await derivedAddress(value)];
 }
 
-function parseAmount(amount: unknown, unit: unknown, fieldName: string): AttoAmount {
-	const raw = text(amount);
-	if (!raw) throw new Error(`${fieldName} is required`);
-
-	try {
-		const amountValue =
-			text(unit).toUpperCase() === 'RAW'
-				? AttoAmount.from(AttoUnit.RAW, raw)
-				: AttoAmount.from(AttoUnit.ATTO, raw);
-
-		if (amountValue.toString() === '0') {
-			throw new Error('zero');
-		}
-
-		return amountValue;
-	} catch {
-		throw new Error(`${fieldName} must be a positive Atto amount`);
-	}
-}
-
-function parseOptionalAmount(amount: unknown, unit: unknown, fieldName: string): AttoAmount | undefined {
-	const raw = optionalText(amount);
-	return raw ? parseAmount(raw, unit, fieldName) : undefined;
-}
-
-function parseHash(value: unknown, fieldName: string): AttoHash {
-	const raw = text(value);
-	if (!raw) throw new Error(`${fieldName} is required`);
-
-	try {
-		return AttoHash.Companion.parse(raw);
-	} catch {
-		throw new Error(`${fieldName} must be a valid Atto hash`);
-	}
-}
-
-function parseOptionalHeight(value: unknown, fieldName: string): AttoHeight | undefined {
-	const raw = optionalText(value);
-	if (!raw) return undefined;
-
-	try {
-		return toAttoHeight(raw);
-	} catch {
-		throw new Error(`${fieldName} must be a valid Atto height`);
-	}
-}
-
-function parseRequiredHeight(value: unknown, fieldName: string): AttoHeight {
-	return parseOptionalHeight(value, fieldName) ?? toAttoHeight('1');
-}
-
-function assertSameAddress(expected: AttoAddress, actual: AttoAddress, fieldName: string) {
-	if (!expected.equals(actual)) {
-		throw new Error(`${fieldName} must match the address derived from the wallet secret`);
-	}
-}
-
-function assertOptionalSameAddress(expected: AttoAddress, actual: AttoAddress | undefined, fieldName: string) {
-	if (actual) assertSameAddress(expected, actual, fieldName);
-}
-
-function parseJsonObject(value: string): IDataObject {
-	return JSON.parse(value) as IDataObject;
-}
-
-function amountOutput(amount: AttoAmount): IDataObject {
+function streamLimits(parameters: AttoParameters): { maxItems: number; timeoutMs: number } {
 	return {
-		raw: amount.toString(),
-		atto: amount.toFormattedString(AttoUnit.ATTO),
+		maxItems: positiveInteger(parameters.maxItems ?? 25, 'Max Items'),
+		timeoutMs: positiveInteger(parameters.timeoutMs ?? DEFAULT_STREAM_TIMEOUT_MS, 'Timeout'),
 	};
 }
 
-function accountOutput(account: AttoAccount): IDataObject {
+function heightQuery(parameters: AttoParameters): string {
+	const fromHeight = positiveHeight(parameters.fromHeight, 'From Height') ?? '1';
+	const toHeight = positiveHeight(parameters.toHeight, 'To Height');
+	return `fromHeight=${encodeURIComponent(fromHeight)}${toHeight ? `&toHeight=${encodeURIComponent(toHeight)}` : ''}`;
+}
+
+function heightSearch(addresses: AttoAddress[], parameters: AttoParameters): IDataObject {
+	const fromHeight = positiveHeight(parameters.fromHeight, 'From Height') ?? '1';
+	const toHeight = positiveHeight(parameters.toHeight, 'To Height');
 	return {
-		found: true,
-		address: account.address.value,
-		publicKey: account.publicKey.toString(),
-		balance: amountOutput(account.balance),
-		representativeAddress: account.representativeAddress.value,
-		height: account.height.toString(),
-		frontier: account.lastTransactionHash.toString(),
-		account: parseJsonObject(accountToJson(account as never)),
+		search: addresses.map((address) => ({
+			address: address.value,
+			fromHeight,
+			...(toHeight ? { toHeight } : {}),
+		})),
 	};
 }
 
-function receivableOutput(receivable: AttoReceivable): IDataObject {
+async function receivableStreamRequest(
+	parameters: AttoParameters,
+	value: AttoCredentials,
+	maxItems?: number,
+	timeoutMs?: number,
+): Promise<StreamRequest> {
+	const addresses = (await addressesForSource(parameters, value)) ?? [];
+	const minimum = optionalText(parameters.minAmount)
+		? parseAmount(parameters.minAmount, parameters.minAmountUnit ?? 'RAW', 'Minimum Amount').toString()
+		: '0';
+	const limits = streamLimits(parameters);
 	return {
-		hash: receivable.hash.toString(),
-		address: receivable.receiverAddress.value,
-		fromAddress: receivable.address.value,
-		amount: amountOutput(receivable.amount),
-		receivable: parseJsonObject(receivableToJson(receivable as never)),
+		method: 'POST',
+		path: `accounts/receivables/stream?minAmount=${minimum}`,
+		body: { addresses: addresses.map((address) => address.value) },
+		maxItems: maxItems ?? limits.maxItems,
+		timeoutMs: timeoutMs ?? limits.timeoutMs,
 	};
 }
 
-function transactionOutput(transaction: AttoTransaction, status?: string): IDataObject {
-	return {
-		...(status ? { status } : {}),
-		hash: transaction.hash.toString(),
-		address: transaction.address.value,
-		height: transaction.height.toString(),
-		transaction: parseJsonObject(transactionToJson(transaction as never)),
-	};
-}
-
-function accountEntryOutput(accountEntry: AttoAccountEntry): IDataObject {
-	return {
-		hash: accountEntry.hash.toString(),
-		address: accountEntry.address.value,
-		subjectAddress: accountEntry.subjectAddress.value,
-		height: accountEntry.height.toString(),
-		blockType: accountEntry.blockType.name,
-		previousBalance: amountOutput(accountEntry.previousBalance),
-		balance: amountOutput(accountEntry.balance),
-		accountEntry: parseJsonObject(accountEntryToJson(accountEntry as never)),
-	};
-}
-
-function streamOptions(parameters: AttoParameters): { maxItems: number; timeoutMs: number } {
-	return {
-		maxItems: positiveInteger(parameters.maxItems ?? 25, 'Max Items') || 1,
-		timeoutMs: positiveTimeout(parameters.timeoutMs ?? DEFAULT_STREAM_TIMEOUT_MS, 'Timeout'),
-	};
-}
-
-function cancelJob(job: AttoJob | undefined) {
-	try {
-		job?.cancel?.();
-		job?.close?.();
-	} catch {
-		// Stream cleanup is best effort after collection completes.
-	}
-}
-
-function errorFromUnknown(error: unknown, fallback: string): Error {
-	if (!error) return new Error(fallback);
-	if (error instanceof Error) return error;
-	return new Error(String(error));
-}
-
-async function collectStream<T>(start: StreamStarter<T>, options: { maxItems: number; timeoutMs: number }): Promise<T[]> {
-	return await new Promise((resolve, reject) => {
-		const items: T[] = [];
-		let settled = false;
-		const state: { job?: AttoJob } = {};
-
-		const finish = (error?: Error | null) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			cancelJob(state.job);
-
-			if (error) {
-				reject(error);
-				return;
-			}
-
-			resolve(items);
+async function transactionStreamRequest(
+	parameters: AttoParameters,
+	value: AttoCredentials,
+	maxItems?: number,
+	timeoutMs?: number,
+): Promise<StreamRequest> {
+	const mode = queryMode(parameters.queryMode);
+	const limits = streamLimits(parameters);
+	if (mode === 'hash') {
+		return {
+			method: 'GET',
+			path: `transactions/${parseHash(parameters.hash, 'Hash')}/stream`,
+			maxItems: maxItems ?? 1,
+			timeoutMs: timeoutMs ?? limits.timeoutMs,
 		};
-
-		const timer = setTimeout(() => finish(), options.timeoutMs);
-
-		state.job = start(
-			(item) => {
-				if (settled) return;
-				items.push(item);
-				if (items.length >= options.maxItems) finish();
-			},
-			(error) => {
-				if (settled) return;
-				finish(error ? errorFromUnknown(error, 'Atto stream stopped') : undefined);
-			},
-		);
-	});
+	}
+	const addresses = await addressesForQuery(parameters, value);
+	if (!addresses) {
+		return { method: 'GET', path: 'transactions/stream', maxItems: maxItems ?? limits.maxItems, timeoutMs: timeoutMs ?? limits.timeoutMs };
+	}
+	if (addresses.length === 1) {
+		return {
+			method: 'GET',
+			path: `accounts/${addresses[0].publicKey}/transactions/stream?${heightQuery(parameters)}`,
+			maxItems: maxItems ?? limits.maxItems,
+			timeoutMs: timeoutMs ?? limits.timeoutMs,
+		};
+	}
+	return {
+		method: 'POST',
+		path: 'accounts/transactions/stream',
+		body: heightSearch(addresses, parameters),
+		maxItems: maxItems ?? limits.maxItems,
+		timeoutMs: timeoutMs ?? limits.timeoutMs,
+	};
 }
 
-function inputItem(parameters: AttoParameters): IDataObject {
+async function accountEntryStreamRequest(
+	parameters: AttoParameters,
+	value: AttoCredentials,
+	maxItems?: number,
+	timeoutMs?: number,
+): Promise<StreamRequest> {
+	const mode = queryMode(parameters.queryMode);
+	const limits = streamLimits(parameters);
+	if (mode === 'hash') {
+		return {
+			method: 'GET',
+			path: `accounts/entries/${parseHash(parameters.hash, 'Hash')}/stream`,
+			maxItems: maxItems ?? 1,
+			timeoutMs: timeoutMs ?? limits.timeoutMs,
+		};
+	}
+	const addresses = await addressesForQuery(parameters, value);
+	if (!addresses) {
+		return { method: 'GET', path: 'accounts/entries/stream', maxItems: maxItems ?? limits.maxItems, timeoutMs: timeoutMs ?? limits.timeoutMs };
+	}
+	if (addresses.length === 1) {
+		return {
+			method: 'GET',
+			path: `accounts/${addresses[0].publicKey}/entries/stream?${heightQuery(parameters)}`,
+			maxItems: maxItems ?? limits.maxItems,
+			timeoutMs: timeoutMs ?? limits.timeoutMs,
+		};
+	}
+	return {
+		method: 'POST',
+		path: 'accounts/entries/stream',
+		body: heightSearch(addresses, parameters),
+		maxItems: maxItems ?? limits.maxItems,
+		timeoutMs: timeoutMs ?? limits.timeoutMs,
+	};
+}
+
+async function accountByAddress(
+	context: AttoContext,
+	value: AttoCredentials,
+	address: AttoAddress,
+): Promise<IDataObject | undefined> {
+	return (await requestJson(context, value, requireNodeUrl(value), 'GET', `accounts/${address.publicKey}`, {
+		allowNotFound: true,
+		timeoutMs: 3000,
+	})) as IDataObject | undefined;
+}
+
+async function nodeTimestamp(context: AttoContext, value: AttoCredentials): Promise<number> {
+	const localTimestamp = Date.now();
+	const response = (await requestJson(
+		context,
+		value,
+		requireNodeUrl(value),
+		'GET',
+		`instants/${encodeURIComponent(new Date(localTimestamp).toISOString())}`,
+	)) as IDataObject | undefined;
+	const difference = Number(response?.differenceMillis ?? 0);
+	if (!Number.isSafeInteger(difference)) throw new Error('Atto node returned an invalid clock difference');
+	return Date.now() + difference;
+}
+
+async function workForBlock(
+	context: AttoContext,
+	value: AttoCredentials,
+	block: AttoBlockModel,
+	timeoutMs: number,
+): Promise<string> {
+	const response = (await requestJson(context, value, requireWorkerUrl(value), 'POST', 'works', {
+		body: {
+			network: block.network.name,
+			timestamp: Number(block.timestamp.toEpochMilliseconds()),
+			target: workTarget(block),
+		},
+		timeoutMs,
+	})) as IDataObject | undefined;
+	const work = text(response?.work);
+	if (!work) throw new Error('Atto worker response is missing work');
+	return work;
+}
+
+async function publishBlock(
+	context: AttoContext,
+	value: AttoCredentials,
+	block: AttoBlockModel,
+	signer: DerivedAddress['signer'],
+	timeoutMs: number,
+): Promise<IDataObject> {
+	const transaction = await signedTransaction(
+		block,
+		signer,
+		await workForBlock(context, value, block, timeoutMs),
+	);
+	const accepted = await requestStream(context, value, {
+		method: 'POST',
+		path: 'transactions/stream',
+		body: transaction.raw,
+		maxItems: 1,
+		timeoutMs,
+	});
+	if (accepted.length === 0) throw new Error('Atto node did not acknowledge the transaction before timeout');
+	if (blockHash((accepted[0].block ?? {}) as IDataObject) !== transaction.model.hash.toString()) {
+		throw new Error('Atto node acknowledged a different transaction');
+	}
+	return transaction.raw;
+}
+
+async function receivableFromInput(
+	context: AttoContext,
+	value: AttoCredentials,
+	parameters: AttoParameters,
+): Promise<IDataObject> {
 	const item = parameters.inputItem;
 	if (!item || typeof item !== 'object' || Array.isArray(item)) {
-		throw new Error('Input item must contain a receivable object from Atto Trigger or Get Receivables');
+		throw new Error('Input item must contain a receivable from Atto Trigger or Get Receivables');
 	}
+	const input = item as IDataObject;
+	const nested = input.receivable;
+	if (nested && typeof nested === 'object' && !Array.isArray(nested)) return nested as IDataObject;
+	if (input.network && input.receiverPublicKey && input.amount) return input;
 
-	return item as IDataObject;
-}
-
-function parseInputReceivable(parameters: AttoParameters): AttoReceivable {
-	const item = inputItem(parameters);
-	const value = item.receivable ?? item;
-	const json = typeof value === 'string' ? value : JSON.stringify(value);
-
-	try {
-		return receivableFromJson(json) as never;
-	} catch {
-		throw new Error('Input item must contain a valid Atto receivable object');
-	}
-}
-
-async function withTimeout<T>(promise: Promise<T>, timeoutMs: number, operationName: string): Promise<T> {
-	let timer: ReturnType<typeof setTimeout> | undefined;
-
-	try {
-		return await Promise.race([
-			promise,
-			new Promise<never>((_resolve, reject) => {
-				timer = setTimeout(() => reject(new Error(`${operationName} timed out after ${timeoutMs}ms`)), timeoutMs);
-			}),
-		]);
-	} finally {
-		if (timer) clearTimeout(timer);
-	}
-}
-
-function heightSearch(addresses: AttoAddress[], parameters: AttoParameters): HeightSearch {
-	const fromHeight = parseRequiredHeight(parameters.fromHeight, 'From Height');
-	const toHeight = parseOptionalHeight(parameters.toHeight, 'To Height');
-	const searches = addresses.map(
-		(address) => new AccountHeightSearch(address as never, fromHeight as never, toHeight as never),
-	);
-
-	return HeightSearch.Companion.fromArray(searches as never);
-}
-
-async function collectReceivables(
-	node: AttoNodeClientAsync,
-	parameters: AttoParameters,
-	credentials: AttoCredentials,
-): Promise<IDataObject[]> {
-	const addresses = await addressesFromSource(parameters, credentials);
-	const minAmount = parseOptionalAmount(parameters.minAmount, parameters.minAmountUnit ?? 'RAW', 'Minimum Amount');
-	const options = streamOptions(parameters);
-	const receivables = await collectStream<AttoReceivable>(
-		(onItem, onCancel) =>
-			node.onReceivableByAddresses(addresses as never, minAmount as never, onItem as never, onCancel as never) as AttoJob,
-		options,
-	);
-
-	return receivables.map(receivableOutput);
-}
-
-async function collectTransactionsForMode(
-	node: AttoNodeClientAsync,
-	parameters: AttoParameters,
-	credentials: AttoCredentials,
-): Promise<IDataObject[]> {
-	const mode = parseQueryMode(parameters.queryMode);
-
-	if (mode === 'hash') {
-		const transaction = await node.transaction(parseHash(parameters.hash, 'Hash') as never);
-		return [transactionOutput(transaction as never)];
-	}
-
-	const addresses = mode === 'credentials' ? [await addressForCredentials(credentials)] : mode === 'manual' ? parseAddressList(parameters.addresses ?? parameters.address, 'Address') : undefined;
-	const fromHeight = parseOptionalHeight(parameters.fromHeight, 'From Height');
-	const toHeight = parseOptionalHeight(parameters.toHeight, 'To Height');
-	const options = streamOptions(parameters);
-	const transactions = await collectStream<AttoTransaction>(
-		(onItem, onCancel) =>
-			subscribeToTransactionAddresses(node, addresses, fromHeight, toHeight, parameters, onItem, onCancel),
-		options,
-	);
-
-	return transactions.map((transaction) => transactionOutput(transaction));
-}
-
-async function collectAccountEntries(
-	node: AttoNodeClientAsync,
-	parameters: AttoParameters,
-	credentials: AttoCredentials,
-): Promise<IDataObject[]> {
-	const mode = parseQueryMode(parameters.queryMode);
-
-	if (mode === 'hash') {
-		const accountEntry = await node.accountEntry(parseHash(parameters.hash, 'Hash') as never);
-		return [accountEntryOutput(accountEntry as never)];
-	}
-
-	const addresses = mode === 'credentials' ? [await addressForCredentials(credentials)] : mode === 'manual' ? parseAddressList(parameters.addresses ?? parameters.address, 'Address') : undefined;
-	const fromHeight = parseOptionalHeight(parameters.fromHeight, 'From Height');
-	const toHeight = parseOptionalHeight(parameters.toHeight, 'To Height');
-	const options = streamOptions(parameters);
-	const accountEntries = await collectStream<AttoAccountEntry>(
-		(onItem, onCancel) =>
-			subscribeToAccountEntryAddresses(node, addresses, fromHeight, toHeight, parameters, onItem, onCancel),
-		options,
-	);
-
-	return accountEntries.map((accountEntry) => accountEntryOutput(accountEntry));
-}
-
-function subscribeToTransactionAddresses(
-	node: AttoNodeClientAsync,
-	addresses: AttoAddress[] | undefined,
-	fromHeight: AttoHeight | undefined,
-	toHeight: AttoHeight | undefined,
-	parameters: AttoParameters,
-	onItem: (item: AttoTransaction) => void,
-	onCancel: (error?: Error | null) => void,
-): AttoJob {
-	if (!addresses) return node.onTransactionAll(onItem as never, onCancel as never) as AttoJob;
-	if (addresses.length === 1) {
-		return node.onTransactionByPublicKey(
-			addresses[0].publicKey as never,
-			fromHeight as never,
-			toHeight as never,
-			onItem as never,
-			onCancel as never,
-		) as AttoJob;
-	}
-
-	return node.onTransactionByHeightSearch(
-		heightSearch(addresses, parameters) as never,
-		onItem as never,
-		onCancel as never,
-	) as AttoJob;
-}
-
-function subscribeToAccountEntryAddresses(
-	node: AttoNodeClientAsync,
-	addresses: AttoAddress[] | undefined,
-	fromHeight: AttoHeight | undefined,
-	toHeight: AttoHeight | undefined,
-	parameters: AttoParameters,
-	onItem: (item: AttoAccountEntry) => void,
-	onCancel: (error?: Error | null) => void,
-): AttoJob {
-	if (!addresses) return node.onAccountEntryAll(onItem as never, onCancel as never) as AttoJob;
-	if (addresses.length === 1) {
-		return node.onAccountEntryByPublicKey(
-			addresses[0].publicKey as never,
-			fromHeight as never,
-			toHeight as never,
-			onItem as never,
-			onCancel as never,
-		) as AttoJob;
-	}
-
-	return node.onAccountEntryByHeightSearch(
-		heightSearch(addresses, parameters) as never,
-		onItem as never,
-		onCancel as never,
-	) as AttoJob;
+	const hash = parseHash(input.hash, 'Input receivable hash');
+	const transaction = (await requestJson(context, value, requireNodeUrl(value), 'GET', `transactions/${hash}`)) as IDataObject;
+	const block = transaction.block as IDataObject | undefined;
+	if (!block || block.type !== 'SEND') throw new Error('Input receivable hash does not identify an Atto send transaction');
+	return {
+		network: block.network,
+		hash,
+		version: block.version,
+		algorithm: block.algorithm,
+		publicKey: block.publicKey,
+		timestamp: block.timestamp,
+		receiverAlgorithm: block.receiverAlgorithm,
+		receiverPublicKey: block.receiverPublicKey,
+		amount: block.amount,
+	};
 }
 
 export async function executeAttoOperation(
+	context: AttoContext | undefined,
 	operation: AttoOperation,
 	parameters: AttoParameters,
-	credentials?: ICredentialDataDecryptedObject,
+	credentialData?: ICredentialDataDecryptedObject,
 ): Promise<AttoOperationResult> {
-	const attoCredentials = normalizeCredentials(credentials);
+	const value = credentials(credentialData);
+	const simplify = simplifyOutput(parameters);
 
 	if (operation === 'deriveAddress' || operation === 'deriveAccount') {
-		const derived = await deriveAddressFromSecret(parameters, credentials);
-		return {
-			address: derived.address.value,
-			publicKey: derived.publicKey.toString(),
-			keyIndex: derived.keyIndex,
-			secretType: derived.secretType,
-		};
+		const derived = await deriveAddressFromSecret(parameters, value);
+		return { address: derived.value, publicKey: derived.publicKey, keyIndex: derived.keyIndex, secretType: derived.secretType };
 	}
 
+	const execution = contextRequired(context);
 	if (operation === 'getAccount') {
-		const node = createNodeClient(attoCredentials);
 		const address = parseAddress(parameters.address ?? parameters.lookupAddress, 'Address');
-		const account = await node.accountByPublicKey(address.publicKey as never);
-
-		if (!account) {
-			return {
-				found: false,
-				address: address.value,
-			};
-		}
-
-		return accountOutput(account as never);
+		const account = await accountByAddress(execution, value, address);
+		return account ? accountOutput(account, simplify) : { found: false, address: address.value };
 	}
-
 	if (operation === 'getReceivables') {
-		const node = createNodeClient(attoCredentials);
-		return await collectReceivables(node, parameters, attoCredentials);
+		return (await requestStream(execution, value, await receivableStreamRequest(parameters, value))).map((item) => receivableOutput(item, simplify));
 	}
-
 	if (operation === 'getTransactions') {
-		const node = createNodeClient(attoCredentials);
-		return await collectTransactionsForMode(node, parameters, attoCredentials);
+		if (queryMode(parameters.queryMode) === 'hash') {
+			const hash = parseHash(parameters.hash, 'Hash');
+			const transaction = (await requestJson(execution, value, requireNodeUrl(value), 'GET', `transactions/${hash}`)) as IDataObject;
+			return [transactionOutput(transaction, simplify)];
+		}
+		return (await requestStream(execution, value, await transactionStreamRequest(parameters, value))).map((item) => transactionOutput(item, simplify));
+	}
+	if (operation === 'getAccountEntries') {
+		return (await requestStream(execution, value, await accountEntryStreamRequest(parameters, value))).map((item) => accountEntryOutput(item, simplify));
 	}
 
-	if (operation === 'getAccountEntries') {
-		const node = createNodeClient(attoCredentials);
-		return await collectAccountEntries(node, parameters, attoCredentials);
-	}
+	const derived = await deriveAddressFromSecret(parameters, value);
+	const account = await accountByAddress(execution, value, derived);
+	const timestamp = await nodeTimestamp(execution, value);
+	const timeoutMs = positiveInteger(parameters.timeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS, 'Timeout');
 
 	if (operation === 'sendTransaction') {
-		const destinationAddress = parseAddress(parameters.destinationAddress, 'Destination Address');
+		if (!account) throw new Error('The wallet account is not open yet');
+		const destination = parseAddress(parameters.destinationAddress, 'Destination Address');
 		const amount = parseAmount(parameters.amount, parameters.amountUnit, 'Amount');
-		const timeoutMs = positiveTimeout(parameters.timeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS, 'Timeout');
-		const runtime = await createWalletRuntime(parameters, attoCredentials);
-		assertOptionalSameAddress(runtime.derived.address, parseOptionalAddress(parameters.fromAddress, 'From Address'), 'From Address');
-		const transaction = await withTimeout(
-			Promise.resolve(
-				runtime.wallet.sendByAddress(
-					runtime.derived.address as never,
-					destinationAddress as never,
-					amount as never,
-					null,
-				),
-			),
-			timeoutMs,
-			'Send transaction',
-		);
-
+		const block = createSendBlock(account, destination, amount, timestamp);
+		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
 		return {
-			...transactionOutput(transaction as never, 'published'),
-			fromAddress: runtime.derived.address.value,
-			destinationAddress: destinationAddress.value,
+			...transactionOutput(transaction, true, 'published'),
+			fromAddress: derived.value,
+			destinationAddress: destination.value,
 			amount: amountOutput(amount),
 		};
 	}
-
 	if (operation === 'receivePending') {
-		const timeoutMs = positiveTimeout(parameters.timeoutMs ?? DEFAULT_PUBLISH_TIMEOUT_MS, 'Timeout');
-		const receivable = parseInputReceivable(parameters);
-		const requestedRepresentative = parseOptionalAddress(
-			parameters.receiveRepresentativeAddress ?? parameters.representativeAddress,
-			'Representative Address',
-		);
-		const runtime = await createWalletRuntime(parameters, attoCredentials);
-		assertOptionalSameAddress(runtime.derived.address, parseOptionalAddress(parameters.receiveAddress, 'Address'), 'Address');
-		assertSameAddress(runtime.derived.address, receivable.receiverAddress, 'Receivable Address');
-
-		const representative = requestedRepresentative ?? runtime.derived.address;
-		const transaction = await withTimeout(
-			Promise.resolve(runtime.wallet.receive(receivable as never, representative as never, null)),
-			timeoutMs,
-			'Receive transaction',
-		);
-
+		const receivable = await receivableFromInput(execution, value, parameters);
+		const receiver = addressFromPublicKey(text(receivable.receiverPublicKey));
+		if (receiver.value !== derived.value) throw new Error('Receivable Address must match the address derived from the wallet secret');
+		const representative = optionalText(parameters.representativeAddress)
+			? parseAddress(parameters.representativeAddress, 'Representative Address')
+			: derived;
+		const block = createReceiveBlock(account, receivable, representative, timestamp);
+		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
 		return {
-			...transactionOutput(transaction as never, 'received'),
-			address: runtime.derived.address.value,
+			...transactionOutput(transaction, true, 'received'),
+			address: derived.value,
 			representativeAddress: representative.value,
 			amount: amountOutput(receivable.amount),
-			receivable: parseJsonObject(receivableToJson(receivable as never)),
 		};
 	}
-
 	if (operation === 'changeRepresentative') {
-		const representativeAddress = parseAddress(parameters.representativeAddress, 'Representative Address');
-		const runtime = await createWalletRuntime(parameters, attoCredentials);
-		assertOptionalSameAddress(runtime.derived.address, parseOptionalAddress(parameters.changeAddress, 'Address'), 'Address');
-		const transaction = await runtime.wallet.change(
-			toAttoIndex(runtime.derived.keyIndex) as never,
-			representativeAddress as never,
-			null,
-		);
-
+		if (!account) throw new Error('The wallet account is not open yet');
+		const representative = parseAddress(parameters.representativeAddress, 'Representative Address');
+		const block = createChangeBlock(account, representative, timestamp);
+		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
 		return {
-			...transactionOutput(transaction as never, 'representative_changed'),
-			address: runtime.derived.address.value,
-			representativeAddress: representativeAddress.value,
+			...transactionOutput(transaction, true, 'representative_changed'),
+			address: derived.value,
+			representativeAddress: representative.value,
 		};
 	}
 
 	throw new Error(`Unsupported Atto operation: ${operation}`);
 }
 
-export async function createAttoTriggerSubscription(
+async function pollAccounts(context: IPollFunctions, parameters: AttoParameters, value: AttoCredentials): Promise<IDataObject[]> {
+	const addresses = await addressesForSource(parameters, value, true);
+	if (addresses?.length === 1) {
+		const account = await accountByAddress(context, value, addresses[0]);
+		return account ? [accountOutput(account, true)] : [];
+	}
+	return (await requestStream(context, value, {
+		method: addresses ? 'POST' : 'GET',
+		path: 'accounts/stream',
+		...(addresses ? { body: { addresses: addresses.map((address) => address.value) } } : {}),
+		maxItems: POLL_MAX_ITEMS,
+		timeoutMs: POLL_TIMEOUT_MS,
+	})).map((item) => accountOutput(item, true));
+}
+
+function pollItemKey(event: AttoTriggerEvent, item: IDataObject): string {
+	if (event === 'account') return `${String(item.address)}:${String(item.frontier)}:${String((item.balance as IDataObject | undefined)?.raw ?? '')}`;
+	return String(item.hash ?? JSON.stringify(item));
+}
+
+function newPollItems(context: IPollFunctions, event: AttoTriggerEvent, items: IDataObject[]): IDataObject[] {
+	const staticData = context.getWorkflowStaticData('node');
+	const stateKey = `seen_${event}`;
+	const existing = Array.isArray(staticData[stateKey]) ? (staticData[stateKey] as unknown[]).map(String) : [];
+	const seen = new Set(existing);
+	const fresh = items.filter((item) => !seen.has(pollItemKey(event, item)));
+	const updated = [...existing, ...items.map((item) => pollItemKey(event, item))].slice(-MAX_SEEN_POLL_ITEMS);
+	staticData[stateKey] = updated;
+	if (existing.length === 0 && context.getMode() !== 'manual') return [];
+	return fresh;
+}
+
+export async function pollAttoEvent(
+	context: IPollFunctions,
 	event: AttoTriggerEvent,
 	parameters: AttoParameters,
-	credentials: ICredentialDataDecryptedObject | undefined,
-	emit: (data: IDataObject) => void,
-	emitError: (error: Error) => void,
-): Promise<AttoTriggerSubscription> {
-	const attoCredentials = normalizeCredentials(credentials);
-	const node = createNodeClient(attoCredentials);
-	let closing = false;
-
-	const onCancel = (error?: Error | null) => {
-		if (closing || !error) return;
-		emitError(errorFromUnknown(error, 'Atto trigger stream stopped'));
-	};
-
-	const closeJob = (job: AttoJob) => {
-		closing = true;
-		cancelJob(job);
-	};
-
+	credentialData: ICredentialDataDecryptedObject | undefined,
+): Promise<IDataObject[]> {
+	const value = credentials(credentialData);
+	let items: IDataObject[];
 	if (event === 'receivable') {
-		const addresses = await addressesFromSource(parameters, attoCredentials);
-		const minAmount = parseOptionalAmount(parameters.minAmount, parameters.minAmountUnit ?? 'RAW', 'Minimum Amount');
-		const job = node.onReceivableByAddresses(
-			addresses as never,
-			minAmount as never,
-			(receivable) => emit(receivableOutput(receivable as never)),
-			onCancel as never,
-		) as AttoJob;
-
-		return { close: () => closeJob(job) };
+		items = (await requestStream(context, value, await receivableStreamRequest(parameters, value, POLL_MAX_ITEMS, POLL_TIMEOUT_MS))).map((item) => receivableOutput(item, true));
+	} else if (event === 'account') {
+		items = await pollAccounts(context, parameters, value);
+	} else if (event === 'transaction') {
+		const mode = queryMode(parameters.queryMode);
+		if (mode === 'hash') {
+			const transaction = (await requestJson(context, value, requireNodeUrl(value), 'GET', `transactions/${parseHash(parameters.hash, 'Hash')}`)) as IDataObject;
+			items = [transactionOutput(transaction, true)];
+		} else {
+			items = (await requestStream(context, value, await transactionStreamRequest(parameters, value, POLL_MAX_ITEMS, POLL_TIMEOUT_MS))).map((item) => transactionOutput(item, true));
+		}
+	} else {
+		items = (await requestStream(context, value, await accountEntryStreamRequest(parameters, value, POLL_MAX_ITEMS, POLL_TIMEOUT_MS))).map((item) => accountEntryOutput(item, true));
 	}
-
-	if (event === 'account') {
-		const addresses = await addressesFromSource(parameters, attoCredentials, true);
-		const job = addresses
-			? node.onAccountByAddresses(
-					addresses as never,
-					(account) => emit(accountOutput(account as never)),
-					onCancel as never,
-				)
-			: node.onAccountAll((account) => emit(accountOutput(account as never)), onCancel as never);
-
-		return { close: () => closeJob(job as AttoJob) };
-	}
-
-	if (event === 'transaction') {
-		const mode = parseQueryMode(parameters.queryMode);
-		const hash = mode === 'hash' ? parseHash(parameters.hash, 'Hash') : undefined;
-		const addresses = mode === 'credentials' ? [await addressForCredentials(attoCredentials)] : mode === 'manual' ? parseAddressList(parameters.addresses ?? parameters.address, 'Address') : undefined;
-		const fromHeight = parseOptionalHeight(parameters.fromHeight, 'From Height');
-		const toHeight = parseOptionalHeight(parameters.toHeight, 'To Height');
-		const job = hash
-			? node.onTransactionByHash(
-					hash as never,
-					(transaction) => emit(transactionOutput(transaction as never)),
-					onCancel as never,
-				)
-			: subscribeToTransactionAddresses(
-					node,
-					addresses,
-					fromHeight,
-					toHeight,
-					parameters,
-					(transaction) => emit(transactionOutput(transaction)),
-					onCancel,
-				);
-
-		return { close: () => closeJob(job as AttoJob) };
-	}
-
-	if (event === 'accountEntry') {
-		const mode = parseQueryMode(parameters.queryMode);
-		const hash = mode === 'hash' ? parseHash(parameters.hash, 'Hash') : undefined;
-		const addresses = mode === 'credentials' ? [await addressForCredentials(attoCredentials)] : mode === 'manual' ? parseAddressList(parameters.addresses ?? parameters.address, 'Address') : undefined;
-		const fromHeight = parseOptionalHeight(parameters.fromHeight, 'From Height');
-		const toHeight = parseOptionalHeight(parameters.toHeight, 'To Height');
-		const job = hash
-			? node.onAccountEntryByHash(
-					hash as never,
-					(accountEntry) => emit(accountEntryOutput(accountEntry as never)),
-					onCancel as never,
-				)
-			: subscribeToAccountEntryAddresses(
-					node,
-					addresses,
-					fromHeight,
-					toHeight,
-					parameters,
-					(accountEntry) => emit(accountEntryOutput(accountEntry)),
-					onCancel,
-				);
-
-		return { close: () => closeJob(job as AttoJob) };
-	}
-
-	throw new Error(`Unsupported Atto trigger event: ${event}`);
+	return newPollItems(context, event, items);
 }

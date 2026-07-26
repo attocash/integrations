@@ -7,7 +7,7 @@ export class AttoApi implements ICredentialType {
 
 	icon: Icon = 'file:../nodes/Atto/atto.svg';
 
-	documentationUrl = 'https://github.com/attocash/integrations/tree/main/n8n-node#credentials';
+	documentationUrl = 'https://github.com/attocash/integrations/blob/main/n8n-node/USAGE.md';
 
 	properties: INodeProperties[] = [
 		{
@@ -15,7 +15,7 @@ export class AttoApi implements ICredentialType {
 			name: 'nodeUrl',
 			type: 'string',
 			default: 'https://gatekeeper.live.application.atto.cash',
-			placeholder: 'https://my-node.example',
+			placeholder: 'e.g. https://my-node.example',
 			description: 'Base URL of the Atto node HTTP API',
 		},
 		{
@@ -23,7 +23,7 @@ export class AttoApi implements ICredentialType {
 			name: 'workerUrl',
 			type: 'string',
 			default: 'https://gatekeeper.live.application.atto.cash',
-			placeholder: 'https://my-work-server.example',
+			placeholder: 'e.g. https://my-work-server.example',
 			description: 'Base URL of the Atto work server HTTP API',
 		},
 		{

@@ -1,12 +1,14 @@
 import {
 	NodeConnectionTypes,
+	NodeApiError,
 	NodeOperationError,
+	type INodeExecutionData,
 	type INodeType,
 	type INodeTypeDescription,
-	type ITriggerFunctions,
-	type ITriggerResponse,
+	type IPollFunctions,
+	type JsonObject,
 } from 'n8n-workflow';
-import { createAttoTriggerSubscription, type AttoParameters, type AttoTriggerEvent } from '../Atto/operations';
+import { pollAttoEvent, type AttoParameters, type AttoTriggerEvent } from '../Atto/operations';
 
 const TRIGGER_PARAMETER_NAMES = [
 	'addressSource',
@@ -57,6 +59,8 @@ export class AttoTrigger implements INodeType {
 		},
 		inputs: [],
 		outputs: [NodeConnectionTypes.Main],
+		usableAsTool: true,
+		polling: true,
 		credentials: [
 			{
 				name: 'attoApi',
@@ -64,6 +68,37 @@ export class AttoTrigger implements INodeType {
 			},
 		],
 		properties: [
+			{
+				displayName: 'Poll Times',
+				name: 'pollTimes',
+				type: 'fixedCollection',
+				typeOptions: {
+					multipleValues: true,
+					multipleValueButtonText: 'Add Poll Time',
+				},
+				default: {
+					item: [{ mode: 'everyMinute' }],
+				},
+				options: [
+					{
+						name: 'item',
+						displayName: 'Poll Time',
+						values: [
+							{
+								displayName: 'Mode',
+								name: 'mode',
+								type: 'options',
+								options: [
+									{ name: 'Every Minute', value: 'everyMinute' },
+									{ name: 'Every Hour', value: 'everyHour' },
+									{ name: 'Every Day', value: 'everyDay' },
+								],
+								default: 'everyMinute',
+							},
+						],
+					},
+				],
+			},
 			{
 				displayName: 'Event',
 				name: 'event',
@@ -265,10 +300,9 @@ export class AttoTrigger implements INodeType {
 				description: 'Unit used for Minimum Amount',
 			},
 		],
-		usableAsTool: true,
 	};
 
-	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse | undefined> {
+	async poll(this: IPollFunctions): Promise<INodeExecutionData[][] | null> {
 		try {
 			const credentials = await this.getCredentials('attoApi');
 			const event = this.getNodeParameter('event', 'receivable') as AttoTriggerEvent;
@@ -278,18 +312,12 @@ export class AttoTrigger implements INodeType {
 					this.getNodeParameter(name, TRIGGER_PARAMETER_DEFAULTS[name]) as unknown,
 				]),
 			) as AttoParameters;
-			const subscription = await createAttoTriggerSubscription(
-				event,
-				parameters,
-				credentials,
-				(json) => this.emit([[{ json }]]),
-				(error) => this.emitError(error),
-			);
-
-			return {
-				closeFunction: async () => subscription.close(),
-			};
+			const items = await pollAttoEvent(this, event, parameters, credentials);
+			return items.length > 0 ? [items.map((json) => ({ json }))] : null;
 		} catch (error) {
+			if (error instanceof NodeApiError) {
+				throw new NodeApiError(this.getNode(), error as unknown as JsonObject);
+			}
 			throw new NodeOperationError(this.getNode(), error as Error);
 		}
 	}

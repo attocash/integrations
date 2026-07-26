@@ -38,13 +38,13 @@
     "provenance": true
   },
   "main": "dist/nodes/Atto/Atto.node.js",
-  "types": "dist/nodes/Atto/Atto.node.d.ts",
   "files": [
     "dist",
-    "examples"
+    "examples",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
-    "build": "n8n-node build && node scripts/bundle-node.mjs",
+    "build": "n8n-node build && node scripts/prepare-dist.mjs",
     "build:watch": "tsc --watch",
     "clean": "rimraf dist",
     "dev": "n8n-node dev",
@@ -60,12 +60,8 @@
     "node": ">=22.16"
   },
   "devDependencies": {
-    "@attocash/commons-core": "6.7.1-patch.1",
-    "@attocash/commons-node": "6.7.1-patch.1",
-    "@attocash/commons-node-remote": "6.7.1-patch.1",
-    "@attocash/commons-test": "6.7.1-patch.1",
-    "@attocash/commons-wallet": "6.7.1-patch.1",
-    "@attocash/commons-worker-remote": "6.7.1-patch.1",
+    "@attocash/commons-core": "7.0.2",
+    "@attocash/commons-test": "7.0.2",
     "@n8n/node-cli": "0.32.1",
     "@types/node": "^22.15.21",
     "esbuild": "0.27.1",

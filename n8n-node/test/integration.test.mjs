@@ -11,7 +11,7 @@ import {
 } from '@attocash/commons-core';
 import { AttoNodeMockAsyncBuilder, AttoWorkerMockAsyncBuilder } from '@attocash/commons-test';
 
-import { clearWorkerClientCache, createAttoTriggerSubscription, executeAttoOperation } from '../dist/nodes/Atto/operations.js';
+import { executeAttoOperation, pollAttoEvent } from '../dist/nodes/Atto/operations.js';
 
 function configureContainerRuntime() {
 	const docker = spawnSync('docker', ['version'], { stdio: 'ignore' });
@@ -27,6 +27,44 @@ function configureContainerRuntime() {
 	return true;
 }
 
+function requestError(response, body) {
+	const error = new Error(`HTTP ${response.status}: ${body}`);
+	error.statusCode = response.status;
+	error.response = { status: response.status, data: body };
+	return error;
+}
+
+function createContext(mode = 'manual') {
+	const staticData = {};
+	return {
+		getNode: () => ({ name: 'Atto test', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: {} }),
+		getMode: () => mode,
+		getWorkflowStaticData: () => staticData,
+		helpers: {
+			httpRequest: async (options) => {
+				const signals = [];
+				if (options.abortSignal) signals.push(options.abortSignal);
+				if (options.timeout) signals.push(AbortSignal.timeout(options.timeout));
+				const response = await fetch(options.url, {
+					method: options.method,
+					headers: options.headers,
+					body: options.body,
+					signal: signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals),
+				});
+
+				if (options.encoding === 'stream') {
+					if (!response.ok) throw requestError(response, await response.text());
+					return response.body;
+				}
+
+				const body = await response.text();
+				if (!response.ok && !options.ignoreHttpStatusErrors) throw requestError(response, body);
+				return options.returnFullResponse ? { body, statusCode: response.status, headers: Object.fromEntries(response.headers) } : body;
+			},
+		},
+	};
+}
+
 const hasRuntime = configureContainerRuntime();
 const requireIntegration = process.env.ATTO_TEST_INTEGRATION === '1';
 
@@ -39,9 +77,9 @@ if (!hasRuntime && !requireIntegration) {
 		assert.fail('Docker or a Podman socket is required for AttoNodeMock integration tests');
 	});
 } else {
-	const mnemonic = AttoMnemonic.generate();
+	const mnemonic = await AttoMnemonic.generate();
 	const seed = await toSeedAsync(mnemonic);
-	const privateKey0 = toPrivateKey(seed, toAttoIndex(0));
+	const privateKey0 = await toPrivateKey(seed, toAttoIndex(0));
 
 	const nodeMock = await new AttoNodeMockAsyncBuilder(privateKey0)
 		.image(process.env.ATTO_NODE_MOCK_IMAGE || 'ghcr.io/attocash/node:live')
@@ -57,7 +95,6 @@ if (!hasRuntime && !requireIntegration) {
 	});
 
 	test.after(async () => {
-		clearWorkerClientCache();
 		await nodeMock.close();
 		await workerMock.close();
 	});
@@ -72,63 +109,21 @@ if (!hasRuntime && !requireIntegration) {
 		};
 	}
 
-	async function derive(keyIndex) {
-		return await executeAttoOperation(
-			'deriveAddress',
-			{ secretSource: 'credentials' },
-			credentials(keyIndex),
-		);
+	async function derive(context, keyIndex) {
+		return await executeAttoOperation(context, 'deriveAddress', { secretSource: 'credentials' }, credentials(keyIndex));
 	}
 
-	async function waitForTrigger(event, parameters, creds, action = async () => {}) {
-		let subscription;
-		let timer;
-		try {
-			let eventResolved = false;
-			let resolveEvent;
-			let rejectEvent;
-			const eventPromise = new Promise((resolve, reject) => {
-				resolveEvent = resolve;
-				rejectEvent = reject;
-				timer = setTimeout(() => {
-					subscription?.close();
-					reject(new Error(`Timed out waiting for ${event} trigger`));
-				}, 15000);
-			});
-			subscription = await createAttoTriggerSubscription(
-				event,
-				parameters,
-				creds,
-				(data) => {
-					eventResolved = true;
-					clearTimeout(timer);
-					subscription?.close();
-					resolveEvent(data);
-				},
-				(error) => {
-					clearTimeout(timer);
-					subscription?.close();
-					rejectEvent(error);
-				},
-			);
-
-			if (!eventResolved) await action();
-			return await eventPromise;
-		} finally {
-			clearTimeout(timer);
-			subscription?.close();
-		}
-	}
-
-	test('uses AttoNodeMock for derive, send, account info, streams, receive, and representative change', async () => {
-		const account0 = await derive(0);
-		const account1 = await derive(1);
+	test('uses n8n HTTP helpers for derive, send, reads, polling, receive, and representative change', async () => {
+		const context = createContext();
+		const account0 = await derive(context, 0);
+		const account1 = await derive(context, 1);
 
 		assert.match(account0.address, /^atto:\/\//);
 		assert.match(account1.address, /^atto:\/\//);
 		assert.notEqual(account0.address, account1.address);
 
 		const send = await executeAttoOperation(
+			context,
 			'sendTransaction',
 			{
 				secretSource: 'credentials',
@@ -145,8 +140,9 @@ if (!hasRuntime && !requireIntegration) {
 		assert.equal(send.destinationAddress, account1.address);
 
 		const accountInfo = await executeAttoOperation(
+			context,
 			'getAccount',
-			{ address: account0.address },
+			{ address: account0.address, simplify: true },
 			credentials(0),
 		);
 
@@ -156,6 +152,7 @@ if (!hasRuntime && !requireIntegration) {
 		assert.ok(accountInfo.frontier);
 
 		const receivables = await executeAttoOperation(
+			context,
 			'getReceivables',
 			{
 				addressSource: 'credentials',
@@ -163,6 +160,7 @@ if (!hasRuntime && !requireIntegration) {
 				minAmountUnit: 'RAW',
 				maxItems: 1,
 				timeoutMs: 10000,
+				simplify: true,
 			},
 			credentials(1),
 		);
@@ -172,13 +170,9 @@ if (!hasRuntime && !requireIntegration) {
 		assert.ok(receivables[0].hash);
 
 		const transactions = await executeAttoOperation(
+			context,
 			'getTransactions',
-			{
-				queryMode: 'hash',
-				hash: send.hash,
-				maxItems: 1,
-				timeoutMs: 10000,
-			},
+			{ queryMode: 'hash', hash: send.hash, simplify: true },
 			credentials(0),
 		);
 
@@ -186,12 +180,14 @@ if (!hasRuntime && !requireIntegration) {
 		assert.equal(transactions[0].hash, send.hash);
 
 		const accountEntries = await executeAttoOperation(
+			context,
 			'getAccountEntries',
 			{
 				queryMode: 'credentials',
 				fromHeight: '1',
 				maxItems: 1,
 				timeoutMs: 10000,
+				simplify: true,
 			},
 			credentials(0),
 		);
@@ -200,67 +196,33 @@ if (!hasRuntime && !requireIntegration) {
 		assert.equal(accountEntries[0].address, account0.address);
 		assert.ok(accountEntries[0].hash);
 
-		const receivableEvent = await waitForTrigger(
+		const pollContext = createContext('manual');
+		const polledReceivables = await pollAttoEvent(
+			pollContext,
 			'receivable',
-			{
-				addressSource: 'credentials',
-				minAmount: '1',
-				minAmountUnit: 'RAW',
-			},
+			{ addressSource: 'credentials', minAmount: '1', minAmountUnit: 'RAW' },
 			credentials(1),
 		);
-
-		assert.equal(receivableEvent.address, account1.address);
-		assert.ok(receivableEvent.hash);
-
-		const transactionEvent = await waitForTrigger(
-			'transaction',
-			{
-				queryMode: 'hash',
-				hash: send.hash,
-			},
-			credentials(0),
-		);
-
-		assert.equal(transactionEvent.hash, send.hash);
-
-		const accountEntryEvent = await waitForTrigger(
-			'accountEntry',
-			{
-				queryMode: 'hash',
-				hash: send.hash,
-			},
-			credentials(0),
-		);
-
-		assert.equal(accountEntryEvent.address, account0.address);
-		assert.ok(accountEntryEvent.hash);
-
-		const accountEvent = await waitForTrigger(
-			'account',
-			{
-				addressSource: 'credentials',
-			},
-			credentials(0),
-		);
-
-		assert.equal(accountEvent.address, account0.address);
-		assert.ok(accountEvent.representativeAddress);
+		assert.equal(polledReceivables.length, 1);
+		assert.equal((await pollAttoEvent(
+			pollContext,
+			'receivable',
+			{ addressSource: 'credentials', minAmount: '1', minAmountUnit: 'RAW' },
+			credentials(1),
+		)).length, 0);
 
 		await assert.rejects(
-			() =>
-				executeAttoOperation(
-					'receivePending',
-					{
-						secretSource: 'credentials',
-						inputItem: receivables[0],
-					},
-					credentials(0),
-				),
+			() => executeAttoOperation(
+				context,
+				'receivePending',
+				{ secretSource: 'credentials', inputItem: receivables[0] },
+				credentials(0),
+			),
 			/Receivable Address must match/,
 		);
 
 		const receive = await executeAttoOperation(
+			context,
 			'receivePending',
 			{
 				secretSource: 'credentials',
@@ -274,14 +236,11 @@ if (!hasRuntime && !requireIntegration) {
 		assert.ok(receive.hash);
 		assert.equal(receive.address, account1.address);
 		assert.ok(receive.amount.raw);
-		assert.equal(receive.receivable.hash, receivables[0].hash);
 
 		const change = await executeAttoOperation(
+			context,
 			'changeRepresentative',
-			{
-				secretSource: 'credentials',
-				representativeAddress: account1.address,
-			},
+			{ secretSource: 'credentials', representativeAddress: account1.address },
 			credentials(0),
 		);
 

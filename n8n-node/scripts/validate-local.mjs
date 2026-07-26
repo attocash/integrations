@@ -4,13 +4,17 @@ import { AttoMnemonic } from '@attocash/commons-core';
 
 import { executeAttoOperation } from '../dist/nodes/Atto/operations.js';
 
-const mnemonic = AttoMnemonic.generate();
-const result = await executeAttoOperation('deriveAddress', {
-	secretSource: 'node',
-	walletSecretType: 'mnemonic',
-	walletSecret: mnemonic.phrase,
-	keyIndex: 0,
-});
+const mnemonic = await AttoMnemonic.generate();
+const result = await executeAttoOperation(
+	undefined,
+	'deriveAddress',
+	{
+		secretSource: 'node',
+		walletSecretType: 'mnemonic',
+		walletSecret: mnemonic.phrase,
+		keyIndex: 0,
+	},
+);
 
 assert.match(result.address, /^atto:\/\//);
 assert.equal(result.secretType, 'mnemonic');

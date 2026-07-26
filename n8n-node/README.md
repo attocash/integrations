@@ -6,7 +6,7 @@
 
 Use Atto from n8n workflows.
 
-This package adds action and trigger nodes for Atto addresses, accounts, receivables, transactions, and representatives. Signing, address derivation, node calls, wallet operations, streams, and test mocks come from Atto Commons.
+This package adds action and trigger nodes for Atto addresses, accounts, receivables, transactions, and representatives. Atto Commons provides the protocol model, address derivation, block construction, hashing, and signing. Network calls use n8n's HTTP helpers, and integration tests use the Commons mocks.
 
 ## Install
 
@@ -169,10 +169,10 @@ git push origin main
 
 On pushes to `main`, GitHub Actions tests and packs the attempted version, uploads the `.tgz` artifact, then waits for approval in the `release` environment. After approval, it creates the tag, publishes `@attocash/n8n-nodes-atto` to npm, and creates the GitHub release.
 
-Configure npm Trusted Publishing for `.github/workflows/n8n-node-package.yml`. `NPM_TOKEN` is supported as a fallback.
+Configure npm Trusted Publishing for `.github/workflows/n8n-node-package.yml`.
 
 ## Notes
 
-- Runtime Atto behavior comes from Atto Commons split packages: `@attocash/commons-core`, `@attocash/commons-node`, `@attocash/commons-node-remote`, `@attocash/commons-wallet`, and `@attocash/commons-worker-remote`.
-- Atto Commons code is bundled into the built action and trigger node files, so the published n8n package has no runtime dependencies beyond n8n.
+- Runtime protocol behavior comes from `@attocash/commons-core`; `@attocash/commons-test` is used only by integration tests.
+- Commons Core is bundled once into the built protocol adapter, so the published n8n package has no runtime dependencies beyond n8n.
 - Hex private keys must use the format accepted by `AttoPrivateKey.Companion.parse`.

@@ -93,9 +93,6 @@ jobs:
     needs: version
     permissions:
       contents: read
-    outputs:
-      package_name: ${{ steps.package.outputs.package_name }}
-      package_version: ${{ steps.package.outputs.package_version }}
     defaults:
       run:
         working-directory: n8n-node
@@ -112,42 +109,11 @@ jobs:
           cache: npm
           cache-dependency-path: n8n-node/package-lock.json
 
-      - name: Install Trusted Publishing-capable npm
-        run: npm install --global npm@^11.5.1
-
-      - name: Verify Trusted Publishing npm support
-        run: |
-          node -e 'const version = process.versions.node; const [major, minor] = version.split(".").map(Number); if (major < 22 || (major === 22 && minor < 14)) throw new Error("Trusted Publishing requires Node >=22.14.0, got " + version);'
-          npm_version="$(npm --version)"
-          node -e 'const version = process.argv[1]; const [major, minor, patch] = version.split(".").map(Number); if (major < 11 || (major === 11 && minor < 5) || (major === 11 && minor === 5 && patch < 1)) throw new Error("Trusted Publishing requires npm >=11.5.1, got " + version);' "$npm_version"
-
       - name: Install dependencies
         run: npm ci
 
       - name: Apply computed package version
         run: npm version "${{ needs.version.outputs.package_version }}" --no-git-tag-version --allow-same-version
-
-      - name: Read package metadata
-        id: package
-        env:
-          EXPECTED_VERSION: ${{ needs.version.outputs.package_version }}
-        run: |
-          package_name="$(node -p "require('./package.json').name")"
-          package_version="$(node -p "require('./package.json').version")"
-          expected_package="@attocash/n8n-nodes-atto"
-
-          if [ "$package_name" != "$expected_package" ]; then
-            echo "Expected package name $expected_package, got $package_name" >&2
-            exit 1
-          fi
-
-          if [ "$package_version" != "$EXPECTED_VERSION" ]; then
-            echo "Expected package version $EXPECTED_VERSION, got $package_version" >&2
-            exit 1
-          fi
-
-          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
-          echo "package_version=$package_version" >> "$GITHUB_OUTPUT"
 
       - name: Lint
         run: npm run lint
@@ -200,39 +166,11 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org/"
 
-      - name: Install Trusted Publishing-capable npm
-        run: npm install --global npm@^11.5.1
-
-      - name: Verify Trusted Publishing npm support
-        run: |
-          node -e 'const version = process.versions.node; const [major, minor] = version.split(".").map(Number); if (major < 22 || (major === 22 && minor < 14)) throw new Error("Trusted Publishing requires Node >=22.14.0, got " + version);'
-          npm_version="$(npm --version)"
-          node -e 'const version = process.argv[1]; const [major, minor, patch] = version.split(".").map(Number); if (major < 11 || (major === 11 && minor < 5) || (major === 11 && minor === 5 && patch < 1)) throw new Error("Trusted Publishing requires npm >=11.5.1, got " + version);' "$npm_version"
-
       - name: Download package artifact
         uses: actions/download-artifact@v4
         with:
           name: attocash-n8n-nodes-atto-package
           path: n8n-node/artifacts
-
-      - name: Verify package artifact
-        id: artifact
-        env:
-          EXPECTED_NAME: ${{ needs.test-and-pack.outputs.package_name }}
-          EXPECTED_VERSION: ${{ needs.version.outputs.release_version }}
-        run: |
-          tarball_count="$(find artifacts -maxdepth 1 -name '*.tgz' | wc -l | tr -d ' ')"
-          if [ "$tarball_count" != "1" ]; then
-            echo "Expected one package artifact, found $tarball_count" >&2
-            find artifacts -maxdepth 1 -type f -print >&2
-            exit 1
-          fi
-
-          tarball="$(find "$PWD/artifacts" -maxdepth 1 -name '*.tgz' -print -quit)"
-          tar -xOf "$tarball" package/package.json > /tmp/n8n-node-package.json
-          node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync("/tmp/n8n-node-package.json", "utf8")); const expectedName = process.argv[1]; const expectedVersion = process.argv[2]; if (pkg.name !== expectedName || pkg.version !== expectedVersion) throw new Error(`Artifact contains ${pkg.name}@${pkg.version}, expected ${expectedName}@${expectedVersion}`);' "$EXPECTED_NAME" "$EXPECTED_VERSION"
-
-          echo "tarball=$tarball" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub release
         uses: cycjimmy/semantic-release-action@v6
@@ -242,26 +180,5 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check npm publication
-        id: npm
-        env:
-          PACKAGE_NAME: ${{ needs.test-and-pack.outputs.package_name }}
-          PACKAGE_VERSION: ${{ needs.version.outputs.release_version }}
-        run: |
-          if npm view "$PACKAGE_NAME@$PACKAGE_VERSION" version --json > /tmp/npm-view.json 2> /tmp/npm-view.err; then
-            echo "published=true" >> "$GITHUB_OUTPUT"
-            cat /tmp/npm-view.json
-            exit 0
-          fi
-
-          if grep -q "E404" /tmp/npm-view.err; then
-            echo "published=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          cat /tmp/npm-view.err >&2
-          exit 1
-
       - name: Publish to npm
-        if: steps.npm.outputs.published != 'true'
-        run: npm publish "${{ steps.artifact.outputs.tarball }}" --provenance --access public
+        run: npm publish artifacts/*.tgz --provenance --access public

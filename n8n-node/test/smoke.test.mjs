@@ -1,6 +1,15 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
+
+function findJavaScriptFiles(directory) {
+	return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+		const path = join(directory, entry.name);
+		if (entry.isDirectory()) return findJavaScriptFiles(path);
+		return entry.name.endsWith('.js') ? [path] : [];
+	});
+}
 
 test('build artifacts required by n8n are present', async () => {
 	const required = [
@@ -30,4 +39,24 @@ test('build artifacts required by n8n are present', async () => {
 	assert.equal(attoApi.test.request.url, '/');
 	assert.equal(attoApi.test.request.method, 'GET');
 	assert.doesNotMatch(JSON.stringify(attoApi.test), /walletSecret|walletMaterialType|privateKey|mnemonic/i);
+});
+
+test('runtime bundle excludes console calls and Kotlin console logging', () => {
+	for (const file of findJavaScriptFiles('dist')) {
+		const source = readFileSync(file, 'utf8');
+		assert.doesNotMatch(source, /console\.(?:log|debug|info|warn|error)\s*\(/, file);
+		assert.doesNotMatch(source, /BufferedOutputToConsoleLog/, file);
+		assert.doesNotMatch(
+			source,
+			/(?:require\(|from\s+|import\s*\()\s*['"](?:@attocash\/|@js-joda\/|@stablelib\/)/,
+			file,
+		);
+	}
+});
+
+test('package declares no runtime Commons dependency', () => {
+	const packageJson = JSON.parse(readFileSync('package.json', 'utf8'));
+	assert.equal(packageJson.dependencies, undefined);
+	assert.deepEqual(packageJson.peerDependencies, { 'n8n-workflow': '*' });
+	assert.equal(typeof packageJson.devDependencies['@attocash/commons-core'], 'string');
 });
