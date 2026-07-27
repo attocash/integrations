@@ -4,7 +4,7 @@ import {
 	type IDataObject,
 	type IExecuteFunctions,
 	type IHttpRequestOptions,
-	type IPollFunctions,
+	type ITriggerFunctions,
 	type JsonObject,
 } from 'n8n-workflow';
 import {
@@ -23,6 +23,7 @@ import {
 	parseHash,
 	receivableOutput,
 	signedTransaction,
+	streamEventOutput,
 	stringifyAttoJson,
 	transactionOutput,
 	workTarget,
@@ -30,6 +31,8 @@ import {
 	type AttoBlockModel,
 	type AttoCredentials,
 	type DerivedAddress,
+	type AttoStreamEvent,
+	type AttoStreamRequest,
 } from './protocol';
 
 export type AttoOperation =
@@ -43,11 +46,11 @@ export type AttoOperation =
 	| 'getAccountEntries'
 	| 'changeRepresentative';
 
-export type AttoTriggerEvent = 'receivable' | 'account' | 'transaction' | 'accountEntry';
+export type AttoTriggerEvent = AttoStreamEvent;
 export type AttoParameters = Record<string, unknown>;
 export type AttoOperationResult = IDataObject | IDataObject[];
 
-type AttoContext = IExecuteFunctions | IPollFunctions;
+type AttoContext = IExecuteFunctions | ITriggerFunctions;
 type AddressSource = 'credentials' | 'manual' | 'all';
 type QueryMode = 'credentials' | 'manual' | 'all' | 'hash';
 
@@ -59,11 +62,52 @@ type StreamRequest = {
 	timeoutMs: number;
 };
 
+export type AttoHttpStreamRequest = {
+	method: 'GET' | 'POST';
+	path: string;
+	body?: IDataObject;
+};
+
 const DEFAULT_STREAM_TIMEOUT_MS = 5000;
 const DEFAULT_PUBLISH_TIMEOUT_MS = 60000;
-const POLL_MAX_ITEMS = 100;
-const POLL_TIMEOUT_MS = 2000;
-const MAX_SEEN_POLL_ITEMS = 500;
+const INITIAL_RECONNECT_DELAY_MS = 1000;
+const MAX_RECONNECT_DELAY_MS = 30000;
+
+export type AttoStreamRuntime = {
+	open(
+		context: AttoContext,
+		value: AttoCredentials,
+		request: AttoHttpStreamRequest,
+		signal: AbortSignal,
+	): Promise<AsyncIterable<unknown>>;
+	setTimeout(callback: () => void, delayMs: number): unknown;
+	clearTimeout(timer: unknown): void;
+};
+
+export type AttoEventStream = {
+	close(): Promise<void>;
+};
+
+function scheduleTimeout(callback: () => void, delayMs: number): AbortController {
+	const controller = new AbortController();
+	const timeout = AbortSignal.timeout(delayMs);
+	const onTimeout = () => {
+		if (!controller.signal.aborted) callback();
+	};
+	timeout.addEventListener('abort', onTimeout, { once: true });
+	controller.signal.addEventListener(
+		'abort',
+		() => timeout.removeEventListener('abort', onTimeout),
+		{ once: true },
+	);
+	return controller;
+}
+
+const DEFAULT_STREAM_RUNTIME: AttoStreamRuntime = {
+	open: openAttoEventStream,
+	setTimeout: scheduleTimeout,
+	clearTimeout: (timer) => (timer as AbortController).abort(),
+};
 
 function credentials(value: ICredentialDataDecryptedObject | undefined): AttoCredentials {
 	return (value ?? {}) as AttoCredentials;
@@ -97,13 +141,13 @@ function positiveHeight(value: unknown, fieldName: string): string | undefined {
 	return valueText;
 }
 
-function simplifyOutput(parameters: AttoParameters): boolean {
-	return parameters.simplify !== false;
-}
-
 function requireNodeUrl(value: AttoCredentials): string {
 	const url = text(value.nodeUrl);
 	if (!url) throw new Error('Atto credentials must include a Node Base URL');
+	const parsed = URL.canParse(url) ? new URL(url) : undefined;
+	if (!parsed || (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')) {
+		throw new Error('Atto credentials must include a valid HTTP Node Base URL');
+	}
 	return url.replace(/\/+$/, '');
 }
 
@@ -260,6 +304,30 @@ async function requestStream(
 		if (controller.signal.aborted || isExpectedStreamEnd(error)) return items;
 		throw apiError(context, error, `Atto API stream failed: ${request.method} /${request.path}`);
 	}
+}
+
+async function openAttoEventStream(
+	context: AttoContext,
+	value: AttoCredentials,
+	request: AttoHttpStreamRequest,
+	signal: AbortSignal,
+): Promise<AsyncIterable<unknown>> {
+	const response = await context.helpers.httpRequest({
+		url: `${requireNodeUrl(value)}/${request.path}`,
+		method: request.method,
+		headers: {
+			...requestHeaders(value, 'application/x-ndjson'),
+			...(request.body ? { 'Content-Type': 'application/json' } : {}),
+		},
+		encoding: 'stream',
+		json: false,
+		abortSignal: signal,
+		...(request.body ? { body: stringifyAttoJson(request.body) } : {}),
+	});
+	if (!response || typeof response !== 'object' || !(Symbol.asyncIterator in response)) {
+		throw new Error('Atto stream response is not readable');
+	}
+	return response as AsyncIterable<unknown>;
 }
 
 function contextRequired(context: AttoContext | undefined): AttoContext {
@@ -544,7 +612,6 @@ export async function executeAttoOperation(
 	credentialData?: ICredentialDataDecryptedObject,
 ): Promise<AttoOperationResult> {
 	const value = credentials(credentialData);
-	const simplify = simplifyOutput(parameters);
 
 	if (operation === 'deriveAddress' || operation === 'deriveAccount') {
 		const derived = await deriveAddressFromSecret(parameters, value);
@@ -555,21 +622,21 @@ export async function executeAttoOperation(
 	if (operation === 'getAccount') {
 		const address = parseAddress(parameters.address ?? parameters.lookupAddress);
 		const account = await accountByAddress(execution, value, address);
-		return account ? accountOutput(account, simplify) : { found: false, address: address.value };
+		return account ? accountOutput(account) : { found: false, address: address.value };
 	}
 	if (operation === 'getReceivables') {
-		return (await requestStream(execution, value, await receivableStreamRequest(parameters, value))).map((item) => receivableOutput(item, simplify));
+		return (await requestStream(execution, value, await receivableStreamRequest(parameters, value))).map((item) => receivableOutput(item));
 	}
 	if (operation === 'getTransactions') {
 		if (queryMode(parameters.queryMode) === 'hash') {
 			const hash = parseHash(parameters.hash);
 			const transaction = (await requestJson(execution, value, requireNodeUrl(value), 'GET', `transactions/${hash}`)) as IDataObject;
-			return [transactionOutput(transaction, simplify)];
+			return [transactionOutput(transaction)];
 		}
-		return (await requestStream(execution, value, await transactionStreamRequest(parameters, value))).map((item) => transactionOutput(item, simplify));
+		return (await requestStream(execution, value, await transactionStreamRequest(parameters, value))).map((item) => transactionOutput(item));
 	}
 	if (operation === 'getAccountEntries') {
-		return (await requestStream(execution, value, await accountEntryStreamRequest(parameters, value))).map((item) => accountEntryOutput(item, simplify));
+		return (await requestStream(execution, value, await accountEntryStreamRequest(parameters, value))).map((item) => accountEntryOutput(item));
 	}
 
 	const derived = await deriveAddressFromSecret(parameters, value);
@@ -584,7 +651,7 @@ export async function executeAttoOperation(
 		const block = createSendBlock(account, destination, amount, timestamp);
 		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
 		return {
-			...transactionOutput(transaction, true, 'published'),
+			...transactionOutput(transaction, 'published'),
 			fromAddress: derived.value,
 			destinationAddress: destination.value,
 			amount: amountOutput(amount),
@@ -600,7 +667,7 @@ export async function executeAttoOperation(
 		const block = createReceiveBlock(account, receivable, representative, timestamp);
 		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
 		return {
-			...transactionOutput(transaction, true, 'received'),
+			...transactionOutput(transaction, 'received'),
 			address: derived.value,
 			representativeAddress: representative.value,
 			amount: amountOutput(receivable.amount),
@@ -612,7 +679,7 @@ export async function executeAttoOperation(
 		const block = createChangeBlock(account, representative, timestamp);
 		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
 		return {
-			...transactionOutput(transaction, true, 'representative_changed'),
+			...transactionOutput(transaction, 'representative_changed'),
 			address: derived.value,
 			representativeAddress: representative.value,
 		};
@@ -621,60 +688,257 @@ export async function executeAttoOperation(
 	throw new Error(`Unsupported Atto operation: ${operation}`);
 }
 
-async function pollAccounts(context: IPollFunctions, parameters: AttoParameters, value: AttoCredentials): Promise<IDataObject[]> {
-	const addresses = await addressesForSource(parameters, value, true);
-	if (addresses?.length === 1) {
-		const account = await accountByAddress(context, value, addresses[0]);
-		return account ? [accountOutput(account, true)] : [];
-	}
-	return (await requestStream(context, value, {
-		method: addresses ? 'POST' : 'GET',
-		path: 'accounts/stream',
-		...(addresses ? { body: { addresses: addresses.map((address) => address.value) } } : {}),
-		maxItems: POLL_MAX_ITEMS,
-		timeoutMs: POLL_TIMEOUT_MS,
-	})).map((item) => accountOutput(item, true));
+function addressStreamRoute(
+	event: AttoTriggerEvent,
+	addresses: AttoAddress[] | undefined,
+): AttoStreamRequest {
+	if (!addresses) return { event, route: 'all' };
+	return {
+		event,
+		route: addresses.length === 1 ? 'publicKey' : 'addresses',
+		addresses,
+	};
 }
 
-function pollItemKey(event: AttoTriggerEvent, item: IDataObject): string {
-	if (event === 'account') return `${String(item.address)}:${String(item.frontier)}:${String((item.balance as IDataObject | undefined)?.raw ?? '')}`;
-	return String(item.hash ?? JSON.stringify(item));
-}
-
-function newPollItems(context: IPollFunctions, event: AttoTriggerEvent, items: IDataObject[]): IDataObject[] {
-	const staticData = context.getWorkflowStaticData('node');
-	const stateKey = `seen_${event}`;
-	const existing = Array.isArray(staticData[stateKey]) ? (staticData[stateKey] as unknown[]).map(String) : [];
-	const seen = new Set(existing);
-	const fresh = items.filter((item) => !seen.has(pollItemKey(event, item)));
-	const updated = [...existing, ...items.map((item) => pollItemKey(event, item))].slice(-MAX_SEEN_POLL_ITEMS);
-	staticData[stateKey] = updated;
-	if (existing.length === 0 && context.getMode() !== 'manual') return [];
-	return fresh;
-}
-
-export async function pollAttoEvent(
-	context: IPollFunctions,
+export async function attoStreamRequest(
 	event: AttoTriggerEvent,
 	parameters: AttoParameters,
 	credentialData: ICredentialDataDecryptedObject | undefined,
-): Promise<IDataObject[]> {
+): Promise<AttoStreamRequest> {
 	const value = credentials(credentialData);
-	let items: IDataObject[];
 	if (event === 'receivable') {
-		items = (await requestStream(context, value, await receivableStreamRequest(parameters, value, POLL_MAX_ITEMS, POLL_TIMEOUT_MS))).map((item) => receivableOutput(item, true));
-	} else if (event === 'account') {
-		items = await pollAccounts(context, parameters, value);
-	} else if (event === 'transaction') {
-		const mode = queryMode(parameters.queryMode);
-		if (mode === 'hash') {
-			const transaction = (await requestJson(context, value, requireNodeUrl(value), 'GET', `transactions/${parseHash(parameters.hash)}`)) as IDataObject;
-			items = [transactionOutput(transaction, true)];
-		} else {
-			items = (await requestStream(context, value, await transactionStreamRequest(parameters, value, POLL_MAX_ITEMS, POLL_TIMEOUT_MS))).map((item) => transactionOutput(item, true));
-		}
-	} else {
-		items = (await requestStream(context, value, await accountEntryStreamRequest(parameters, value, POLL_MAX_ITEMS, POLL_TIMEOUT_MS))).map((item) => accountEntryOutput(item, true));
+		const request = addressStreamRoute(event, await addressesForSource(parameters, value));
+		return {
+			...request,
+			minAmount: optionalText(parameters.minAmount)
+				? parseAmount(
+						parameters.minAmount,
+						parameters.minAmountUnit ?? 'RAW',
+						'Minimum Amount',
+					).toString()
+				: '0',
+		};
 	}
-	return newPollItems(context, event, items);
+
+	if (event === 'account') {
+		return addressStreamRoute(event, await addressesForSource(parameters, value, true));
+	}
+
+	const mode = queryMode(parameters.queryMode);
+	if (mode === 'hash') {
+		return {
+			event,
+			route: 'hash',
+			hash: parseHash(parameters.hash),
+		};
+	}
+
+	const request = addressStreamRoute(event, await addressesForQuery(parameters, value));
+	if (request.route === 'all') return request;
+	return {
+		...request,
+		fromHeight: positiveHeight(parameters.fromHeight, 'From Height') ?? '1',
+		toHeight: positiveHeight(parameters.toHeight, 'To Height'),
+	};
+}
+
+function requiredStreamAddresses(request: AttoStreamRequest): AttoAddress[] {
+	const addresses = request.addresses ?? [];
+	if (addresses.length === 0) throw new Error('Atto stream route requires at least one address');
+	return addresses;
+}
+
+function streamHeightQuery(request: AttoStreamRequest): string {
+	const fromHeight = request.fromHeight ?? '1';
+	return `fromHeight=${encodeURIComponent(fromHeight)}${
+		request.toHeight ? `&toHeight=${encodeURIComponent(request.toHeight)}` : ''
+	}`;
+}
+
+function streamHeightSearch(request: AttoStreamRequest): IDataObject {
+	return {
+		search: requiredStreamAddresses(request).map((address) => ({
+			address: address.value,
+			fromHeight: request.fromHeight ?? '1',
+			...(request.toHeight ? { toHeight: request.toHeight } : {}),
+		})),
+	};
+}
+
+export function attoHttpStreamRequest(request: AttoStreamRequest): AttoHttpStreamRequest {
+	if (request.event === 'account') {
+		if (request.route === 'all') return { method: 'GET', path: 'accounts/stream' };
+		const addresses = requiredStreamAddresses(request);
+		if (request.route === 'publicKey') {
+			return { method: 'GET', path: `accounts/${addresses[0].publicKey}/stream` };
+		}
+		if (request.route === 'addresses') {
+			return {
+				method: 'POST',
+				path: 'accounts/stream',
+				body: { addresses: addresses.map((address) => address.value) },
+			};
+		}
+	}
+
+	if (request.event === 'receivable') {
+		const addresses = requiredStreamAddresses(request);
+		const path = `accounts/receivables/stream?minAmount=${encodeURIComponent(
+			request.minAmount ?? '0',
+		)}`;
+		if (request.route === 'publicKey') {
+			return {
+				method: 'GET',
+				path: `accounts/${addresses[0].publicKey}/receivables/stream?minAmount=${encodeURIComponent(
+					request.minAmount ?? '0',
+				)}`,
+			};
+		}
+		if (request.route === 'addresses') {
+			return {
+				method: 'POST',
+				path,
+				body: { addresses: addresses.map((address) => address.value) },
+			};
+		}
+	}
+
+	if (request.event === 'transaction') {
+		if (request.route === 'all') return { method: 'GET', path: 'transactions/stream' };
+		if (request.route === 'hash' && request.hash) {
+			return { method: 'GET', path: `transactions/${request.hash}/stream` };
+		}
+		const addresses = requiredStreamAddresses(request);
+		if (request.route === 'publicKey') {
+			return {
+				method: 'GET',
+				path: `accounts/${addresses[0].publicKey}/transactions/stream?${streamHeightQuery(request)}`,
+			};
+		}
+		if (request.route === 'addresses') {
+			return {
+				method: 'POST',
+				path: 'accounts/transactions/stream',
+				body: streamHeightSearch(request),
+			};
+		}
+	}
+
+	if (request.event === 'accountEntry') {
+		if (request.route === 'all') return { method: 'GET', path: 'accounts/entries/stream' };
+		if (request.route === 'hash' && request.hash) {
+			return { method: 'GET', path: `accounts/entries/${request.hash}/stream` };
+		}
+		const addresses = requiredStreamAddresses(request);
+		if (request.route === 'publicKey') {
+			return {
+				method: 'GET',
+				path: `accounts/${addresses[0].publicKey}/entries/stream?${streamHeightQuery(request)}`,
+			};
+		}
+		if (request.route === 'addresses') {
+			return {
+				method: 'POST',
+				path: 'accounts/entries/stream',
+				body: streamHeightSearch(request),
+			};
+		}
+	}
+
+	throw new Error(`Unsupported Atto ${request.event} stream route: ${request.route}`);
+}
+
+export async function startAttoEventStream(
+	context: AttoContext,
+	event: AttoTriggerEvent,
+	parameters: AttoParameters,
+	credentialData: ICredentialDataDecryptedObject | undefined,
+	onEvent: (item: IDataObject) => void,
+	runtime: AttoStreamRuntime = DEFAULT_STREAM_RUNTIME,
+): Promise<AttoEventStream> {
+	const value = credentials(credentialData);
+	requireNodeUrl(value);
+	requestHeaders(value, 'application/x-ndjson');
+	const request = attoHttpStreamRequest(
+		await attoStreamRequest(event, parameters, credentialData),
+	);
+	let activeController: AbortController | undefined;
+	let activeConnection: Promise<void> | undefined;
+	let reconnectTimer: unknown;
+	let reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+	let generation = 0;
+	let closed = false;
+
+	const scheduleReconnect = () => {
+		if (closed || activeController || reconnectTimer !== undefined) return;
+		const delayMs = reconnectDelayMs;
+		reconnectDelayMs = Math.min(reconnectDelayMs * 2, MAX_RECONNECT_DELAY_MS);
+		reconnectTimer = runtime.setTimeout(() => {
+			reconnectTimer = undefined;
+			connect();
+		}, delayMs);
+	};
+
+	const connect = () => {
+		if (closed || activeController) return;
+		const streamGeneration = ++generation;
+		const controller = new AbortController();
+		activeController = controller;
+		activeConnection = (async () => {
+			try {
+				const response = await runtime.open(context, value, request, controller.signal);
+				let pending = '';
+				for await (const chunk of response) {
+					if (closed || streamGeneration !== generation) return;
+					pending += streamChunk(chunk);
+					const lines = pending.split('\n');
+					pending = lines.pop() ?? '';
+					for (const line of lines) {
+						if (!line.trim()) continue;
+						const parsed = parseAttoJson(line);
+						if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+							throw new Error(`Atto ${event} stream item must contain a JSON object`);
+						}
+						onEvent(streamEventOutput(event, parsed as IDataObject));
+						reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+					}
+				}
+				if (pending.trim() && !closed && streamGeneration === generation) {
+					const parsed = parseAttoJson(pending);
+					if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+						throw new Error(`Atto ${event} stream item must contain a JSON object`);
+					}
+					onEvent(streamEventOutput(event, parsed as IDataObject));
+					reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+				}
+			} catch {
+				// Connection and stream failures are retried below.
+			} finally {
+				if (streamGeneration === generation) {
+					activeController = undefined;
+					activeConnection = undefined;
+					scheduleReconnect();
+				}
+			}
+		})();
+	};
+
+	connect();
+
+	return {
+		async close() {
+			if (closed) return;
+			closed = true;
+			generation++;
+			if (reconnectTimer !== undefined) {
+				runtime.clearTimeout(reconnectTimer);
+				reconnectTimer = undefined;
+			}
+			const connection = activeConnection;
+			activeController?.abort();
+			activeController = undefined;
+			activeConnection = undefined;
+			await connection;
+		},
+	};
 }

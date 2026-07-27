@@ -83,6 +83,8 @@ Trigger events:
 - **Transaction**: watches by hash, address stream, or all supported transactions.
 - **Account Entry**: watches by hash, address stream, or all supported account entries.
 
+Triggers stay connected to the selected Atto NDJSON endpoint. If a stream closes, the node reconnects with exponential backoff from 1 to 30 seconds; a received event resets the delay.
+
 ## Example Workflows
 
 Importable examples live in [`examples`](./examples):

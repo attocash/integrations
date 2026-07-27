@@ -42,12 +42,28 @@ export type AttoCredentials = {
 	keyIndex?: number | string;
 };
 
+export type AttoStreamEvent = 'receivable' | 'account' | 'transaction' | 'accountEntry';
+
 export type AttoAddress = {
 	algorithm: 'V1';
 	publicKey: string;
 	path: string;
 	value: string;
 	model: CommonsAddress;
+};
+
+export type AttoStreamRequest = {
+	event: AttoStreamEvent;
+	route: 'all' | 'hash' | 'publicKey' | 'addresses';
+	addresses?: AttoAddress[];
+	hash?: string;
+	fromHeight?: string;
+	toHeight?: string;
+	minAmount?: string;
+};
+
+export type AttoStreamModel = {
+	toJson(): string;
 };
 
 export type DerivedAddress = AttoAddress & {
@@ -293,8 +309,7 @@ export function createChangeBlock(
 	).block;
 }
 
-export function accountOutput(account: IDataObject, simplify: boolean): IDataObject {
-	if (!simplify) return account;
+export function accountOutput(account: IDataObject): IDataObject {
 	const model = accountModel(account);
 	return {
 		found: true,
@@ -307,8 +322,7 @@ export function accountOutput(account: IDataObject, simplify: boolean): IDataObj
 	};
 }
 
-export function receivableOutput(receivable: IDataObject, simplify: boolean): IDataObject {
-	if (!simplify) return receivable;
+export function receivableOutput(receivable: IDataObject): IDataObject {
 	const model = receivableModel(receivable);
 	return {
 		hash: model.hash.toString(),
@@ -320,22 +334,18 @@ export function receivableOutput(receivable: IDataObject, simplify: boolean): ID
 
 export function transactionOutput(
 	transaction: IDataObject,
-	simplify: boolean,
 	status?: string,
 ): IDataObject {
-	if (!simplify && !status) return transaction;
 	const model = transactionModel(transaction);
 	return {
 		...(status ? { status } : {}),
 		hash: model.hash.toString(),
 		address: model.address.value,
 		height: model.height.toString(),
-		...(simplify ? {} : { transaction }),
 	};
 }
 
-export function accountEntryOutput(entry: IDataObject, simplify: boolean): IDataObject {
-	if (!simplify) return entry;
+export function accountEntryOutput(entry: IDataObject): IDataObject {
 	const model = accountEntryModel(entry);
 	return {
 		hash: model.hash.toString(),
@@ -346,4 +356,18 @@ export function accountEntryOutput(entry: IDataObject, simplify: boolean): IData
 		previousBalance: amountOutput(model.previousBalance),
 		balance: amountOutput(model.balance),
 	};
+}
+
+export function streamEventOutput(
+	event: AttoStreamEvent,
+	value: AttoStreamModel | IDataObject,
+): IDataObject {
+	const item =
+		'toJson' in value && typeof value.toJson === 'function'
+			? dataObjectFromJson(value.toJson(), `Atto ${event}`)
+			: value;
+	if (event === 'account') return accountOutput(item);
+	if (event === 'receivable') return receivableOutput(item);
+	if (event === 'transaction') return transactionOutput(item);
+	return accountEntryOutput(item);
 }

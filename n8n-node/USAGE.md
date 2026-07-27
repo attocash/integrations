@@ -14,7 +14,7 @@ Credential testing only checks reachability with `GET /` against the configured 
 
 Use **Account > Get** with an Atto address and an **Atto API** credential containing `Node Base URL`.
 
-Output includes whether the account was found plus balance, representative address, height, frontier hash, and the raw Atto Commons account JSON when available.
+Output includes whether the account was found plus balance, representative address, height, and frontier hash.
 
 ## Receivable: Get
 
@@ -48,7 +48,7 @@ Use **Representative > Change** with a signing wallet and representative address
 
 ## Atto Trigger
 
-Use **Atto Trigger** for receivables, account updates, transactions, and account entries. Trigger filters can use the credentials-derived address, manual addresses, all supported stream items, or a hash where supported.
+Use **Atto Trigger** for receivables, account updates, transactions, and account entries. Trigger filters can use the credentials-derived address, manual addresses, all supported stream items, or a hash where supported. The trigger reconnects automatically when its Atto NDJSON stream closes.
 
 ## Private Keys
 

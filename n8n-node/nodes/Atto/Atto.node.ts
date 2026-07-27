@@ -28,8 +28,7 @@ type AttoParameterName =
 	| 'minAmountUnit'
 	| 'representativeAddress'
 	| 'timeoutMs'
-	| 'maxItems'
-	| 'simplify';
+	| 'maxItems';
 
 type AttoResource = 'address' | 'account' | 'receivable' | 'transaction' | 'accountEntry' | 'representative';
 
@@ -38,12 +37,12 @@ const SECRET_PARAMETER_NAMES = ['secretSource', 'walletSecretType', 'walletSecre
 const OPERATION_PARAMETER_NAMES: Record<AttoOperation, readonly AttoParameterName[]> = {
 	deriveAddress: SECRET_PARAMETER_NAMES,
 	deriveAccount: SECRET_PARAMETER_NAMES,
-	getAccount: ['address', 'simplify'],
-	getReceivables: ['addressSource', 'addresses', 'minAmount', 'minAmountUnit', 'maxItems', 'timeoutMs', 'simplify'],
-	getTransactions: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs', 'simplify'],
+	getAccount: ['address'],
+	getReceivables: ['addressSource', 'addresses', 'minAmount', 'minAmountUnit', 'maxItems', 'timeoutMs'],
+	getTransactions: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
 	sendTransaction: [...SECRET_PARAMETER_NAMES, 'destinationAddress', 'amount', 'amountUnit', 'timeoutMs'],
 	receivePending: [...SECRET_PARAMETER_NAMES, 'representativeAddress', 'timeoutMs'],
-	getAccountEntries: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs', 'simplify'],
+	getAccountEntries: ['queryMode', 'addresses', 'hash', 'fromHeight', 'toHeight', 'maxItems', 'timeoutMs'],
 	changeRepresentative: [...SECRET_PARAMETER_NAMES, 'representativeAddress'],
 };
 
@@ -86,7 +85,6 @@ const DEFAULT_PARAMETER_VALUES: Record<AttoParameterName, string | number | bool
 	representativeAddress: '',
 	timeoutMs: 5000,
 	maxItems: 25,
-	simplify: true,
 };
 
 const AMOUNT_UNITS = [
@@ -589,18 +587,6 @@ export class Atto implements INodeType {
 					},
 				},
 				description: 'New representative address',
-			},
-			{
-				displayName: 'Simplify',
-				name: 'simplify',
-				type: 'boolean',
-				default: true,
-				displayOptions: {
-					show: {
-						operation: ['getAccount', 'getReceivables', 'getTransactions', 'getAccountEntries'],
-					},
-				},
-				description: 'Whether to return a compact set of commonly used fields instead of the complete Atto API response',
 			},
 			{
 				displayName: 'Max Items',

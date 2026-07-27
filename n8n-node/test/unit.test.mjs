@@ -133,7 +133,7 @@ test('preserves protocol-sized integers while parsing API JSON', () => {
 	assert.equal(parsed.timestamp, 1705517157478);
 });
 
-test('keeps simplified output as the default and preserves raw API output', async () => {
+test('returns the stable account output without a raw-output option', async () => {
 	const account = {
 		publicKey: '9979705D9F9588F46667697329947688E5FFC4DF36F5D0C6A4E29D023E7BF2CE',
 		network: 'LOCAL',
@@ -156,10 +156,9 @@ test('keeps simplified output as the default and preserves raw API output', asyn
 	};
 	const credentials = { nodeUrl: 'http://localhost' };
 
-	const simplified = await executeAttoOperation(context, 'getAccount', { address }, credentials);
-	const raw = await executeAttoOperation(context, 'getAccount', { address, simplify: false }, credentials);
+	const result = await executeAttoOperation(context, 'getAccount', { address }, credentials);
 
-	assert.deepEqual(simplified, {
+	assert.deepEqual(result, {
 		found: true,
 		address,
 		publicKey: account.publicKey,
@@ -168,7 +167,7 @@ test('keeps simplified output as the default and preserves raw API output', asyn
 		height: '2',
 		frontier: account.lastTransactionHash,
 	});
-	assert.deepEqual(raw, account);
+	assert.equal('serverMetadata' in result, false);
 });
 
 test('keeps field-specific amount and send validation around Commons', () => {
@@ -320,7 +319,7 @@ test('node continue-on-fail returns the original Commons message', async () => {
 	assert.deepEqual(output[0][0].pairedItem, { item: 0 });
 });
 
-test('node descriptions expose compliant output and polling controls', () => {
+test('node descriptions expose streaming triggers without raw-output or polling controls', () => {
 	const node = new Atto();
 	const trigger = new AttoTrigger();
 	const simplify = node.description.properties.find((property) => property.name === 'simplify');
@@ -328,12 +327,13 @@ test('node descriptions expose compliant output and polling controls', () => {
 
 	assert.equal(node.description.usableAsTool, true);
 	assert.equal(trigger.description.usableAsTool, true);
-	assert.equal(simplify.default, true);
-	assert.equal(trigger.description.polling, true);
-	assert.deepEqual(pollTimes.default, { item: [{ mode: 'everyMinute' }] });
+	assert.equal(simplify, undefined);
+	assert.equal(trigger.description.polling, undefined);
+	assert.equal(pollTimes, undefined);
+	assert.equal(typeof trigger.trigger, 'function');
 });
 
-test('trigger polling supplies fallbacks for hidden parameters', async () => {
+test('trigger startup supplies fallbacks for hidden parameters', async () => {
 	const requestedParameters = [];
 	const trigger = new AttoTrigger();
 	const context = {
@@ -344,12 +344,10 @@ test('trigger polling supplies fallbacks for hidden parameters', async () => {
 			throw new Error(`Could not get parameter ${name}`);
 		},
 		getNode: () => ({ name: 'Atto Trigger', type: '@attocash/n8n-nodes-atto.attoTrigger', typeVersion: 1, parameters: {} }),
-		getMode: () => 'manual',
-		getWorkflowStaticData: () => ({}),
-		helpers: {},
+		emit: () => {},
 	};
 
-	await assert.rejects(() => trigger.poll.call(context), /Wallet Secret/);
+	await assert.rejects(() => trigger.trigger.call(context), /Wallet Secret/);
 	assert.deepEqual(requestedParameters, [
 		'event',
 		'addressSource',
@@ -363,7 +361,7 @@ test('trigger polling supplies fallbacks for hidden parameters', async () => {
 	]);
 });
 
-test('trigger preserves n8n API errors', async () => {
+test('trigger fails startup for invalid configuration', async () => {
 	const params = {
 		event: 'account',
 		addressSource: 'all',
@@ -374,25 +372,22 @@ test('trigger preserves n8n API errors', async () => {
 		typeVersion: 1,
 		parameters: params,
 	};
-	const expectedError = new NodeApiError(nodeDescription, {
-		message: 'Upstream request failed',
-		statusCode: 503,
-	});
 	const trigger = new AttoTrigger();
 	const context = {
-		getCredentials: async () => ({ nodeUrl: 'http://localhost' }),
+		getCredentials: async () => ({ nodeUrl: 'not-a-url' }),
 		getNodeParameter: (name, fallbackValue) => params[name] ?? fallbackValue,
 		getNode: () => nodeDescription,
-		getMode: () => 'manual',
-		getWorkflowStaticData: () => ({}),
-		helpers: {
-			httpRequest: async () => {
-				throw expectedError;
-			},
-		},
+		emit: () => {},
 	};
 
-	await assert.rejects(() => trigger.poll.call(context), (error) => error === expectedError);
+	await assert.rejects(
+		() => trigger.trigger.call(context),
+		(error) => {
+			assert.equal(error instanceof NodeOperationError, true);
+			assert.match(error.message, /valid HTTP Node Base URL/);
+			return true;
+		},
+	);
 });
 
 test('rejects malformed addresses and mnemonic input', async () => {

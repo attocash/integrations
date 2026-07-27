@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import {
 	AttoMnemonic,
@@ -11,7 +12,10 @@ import {
 } from '@attocash/commons-core';
 import { AttoNodeMockAsyncBuilder, AttoWorkerMockAsyncBuilder } from '@attocash/commons-test';
 
-import { executeAttoOperation, pollAttoEvent } from '../dist/nodes/Atto/operations.js';
+import {
+	executeAttoOperation,
+	startAttoEventStream,
+} from '../dist/nodes/Atto/operations.js';
 
 function configureContainerRuntime() {
 	const docker = spawnSync('docker', ['version'], { stdio: 'ignore' });
@@ -65,6 +69,16 @@ function createContext(mode = 'manual') {
 	};
 }
 
+async function waitForEvent(items, predicate, description) {
+	const deadline = Date.now() + 30_000;
+	while (Date.now() < deadline) {
+		const item = items.find(predicate);
+		if (item) return item;
+		await delay(100);
+	}
+	throw new Error(`Timed out waiting for ${description}`);
+}
+
 const hasRuntime = configureContainerRuntime();
 const requireIntegration = process.env.ATTO_TEST_INTEGRATION === '1';
 
@@ -113,7 +127,7 @@ if (!hasRuntime && !requireIntegration) {
 		return await executeAttoOperation(context, 'deriveAddress', { secretSource: 'credentials' }, credentials(keyIndex));
 	}
 
-	test('uses n8n HTTP helpers for derive, send, reads, polling, receive, and representative change', async () => {
+	test('uses n8n HTTP helpers for actions and every trigger stream', async () => {
 		const context = createContext();
 		const account0 = await derive(context, 0);
 		const account1 = await derive(context, 1);
@@ -196,20 +210,89 @@ if (!hasRuntime && !requireIntegration) {
 		assert.equal(accountEntries[0].address, account0.address);
 		assert.ok(accountEntries[0].hash);
 
-		const pollContext = createContext('manual');
-		const polledReceivables = await pollAttoEvent(
-			pollContext,
-			'receivable',
-			{ addressSource: 'credentials', minAmount: '1', minAmountUnit: 'RAW' },
-			credentials(1),
-		);
-		assert.equal(polledReceivables.length, 1);
-		assert.equal((await pollAttoEvent(
-			pollContext,
-			'receivable',
-			{ addressSource: 'credentials', minAmount: '1', minAmountUnit: 'RAW' },
-			credentials(1),
-		)).length, 0);
+		const streamed = {
+			receivable: [],
+			account: [],
+			transaction: [],
+			accountEntry: [],
+		};
+		const triggerStreams = await Promise.all([
+			startAttoEventStream(
+				context,
+				'receivable',
+				{ addressSource: 'credentials', minAmount: '1', minAmountUnit: 'RAW' },
+				credentials(1),
+				(item) => streamed.receivable.push(item),
+			),
+			startAttoEventStream(
+				context,
+				'account',
+				{ addressSource: 'credentials' },
+				credentials(0),
+				(item) => streamed.account.push(item),
+			),
+			startAttoEventStream(
+				context,
+				'transaction',
+				{ queryMode: 'credentials', fromHeight: '1' },
+				credentials(0),
+				(item) => streamed.transaction.push(item),
+			),
+			startAttoEventStream(
+				context,
+				'accountEntry',
+				{ queryMode: 'credentials', fromHeight: '1' },
+				credentials(0),
+				(item) => streamed.accountEntry.push(item),
+			),
+		]);
+
+		let streamedSend;
+		try {
+			await delay(1000);
+			streamedSend = await executeAttoOperation(
+				context,
+				'sendTransaction',
+				{
+					secretSource: 'credentials',
+					destinationAddress: account1.address,
+					amount: '1',
+					amountUnit: 'RAW',
+				},
+				credentials(0),
+			);
+
+			const [streamedReceivable, streamedAccount, streamedTransaction, streamedAccountEntry] =
+				await Promise.all([
+					waitForEvent(
+						streamed.receivable,
+						(item) => item.hash === streamedSend.hash,
+						'a receivable emitted after subscription',
+					),
+					waitForEvent(
+						streamed.account,
+						(item) => item.frontier === streamedSend.hash,
+						'an account update emitted after subscription',
+					),
+					waitForEvent(
+						streamed.transaction,
+						(item) => item.hash === streamedSend.hash,
+						'a transaction emitted after subscription',
+					),
+					waitForEvent(
+						streamed.accountEntry,
+						(item) => item.hash === streamedSend.hash,
+						'an account entry emitted after subscription',
+					),
+				]);
+
+			assert.equal(streamedReceivable.address, account1.address);
+			assert.equal(streamedAccount.address, account0.address);
+			assert.equal(streamedTransaction.address, account0.address);
+			assert.equal(streamedAccountEntry.address, account0.address);
+		} finally {
+			await Promise.all(triggerStreams.map((stream) => stream.close()));
+		}
 
 		await assert.rejects(
 			() => executeAttoOperation(

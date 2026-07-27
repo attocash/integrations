@@ -59,4 +59,5 @@ test('package declares no runtime Commons dependency', () => {
 	assert.equal(packageJson.dependencies, undefined);
 	assert.deepEqual(packageJson.peerDependencies, { 'n8n-workflow': '*' });
 	assert.equal(typeof packageJson.devDependencies['@attocash/commons-core'], 'string');
+	assert.equal(packageJson.devDependencies['@attocash/commons-node-remote'], undefined);
 });

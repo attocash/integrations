@@ -2,12 +2,16 @@ import {
 	NodeConnectionTypes,
 	NodeApiError,
 	NodeOperationError,
-	type INodeExecutionData,
 	type INodeType,
 	type INodeTypeDescription,
-	type IPollFunctions,
+	type ITriggerFunctions,
+	type ITriggerResponse,
 } from 'n8n-workflow';
-import { pollAttoEvent, type AttoParameters, type AttoTriggerEvent } from '../Atto/operations';
+import {
+	startAttoEventStream,
+	type AttoParameters,
+	type AttoTriggerEvent,
+} from '../Atto/operations';
 
 const TRIGGER_PARAMETER_NAMES = [
 	'addressSource',
@@ -62,7 +66,6 @@ export class AttoTrigger implements INodeType {
 		inputs: [],
 		outputs: [NodeConnectionTypes.Main],
 		usableAsTool: true,
-		polling: true,
 		credentials: [
 			{
 				name: 'attoApi',
@@ -70,37 +73,6 @@ export class AttoTrigger implements INodeType {
 			},
 		],
 		properties: [
-			{
-				displayName: 'Poll Times',
-				name: 'pollTimes',
-				type: 'fixedCollection',
-				typeOptions: {
-					multipleValues: true,
-					multipleValueButtonText: 'Add Poll Time',
-				},
-				default: {
-					item: [{ mode: 'everyMinute' }],
-				},
-				options: [
-					{
-						name: 'item',
-						displayName: 'Poll Time',
-						values: [
-							{
-								displayName: 'Mode',
-								name: 'mode',
-								type: 'options',
-								options: [
-									{ name: 'Every Minute', value: 'everyMinute' },
-									{ name: 'Every Hour', value: 'everyHour' },
-									{ name: 'Every Day', value: 'everyDay' },
-								],
-								default: 'everyMinute',
-							},
-						],
-					},
-				],
-			},
 			{
 				displayName: 'Event',
 				name: 'event',
@@ -304,7 +276,7 @@ export class AttoTrigger implements INodeType {
 		],
 	};
 
-	async poll(this: IPollFunctions): Promise<INodeExecutionData[][] | null> {
+	async trigger(this: ITriggerFunctions): Promise<ITriggerResponse> {
 		try {
 			const credentials = await this.getCredentials('attoApi');
 			const event = this.getNodeParameter('event', 'receivable') as AttoTriggerEvent;
@@ -314,8 +286,16 @@ export class AttoTrigger implements INodeType {
 					this.getNodeParameter(name, TRIGGER_PARAMETER_DEFAULTS[name]) as unknown,
 				]),
 			) as AttoParameters;
-			const items = await pollAttoEvent(this, event, parameters, credentials);
-			return items.length > 0 ? [items.map((json) => ({ json }))] : null;
+			const stream = await startAttoEventStream(
+				this,
+				event,
+				parameters,
+				credentials,
+				(json) => this.emit([[{ json }]]),
+			);
+			return {
+				closeFunction: async () => stream.close(),
+			};
 		} catch (error) {
 			const nodeError =
 				error instanceof NodeApiError || error instanceof NodeOperationError
