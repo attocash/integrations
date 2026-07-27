@@ -6,7 +6,6 @@ import {
 	type INodeType,
 	type INodeTypeDescription,
 	type IPollFunctions,
-	type JsonObject,
 } from 'n8n-workflow';
 import { pollAttoEvent, type AttoParameters, type AttoTriggerEvent } from '../Atto/operations';
 
@@ -49,7 +48,10 @@ export class AttoTrigger implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Atto Trigger',
 		name: 'attoTrigger',
-		icon: 'file:atto.svg',
+		icon: {
+			light: 'file:atto.svg',
+			dark: 'file:atto.dark.svg',
+		},
 		group: ['trigger'],
 		version: 1,
 		subtitle: '={{$parameter["event"]}}',
@@ -315,10 +317,11 @@ export class AttoTrigger implements INodeType {
 			const items = await pollAttoEvent(this, event, parameters, credentials);
 			return items.length > 0 ? [items.map((json) => ({ json }))] : null;
 		} catch (error) {
-			if (error instanceof NodeApiError) {
-				throw new NodeApiError(this.getNode(), error as unknown as JsonObject);
-			}
-			throw new NodeOperationError(this.getNode(), error as Error);
+			const nodeError =
+				error instanceof NodeApiError || error instanceof NodeOperationError
+					? error
+					: new NodeOperationError(this.getNode(), error as Error);
+			throw nodeError;
 		}
 	}
 }

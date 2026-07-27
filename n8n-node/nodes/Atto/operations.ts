@@ -286,7 +286,7 @@ function parseAddresses(value: unknown, fieldName: string): AttoAddress[] {
 		.split(/[\n,]+/)
 		.map((address) => address.trim())
 		.filter(Boolean)
-		.map((address) => parseAddress(address, fieldName));
+		.map((address) => parseAddress(address));
 	if (result.length === 0) throw new Error(`${fieldName} is required`);
 	return result;
 }
@@ -373,7 +373,7 @@ async function transactionStreamRequest(
 	if (mode === 'hash') {
 		return {
 			method: 'GET',
-			path: `transactions/${parseHash(parameters.hash, 'Hash')}/stream`,
+			path: `transactions/${parseHash(parameters.hash)}/stream`,
 			maxItems: maxItems ?? 1,
 			timeoutMs: timeoutMs ?? limits.timeoutMs,
 		};
@@ -410,7 +410,7 @@ async function accountEntryStreamRequest(
 	if (mode === 'hash') {
 		return {
 			method: 'GET',
-			path: `accounts/entries/${parseHash(parameters.hash, 'Hash')}/stream`,
+			path: `accounts/entries/${parseHash(parameters.hash)}/stream`,
 			maxItems: maxItems ?? 1,
 			timeoutMs: timeoutMs ?? limits.timeoutMs,
 		};
@@ -520,7 +520,7 @@ async function receivableFromInput(
 	if (nested && typeof nested === 'object' && !Array.isArray(nested)) return nested as IDataObject;
 	if (input.network && input.receiverPublicKey && input.amount) return input;
 
-	const hash = parseHash(input.hash, 'Input receivable hash');
+	const hash = parseHash(input.hash);
 	const transaction = (await requestJson(context, value, requireNodeUrl(value), 'GET', `transactions/${hash}`)) as IDataObject;
 	const block = transaction.block as IDataObject | undefined;
 	if (!block || block.type !== 'SEND') throw new Error('Input receivable hash does not identify an Atto send transaction');
@@ -553,7 +553,7 @@ export async function executeAttoOperation(
 
 	const execution = contextRequired(context);
 	if (operation === 'getAccount') {
-		const address = parseAddress(parameters.address ?? parameters.lookupAddress, 'Address');
+		const address = parseAddress(parameters.address ?? parameters.lookupAddress);
 		const account = await accountByAddress(execution, value, address);
 		return account ? accountOutput(account, simplify) : { found: false, address: address.value };
 	}
@@ -562,7 +562,7 @@ export async function executeAttoOperation(
 	}
 	if (operation === 'getTransactions') {
 		if (queryMode(parameters.queryMode) === 'hash') {
-			const hash = parseHash(parameters.hash, 'Hash');
+			const hash = parseHash(parameters.hash);
 			const transaction = (await requestJson(execution, value, requireNodeUrl(value), 'GET', `transactions/${hash}`)) as IDataObject;
 			return [transactionOutput(transaction, simplify)];
 		}
@@ -579,7 +579,7 @@ export async function executeAttoOperation(
 
 	if (operation === 'sendTransaction') {
 		if (!account) throw new Error('The wallet account is not open yet');
-		const destination = parseAddress(parameters.destinationAddress, 'Destination Address');
+		const destination = parseAddress(parameters.destinationAddress);
 		const amount = parseAmount(parameters.amount, parameters.amountUnit, 'Amount');
 		const block = createSendBlock(account, destination, amount, timestamp);
 		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
@@ -595,7 +595,7 @@ export async function executeAttoOperation(
 		const receiver = addressFromPublicKey(text(receivable.receiverPublicKey));
 		if (receiver.value !== derived.value) throw new Error('Receivable Address must match the address derived from the wallet secret');
 		const representative = optionalText(parameters.representativeAddress)
-			? parseAddress(parameters.representativeAddress, 'Representative Address')
+			? parseAddress(parameters.representativeAddress)
 			: derived;
 		const block = createReceiveBlock(account, receivable, representative, timestamp);
 		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
@@ -608,7 +608,7 @@ export async function executeAttoOperation(
 	}
 	if (operation === 'changeRepresentative') {
 		if (!account) throw new Error('The wallet account is not open yet');
-		const representative = parseAddress(parameters.representativeAddress, 'Representative Address');
+		const representative = parseAddress(parameters.representativeAddress);
 		const block = createChangeBlock(account, representative, timestamp);
 		const transaction = await publishBlock(execution, value, block, derived.signer, timeoutMs);
 		return {
@@ -668,7 +668,7 @@ export async function pollAttoEvent(
 	} else if (event === 'transaction') {
 		const mode = queryMode(parameters.queryMode);
 		if (mode === 'hash') {
-			const transaction = (await requestJson(context, value, requireNodeUrl(value), 'GET', `transactions/${parseHash(parameters.hash, 'Hash')}`)) as IDataObject;
+			const transaction = (await requestJson(context, value, requireNodeUrl(value), 'GET', `transactions/${parseHash(parameters.hash)}`)) as IDataObject;
 			items = [transactionOutput(transaction, true)];
 		} else {
 			items = (await requestStream(context, value, await transactionStreamRequest(parameters, value, POLL_MAX_ITEMS, POLL_TIMEOUT_MS))).map((item) => transactionOutput(item, true));

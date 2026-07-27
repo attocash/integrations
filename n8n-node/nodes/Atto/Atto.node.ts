@@ -6,7 +6,6 @@ import {
 	type INodeExecutionData,
 	type INodeType,
 	type INodeTypeDescription,
-	type JsonObject,
 } from 'n8n-workflow';
 import { executeAttoOperation, type AttoOperation } from './operations';
 
@@ -110,7 +109,10 @@ export class Atto implements INodeType {
 	description: INodeTypeDescription = {
 		displayName: 'Atto',
 		name: 'atto',
-		icon: 'file:atto.svg',
+		icon: {
+			light: 'file:atto.svg',
+			dark: 'file:atto.dark.svg',
+		},
 		group: ['transform'],
 		version: 1,
 		subtitle: '={{$parameter["operation"]}}',
@@ -694,10 +696,12 @@ export class Atto implements INodeType {
 					continue;
 				}
 
-				if (error instanceof NodeApiError) {
-					throw new NodeApiError(this.getNode(), error as unknown as JsonObject, { itemIndex });
-				}
-				throw new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+				const nodeError =
+					error instanceof NodeApiError || error instanceof NodeOperationError
+						? error
+						: new NodeOperationError(this.getNode(), error as Error, { itemIndex });
+				nodeError.context.itemIndex = itemIndex;
+				throw nodeError;
 			}
 		}
 

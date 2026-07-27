@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { createRequire } from 'node:module';
 
 import {
 	AttoAlgorithm,
@@ -11,6 +12,9 @@ import {
 	toPublicKey,
 	toSeedAsync,
 } from '@attocash/commons-core';
+
+const require = createRequire(import.meta.url);
+const { NodeApiError, NodeOperationError } = require('n8n-workflow');
 
 import { Atto } from '../dist/nodes/Atto/Atto.node.js';
 import { AttoTrigger } from '../dist/nodes/AttoTrigger/AttoTrigger.node.js';
@@ -43,7 +47,7 @@ test('derives the same mnemonic key and address as Atto Commons', async () => {
 	assert.equal(result.signer.publicKey.toString(), expectedPublicKey.toString());
 	assert.equal(result.publicKey, expectedPublicKey.toString());
 	assert.equal(result.value, expectedAddress.value);
-	assert.equal(parseAddress(result.value, 'Address').publicKey, result.publicKey);
+	assert.equal(parseAddress(result.value).publicKey, result.publicKey);
 	assert.equal('privateKey' in result, false);
 });
 
@@ -182,7 +186,7 @@ test('keeps field-specific amount and send validation around Commons', () => {
 	};
 
 	assert.throws(() => parseAmount('0', 'ATTO', 'Amount'), /positive Atto amount/);
-	assert.throws(() => parseAmount('0.0000000001', 'ATTO', 'Amount'), /positive Atto amount/);
+	assert.throws(() => parseAmount('0.0000000001', 'ATTO', 'Amount'), /exceeds 9 decimal places/);
 	assert.throws(
 		() => createSendBlock(account, addressFromPublicKey(account.publicKey), parseAmount('1', 'ATTO', 'Amount'), 1705517158478),
 		/Destination Address must differ/,
@@ -223,6 +227,97 @@ test('node execute passes resolved parameters and supports n8n defaults', async 
 	assert.match(output[0][0].json.address, /^atto:\/\//);
 	assert.deepEqual(output[0][0].pairedItem, { item: 0 });
 	assert.deepEqual(requestedParameters, ['resource', 'operation', 'secretSource', 'walletSecretType', 'walletSecret', 'keyIndex']);
+});
+
+test('node wraps Commons validation failures with the failing item index', async () => {
+	const params = {
+		resource: 'account',
+		operation: 'getAccount',
+		address: 'not-an-address',
+	};
+	const node = new Atto();
+	const context = {
+		getInputData: () => [{ json: {} }],
+		getCredentials: async () => ({}),
+		getNodeParameter: (name, _itemIndex, fallbackValue) => params[name] ?? fallbackValue,
+		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
+		continueOnFail: () => false,
+		helpers: {},
+	};
+
+	await assert.rejects(
+		() => node.execute.call(context),
+		(error) => {
+			assert.equal(error instanceof NodeOperationError, true);
+			assert.equal(error.context.itemIndex, 0);
+			assert.match(error.message, /invalid/);
+			return true;
+		},
+	);
+});
+
+test('node preserves API errors and adds the failing item index', async () => {
+	const publicKey = '9979705D9F9588F46667697329947688E5FFC4DF36F5D0C6A4E29D023E7BF2CE';
+	const params = {
+		resource: 'account',
+		operation: 'getAccount',
+		address: addressFromPublicKey(publicKey).value,
+		simplify: true,
+	};
+	const nodeDescription = {
+		name: 'Atto',
+		type: '@attocash/n8n-nodes-atto.atto',
+		typeVersion: 1,
+		parameters: params,
+	};
+	const expectedError = new NodeApiError(nodeDescription, {
+		message: 'Upstream request failed',
+		statusCode: 503,
+	});
+	const node = new Atto();
+	const context = {
+		getInputData: () => [{ json: {} }],
+		getCredentials: async () => ({ nodeUrl: 'http://localhost' }),
+		getNodeParameter: (name, _itemIndex, fallbackValue) => params[name] ?? fallbackValue,
+		getNode: () => nodeDescription,
+		continueOnFail: () => false,
+		helpers: {
+			httpRequest: async () => {
+				throw expectedError;
+			},
+		},
+	};
+
+	await assert.rejects(
+		() => node.execute.call(context),
+		(error) => {
+			assert.equal(error, expectedError);
+			assert.equal(error.context.itemIndex, 0);
+			return true;
+		},
+	);
+});
+
+test('node continue-on-fail returns the original Commons message', async () => {
+	const params = {
+		resource: 'account',
+		operation: 'getAccount',
+		address: 'not-an-address',
+	};
+	const node = new Atto();
+	const context = {
+		getInputData: () => [{ json: {} }],
+		getCredentials: async () => ({}),
+		getNodeParameter: (name, _itemIndex, fallbackValue) => params[name] ?? fallbackValue,
+		getNode: () => ({ name: 'Atto', type: '@attocash/n8n-nodes-atto.atto', typeVersion: 1, parameters: params }),
+		continueOnFail: () => true,
+		helpers: {},
+	};
+
+	const output = await node.execute.call(context);
+
+	assert.match(output[0][0].json.error, /invalid/);
+	assert.deepEqual(output[0][0].pairedItem, { item: 0 });
 });
 
 test('node descriptions expose compliant output and polling controls', () => {
@@ -268,8 +363,40 @@ test('trigger polling supplies fallbacks for hidden parameters', async () => {
 	]);
 });
 
+test('trigger preserves n8n API errors', async () => {
+	const params = {
+		event: 'account',
+		addressSource: 'all',
+	};
+	const nodeDescription = {
+		name: 'Atto Trigger',
+		type: '@attocash/n8n-nodes-atto.attoTrigger',
+		typeVersion: 1,
+		parameters: params,
+	};
+	const expectedError = new NodeApiError(nodeDescription, {
+		message: 'Upstream request failed',
+		statusCode: 503,
+	});
+	const trigger = new AttoTrigger();
+	const context = {
+		getCredentials: async () => ({ nodeUrl: 'http://localhost' }),
+		getNodeParameter: (name, fallbackValue) => params[name] ?? fallbackValue,
+		getNode: () => nodeDescription,
+		getMode: () => 'manual',
+		getWorkflowStaticData: () => ({}),
+		helpers: {
+			httpRequest: async () => {
+				throw expectedError;
+			},
+		},
+	};
+
+	await assert.rejects(() => trigger.poll.call(context), (error) => error === expectedError);
+});
+
 test('rejects malformed addresses and mnemonic input', async () => {
-	assert.throws(() => parseAddress('not-an-address', 'Address'), /valid Atto address/);
+	assert.throws(() => parseAddress('not-an-address'), /invalid/);
 	await assert.rejects(
 		() => deriveAddressFromSecret({ secretSource: 'node', walletSecretType: 'mnemonic', walletSecret: 'too short', keyIndex: 0 }),
 		/24 words/,

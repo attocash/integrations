@@ -1,5 +1,4 @@
 /* eslint-disable @n8n/community-nodes/no-restricted-imports -- Commons is bundled into this file during the build. */
-/* eslint-disable @n8n/community-nodes/require-node-api-error -- Pure protocol helpers are wrapped by the n8n operation boundary. */
 import {
 	AttoAccount as CommonsAccount,
 	AttoAccountEntry as CommonsAccountEntry,
@@ -146,22 +145,17 @@ function amountModel(value: unknown): CommonsAmount {
 }
 
 export function addressFromPublicKey(publicKey: string): AttoAddress {
-	try {
-		const model = new CommonsAddress(AttoAlgorithm.V1, AttoPublicKey.Companion.parse(publicKey.trim()));
-		return addressOutput(model);
-	} catch {
-		throw new Error('Public Key must be 64 hexadecimal characters');
-	}
+	const model = new CommonsAddress(
+		AttoAlgorithm.V1,
+		AttoPublicKey.Companion.parse(publicKey.trim()),
+	);
+	return addressOutput(model);
 }
 
-export function parseAddress(value: unknown, fieldName: string): AttoAddress {
+export function parseAddress(value: unknown): AttoAddress {
 	const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
 	const withPrefix = normalized.startsWith(ADDRESS_PREFIX) ? normalized : `${ADDRESS_PREFIX}${normalized}`;
-	try {
-		return addressOutput(CommonsAddress.parse(withPrefix));
-	} catch {
-		throw new Error(`${fieldName} must be a valid Atto address`);
-	}
+	return addressOutput(CommonsAddress.parse(withPrefix));
 }
 
 export async function deriveAddressFromSecret(
@@ -174,20 +168,12 @@ export async function deriveAddressFromSecret(
 	if (input.type === 'mnemonic') {
 		const phrase = input.secret.normalize('NFKD').replace(/\s+/g, ' ').trim();
 		if (phrase.split(' ').length !== 24) throw new Error('Wallet Secret mnemonic must contain 24 words');
-		try {
-			privateKey = await toPrivateKey(
-				await toSeedAsync(await AttoMnemonic.fromPhrase(phrase)),
-				toAttoIndex(input.index),
-			);
-		} catch {
-			throw new Error('Wallet Secret must contain a valid Atto mnemonic');
-		}
+		privateKey = await toPrivateKey(
+			await toSeedAsync(await AttoMnemonic.fromPhrase(phrase)),
+			toAttoIndex(input.index),
+		);
 	} else {
-		try {
-			privateKey = AttoPrivateKey.Companion.parse(input.secret);
-		} catch {
-			throw new Error('Wallet Secret private key must be 64 hexadecimal characters');
-		}
+		privateKey = AttoPrivateKey.Companion.parse(input.secret);
 	}
 
 	const signer = await privateKeyToSigner(privateKey);
@@ -199,25 +185,20 @@ export async function deriveAddressFromSecret(
 	};
 }
 
-export function parseHash(value: unknown, fieldName: string): string {
+export function parseHash(value: unknown): string {
 	const normalized = typeof value === 'string' ? value.trim() : '';
-	try {
-		return AttoHash.Companion.parse(normalized).toString();
-	} catch {
-		throw new Error(`${fieldName} must be a valid Atto hash`);
-	}
+	return AttoHash.Companion.parse(normalized).toString();
 }
 
 export function parseAmount(value: unknown, unit: unknown, fieldName: string): CommonsAmount {
 	const normalized = typeof value === 'string' || typeof value === 'number' ? String(value).trim() : '';
 	if (!normalized) throw new Error(`${fieldName} is required`);
-	try {
-		const amount = CommonsAmount.from(String(unit).toUpperCase() === 'RAW' ? AttoUnit.RAW : AttoUnit.ATTO, normalized);
-		if (amount.toString() === '0') throw new Error('zero');
-		return amount;
-	} catch {
-		throw new Error(`${fieldName} must be a positive Atto amount`);
-	}
+	const amount = CommonsAmount.from(
+		String(unit).toUpperCase() === 'RAW' ? AttoUnit.RAW : AttoUnit.ATTO,
+		normalized,
+	);
+	if (amount.toString() === '0') throw new Error(`${fieldName} must be a positive Atto amount`);
+	return amount;
 }
 
 export function amountOutput(value: unknown): IDataObject {
@@ -252,12 +233,7 @@ export async function signedTransaction(
 	signer: CommonsSigner,
 	work: string,
 ): Promise<SignedTransaction> {
-	let attoWork: AttoWork;
-	try {
-		attoWork = AttoWork.Companion.parse(work);
-	} catch {
-		throw new Error('Atto worker returned invalid work');
-	}
+	const attoWork = AttoWork.Companion.parse(work);
 	const model = new CommonsTransaction(block, await signer.signBlock(block), attoWork);
 	return {
 		model,

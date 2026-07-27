@@ -5,7 +5,10 @@ export class AttoApi implements ICredentialType {
 
 	displayName = 'Atto API';
 
-	icon: Icon = 'file:../nodes/Atto/atto.svg';
+	icon: Icon = {
+		light: 'file:../nodes/Atto/atto.svg',
+		dark: 'file:../nodes/Atto/atto.dark.svg',
+	};
 
 	documentationUrl = 'https://github.com/attocash/integrations/blob/main/n8n-node/USAGE.md';
 
