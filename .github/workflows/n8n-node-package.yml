@@ -181,4 +181,4 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to npm
-        run: npm publish artifacts/*.tgz --provenance --access public
+        run: npm publish ./artifacts/*.tgz --provenance --access public
