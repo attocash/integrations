@@ -109,7 +109,7 @@ test('Setup and approvals require a terminal before opening a profile', async t 
   });
 });
 
-test('Read-only setup preserves shared CLI limits and emits pinned public config', async t => {
+test('Read-only setup preserves shared CLI limits and emits public config using the latest release', async t => {
   // Given
   const f = await fixture(t);
 
@@ -124,8 +124,7 @@ test('Read-only setup preserves shared CLI limits and emits pinned public config
   // Then
   assert.equal(result.code, 0, result.stderr);
   const config = JSON.parse(result.stdout);
-  const version = JSON.parse(await readFile(join(mcpDirectory, 'package.json'), 'utf8')).version;
-  assert.deepEqual(config.mcpServers.atto, { command: 'npx', args: ['--yes', `@attocash/mcp@${version}`, '--data-dir', f.directory] });
+  assert.deepEqual(config.mcpServers.atto, { command: 'npx', args: ['--yes', '@attocash/mcp@latest', '--data-dir', f.directory] });
   assert.match(result.stderr, /shares funds, payment history, and spending limits/);
   assert.match(result.stderr, /Wallet: "atto_public_fixture"/);
   assert.match(result.stderr, /MCP access: \[1\] Read-only \(default\)/);

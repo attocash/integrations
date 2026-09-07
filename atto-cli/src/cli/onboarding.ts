@@ -111,7 +111,7 @@ async function configurePool(current: AccountPool): Promise<AccountPool> {
 }
 
 /** Returns only public host configuration; recovery material is displayed directly on the TTY. */
-export async function setupMcp({ version, directory }: { version: string; directory?: string }): Promise<unknown> {
+export async function setupMcp({ directory }: { directory?: string }): Promise<unknown> {
   requireTerminal();
   process.stderr.write('Atto MCP setup. Recovery phrases stay in your OS password store and this terminal.\n');
   const wallet = await choose('Wallet: [1] Dedicated MCP wallet (default), [2] Existing CLI wallet: ');
@@ -139,6 +139,6 @@ export async function setupMcp({ version, directory }: { version: string; direct
     const { proposal } = await application.call('limits_propose', { policy, access, pool }) as { proposal: { id: string } };
     await approve(application, proposal.id);
     process.stderr.write('\nAdd this public configuration to your MCP client. The explicit data directory preserves your wallet selection.\n');
-    return { mcpServers: { atto: { command: 'npx', args: ['--yes', `@attocash/mcp@${version}`, '--data-dir', profile.directory] } } };
+    return { mcpServers: { atto: { command: 'npx', args: ['--yes', '@attocash/mcp@latest', '--data-dir', profile.directory] } } };
   } finally { await application.close(); }
 }

@@ -93,9 +93,9 @@ Replace the example path with the absolute directory selected during setup.
 Sharing a directory shares the wallet's funds, history, and spending limits.
 Omitting `--data-dir` always selects the default dedicated MCP wallet.
 
-Setup prints a configuration containing the selected directory and the package
-version used. You can copy it directly, or replace its package version with
-`@latest`; keep the selected directory when using another wallet.
+Setup prints a configuration using `@attocash/mcp@latest` and the selected
+directory. You can copy it directly; keep the selected directory when using
+another wallet.
 
 ### Install globally
 

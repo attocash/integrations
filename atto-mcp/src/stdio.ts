@@ -38,7 +38,7 @@ export async function runMcp(argv = process.argv): Promise<void> {
       }
     });
   program.command('setup').description('Choose a wallet and approve MCP access in this terminal')
-    .action(async () => { process.stdout.write(`${JSON.stringify(await setupMcp({ version, directory: directory() }), null, 2)}\n`); });
+    .action(async () => { process.stdout.write(`${JSON.stringify(await setupMcp({ directory: directory() }), null, 2)}\n`); });
   const limits = program.command('limits').description('Approve or reject proposed limits in this terminal');
   limits.command('approve <id>').description('Review and approve an immutable proposal')
     .action(async id => output(await approveLimitsProposal({ id, directory: directory() ?? dedicatedMcpDirectory() })));
