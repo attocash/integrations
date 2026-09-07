@@ -52,10 +52,24 @@ Leave it running while you want to receive; stop it with Ctrl+C.
 npx --yes @attocash/mcp@latest setup
 ```
 
-Setup walks you through choosing or creating a wallet, selecting read-only or
-bounded spending access, and generating your client configuration. Copy that
-configuration into your MCP client and reconnect. A global installation is
-optional; npm fetches the MCP server and its CLI engine dependency.
+Choose **Dedicated MCP wallet (default)** and follow the prompts to create or
+import a wallet and select read-only or bounded spending access. Add this
+configuration to your MCP client and reconnect:
+
+```json
+{
+  "mcpServers": {
+    "atto": {
+      "command": "npx",
+      "args": ["--yes", "@attocash/mcp@latest"]
+    }
+  }
+}
+```
+
+The client starts the server automatically. A global installation is optional,
+and the default wallet needs no `--data-dir`. To share a CLI wallet or choose
+another directory, see the [custom wallet example](atto-mcp/README.md#share-a-cli-wallet-or-choose-another-directory).
 
 Then try asking:
 

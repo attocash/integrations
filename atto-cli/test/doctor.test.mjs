@@ -169,15 +169,16 @@ test('Doctor reads committed WAL state from an open wallet and leaves its settin
   const f = await doctorFixture(t);
   const { readDoctorProfile } = await import(moduleUrl('doctor/profile.js'));
   const db = new DatabaseSync(join(f.directory, 'state.sqlite'));
-  t.after(() => db.close());
-  db.exec('PRAGMA wal_autocheckpoint = 0');
-  const settings = JSON.parse(db.prepare("SELECT value FROM settings WHERE key = 'settings'").get().value);
-  settings.nodeUrl = 'http://127.0.0.1:12345';
-  db.prepare("UPDATE settings SET value = ? WHERE key = 'settings'").run(JSON.stringify(settings));
-  const before = await filesSnapshot(f.directory);
-  const inspected = readDoctorProfile(f.directory);
-  assert.equal(inspected.settings.nodeUrl, settings.nodeUrl);
-  assert.deepEqual(await filesSnapshot(f.directory), before);
+  try {
+    db.exec('PRAGMA wal_autocheckpoint = 0');
+    const settings = JSON.parse(db.prepare("SELECT value FROM settings WHERE key = 'settings'").get().value);
+    settings.nodeUrl = 'http://127.0.0.1:12345';
+    db.prepare("UPDATE settings SET value = ? WHERE key = 'settings'").run(JSON.stringify(settings));
+    const before = await filesSnapshot(f.directory);
+    const inspected = readDoctorProfile(f.directory);
+    assert.equal(inspected.settings.nodeUrl, settings.nodeUrl);
+    assert.deepEqual(await filesSnapshot(f.directory), before);
+  } finally { db.close(); }
 });
 
 test('Profile permission and pending-reset checks report problems without fixing or reconciling them', linux, async t => {

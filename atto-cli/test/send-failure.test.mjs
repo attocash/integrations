@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
+import { interruptCli, sigintHarness } from './support/signals.mjs';
 import { AttoBlock, AttoMnemonic, AttoPublicKey, AttoTransaction, AttoWork } from '@attocash/commons-core';
 import { AttoNodeClientAsyncBuilder } from '@attocash/commons-node-remote';
 const applicationUrl = process.env.ATTO_TEST_CLI_PACKAGE_DIR
@@ -254,6 +255,7 @@ for (const json of [false, true]) {
     test(`real CLI ${json ? 'JSON' : 'plain'} send ${mode === 'account-failure' ? 'cancels retry on SIGINT' : 'stops on 429'} and retains its generated ID`, { timeout: 15_000 }, async t => {
       const f = await fixture(t, mode);
       const harness = `
+        ${sigintHarness}
         const { OsSecretStore } = await import(process.env.ATTO_TEST_SECRETS_MODULE);
         let secretAccesses = 0;
         OsSecretStore.prototype.get = async () => { secretAccesses++; throw new Error('No keyring access in this test.'); };
@@ -276,7 +278,7 @@ for (const json of [false, true]) {
       child.stdout.on('data', chunk => { stdout += chunk; });
       child.stderr.on('data', chunk => {
         stderr += chunk;
-        if (!interrupted && /Retrying in|retryInMs/.test(stderr)) { interrupted = true; child.kill('SIGINT'); }
+        if (!interrupted && /Retrying in|retryInMs/.test(stderr)) { interrupted = true; interruptCli(child); }
       });
       child.on('message', message => { trace = message; });
       const [code, signal] = await once(child, 'close');

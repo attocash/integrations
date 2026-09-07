@@ -21,35 +21,57 @@ Available as an initial beta, with 36 tools over local stdio.
 ## Install and connect
 
 Requires **Node.js 24** and an available OS password store. Use the latest 24.x
-release. Run setup in your own interactive terminal:
+release. For your first wallet, run setup in your own interactive terminal and
+choose **Dedicated MCP wallet (default)**:
 
 ```sh
 npx --yes @attocash/mcp@latest setup
 ```
 
+Setup lets you create or import a wallet, keep read-only access, or approve
+bounded spending. `--yes` handles npm's installation prompt only; wallet creation
+and spending approval still require your confirmation in the terminal.
+
+Then add this default configuration to your MCP client:
+
+```json
+{
+  "mcpServers": {
+    "atto": {
+      "command": "npx",
+      "args": ["--yes", "@attocash/mcp@latest"]
+    }
+  }
+}
+```
+
+This uses the default dedicated MCP wallet. No `--data-dir` is needed. Your
+client starts the server automatically; you do not need to keep the setup
+terminal open or run setup each time. An already initialized default wallet can
+connect directly. Restart or reconnect your MCP client, then ask it to check
+wallet status or run the `doctor` tool.
+
 A global installation is optional. npm downloads the MCP server and its CLI
-engine dependency automatically. `@latest` selects the current published release.
+engine dependency automatically, and `@latest` selects the current published
+release. Wallet state stays outside npm's cache. Recovery phrases are stored
+in the OS password store and displayed or entered only in your terminal.
 
-`--yes` here handles npm's installation prompt only. Wallet creation and spending
-approval still require you to review the displayed details and type `yes` in the
-local terminal. Setup lets you:
+Use an absolute `npx` path if your client cannot find `npx`. Launch the server
+in the same OS user session that can access the password store. See the
+[CLI guide](https://github.com/attocash/integrations/tree/main/atto-cli#install)
+for Linux Secret Service, macOS Keychain, and Windows Credential Manager setup.
+For keyring or connection problems, see [Troubleshooting](#troubleshooting).
 
-1. Choose a dedicated MCP wallet, or select an existing CLI wallet directory.
-2. Reuse the selected wallet, or create/import one if it is uninitialized.
-3. Keep the current payment pool, or choose account indexes and whether automatic
-   payments may consolidate funds between them.
-4. Approve read-only access, or enter per-payment and rolling 24-hour ATTO caps
-   for spending access.
+### Share a CLI wallet or choose another directory
 
-The generated public MCP configuration includes the selected absolute
-`--data-dir`. Wallet state and credentials remain outside npm's cache, so
-reinstalling the package does not select a different wallet. Recovery phrases
-are stored in the OS password store and displayed or entered only in the
-terminal; they are absent from MCP tool inputs and responses.
+To share your CLI wallet, run setup and choose **Existing CLI wallet**. To
+select a specific directory, you can also pass it to setup:
 
-Setup prints an MCP client configuration with your selected absolute
-`--data-dir` and pins the version used during setup. To follow the latest
-published release, use `@latest` in the package argument as shown below:
+```sh
+npx --yes @attocash/mcp@latest --data-dir /absolute/path/to/wallet setup
+```
+
+Include that same directory in your MCP configuration:
 
 ```json
 {
@@ -60,35 +82,33 @@ published release, use `@latest` in the package argument as shown below:
         "--yes",
         "@attocash/mcp@latest",
         "--data-dir",
-        "/absolute/path/to/selected/profile"
+        "/absolute/path/to/wallet"
       ]
     }
   }
 }
 ```
 
-The directory above is a placeholder; use the path printed by setup. Keeping
-the version printed by setup is also supported, for manual upgrades. Restart
-or reconnect the MCP client after adding the configuration. Ask it to check
-wallet status or run the `doctor` tool to verify the connection.
+Replace the example path with the absolute directory selected during setup.
+Sharing a directory shares the wallet's funds, history, and spending limits.
+Omitting `--data-dir` always selects the default dedicated MCP wallet.
 
-Use an absolute `npx` path if your client cannot find `npx`. Launch the server
-in the same OS user session that can access the password store. See the
-[CLI guide](https://github.com/attocash/integrations/tree/main/atto-cli#install)
-for Linux Secret Service, macOS Keychain, and Windows Credential Manager setup.
+Setup prints a configuration containing the selected directory and the package
+version used. You can copy it directly, or replace its package version with
+`@latest`; keep the selected directory when using another wallet.
 
-For keyring or connection problems, see [Troubleshooting](#troubleshooting).
+### Install globally
 
-If you prefer a global installation, install the published MCP package:
+If you prefer a global installation:
 
 ```sh
 npm install --global @attocash/mcp
 atto-mcp setup
 ```
 
-You can then use `atto-mcp` as the configured command, with `--data-dir` and the
-selected path as its arguments. Source installation is covered in
-[Install from source](#install-from-source) below.
+Use `atto-mcp` as the configured command with an empty argument list for the
+default wallet. Add `--data-dir` and the selected path for another wallet.
+Source installation is covered in [Install from source](#install-from-source).
 
 ## Try these prompts
 
@@ -132,20 +152,21 @@ it does not change limits or grant access. For example:
 Omitting `pool` from `limits_propose` preserves the current approved pool. Read-only
 MCP can propose pool changes. Approval derives missing indexes without activating
 them for automatic receiving.
-A human must run approval in their own local terminal using the proposal ID and
-the exact directory from the MCP configuration. Replace `PROPOSAL_ID` with the
-ID returned by `limits_propose`:
+A human must run approval in their own local terminal using the proposal ID
+returned by `limits_propose`. For the default MCP wallet:
 
 ```sh
-npx --yes @attocash/mcp@latest --data-dir /absolute/path/to/profile limits approve PROPOSAL_ID
+npx --yes @attocash/mcp@latest limits approve PROPOSAL_ID
 # Or reject it:
-npx --yes @attocash/mcp@latest --data-dir /absolute/path/to/profile limits reject PROPOSAL_ID
+npx --yes @attocash/mcp@latest limits reject PROPOSAL_ID
 ```
 
-Installed users can also run `atto-mcp` or `atto` with the same arguments. Review
-the wallet, network, directory, proposed access, limits, exact account indexes,
-and consolidation setting displayed before
-confirming. There is no MCP approval tool or flag that skips this review.
+If your MCP configuration includes `--data-dir`, add that same option and path
+before `limits`. A globally installed `atto-mcp` accepts the same arguments.
+To use `atto` instead, always specify the MCP wallet's directory with `--data-dir`.
+Review the wallet, network, directory, proposed access, limits, exact account
+indexes, and consolidation setting displayed before confirming. There is no
+MCP approval tool or flag that skips this review.
 Proposals expire after 24 hours. A new proposal replaces the previous ID;
 approval fails if the wallet identity, network, directory, or policy revision
 changed since it was proposed.
@@ -293,12 +314,9 @@ changing policy does not remove historical spending or uncertain reservations.
 ## Session behavior
 
 The server accepts `--data-dir <directory>`, `--help`, and `--version`. Without
-`--data-dir`, it uses the dedicated `profiles/mcp` directory under the legacy
-Atto MCP data directory. It no longer implicitly shares the CLI default.
-To retain a wallet used by an older MCP configuration, choose the existing CLI
-wallet during setup or add its old directory explicitly. No wallet state or keys
-are moved. Sharing an absolute directory also shares funds, history, request IDs,
-and limits. See [profile paths and backup requirements](https://github.com/attocash/integrations/tree/main/atto-cli#profiles-and-recovery).
+`--data-dir`, it uses its default dedicated MCP wallet. To share a CLI wallet
+or use another profile, specify its absolute directory as shown above. Sharing
+a directory also shares funds, history, request IDs, and limits. See [profile paths and backup requirements](https://github.com/attocash/integrations/tree/main/atto-cli#profiles-and-recovery).
 
 Terminal approval and doctor commands print readable text by default; add `--json` for a
 structured result or error. Setup always prints copyable client configuration

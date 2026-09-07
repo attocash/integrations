@@ -3,7 +3,6 @@ import { createHash } from 'node:crypto';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -176,7 +175,7 @@ export async function publishRelease(version, artifactDirectory, options = {}) {
   return results;
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
   try {
     if (process.argv.length !== 4) throw failure('USAGE', 'Usage: node scripts/publish-release.mjs <version> <artifact-directory>');
     const results = await publishRelease(process.argv[2], process.argv[3]);

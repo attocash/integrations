@@ -117,16 +117,18 @@ test('Rejects incomplete workspace lock metadata without changes', t => {
   assert.deepEqual(snapshot(directory), before);
 });
 
-test('Command targets its checkout and rejects extra arguments', t => {
+test('Command targets its checkout through a symlink and rejects extra arguments', t => {
   // Given
   const directory = fixture(t);
   mkdirSync(join(directory, 'scripts'));
   const script = join(directory, 'scripts/release-version.mjs');
   cpSync(join(repository, 'scripts/release-version.mjs'), script);
+  const linkedScripts = join(directory, 'linked-scripts');
+  symlinkSync(join(directory, 'scripts'), linkedScripts, 'junction');
   const sourceBefore = snapshot(repository);
 
   // When
-  const output = execFileSync(process.execPath, [script, '2.3.4'], { cwd: tmpdir(), encoding: 'utf8' });
+  const output = execFileSync(process.execPath, [join(linkedScripts, 'release-version.mjs'), '2.3.4'], { cwd: tmpdir(), encoding: 'utf8' });
 
   // Then
   assert.match(output, /Prepared CLI and MCP version 2\.3\.4/);

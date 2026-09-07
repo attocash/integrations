@@ -57,7 +57,7 @@ export function prepareRelease(version, directory = repository) {
   }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+if (import.meta.main) {
   try {
     if (process.argv.length !== 3) throw new Error('Usage: node scripts/release-version.mjs <MAJOR.MINOR.PATCH>');
     prepareRelease(process.argv[2]);

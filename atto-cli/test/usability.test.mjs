@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { interruptCli, sigintHarness } from './support/signals.mjs';
 
 const execute = promisify(execFile);
 const directory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? fileURLToPath(new URL('../', import.meta.url));
@@ -168,6 +169,7 @@ test('Real CLI watch reports an idle connection failure without starting receivi
   await f.app.createWallet();
   await f.app.call('wallet_configure', { autoReceive: true });
   const harness = `
+    ${sigintHarness}
     const { AttoApplication } = await import(process.env.ATTO_TEST_APP);
     const { OsSecretStore } = await import(process.env.ATTO_TEST_SECRETS);
     let starts = 0, secretReads = 0;
@@ -188,7 +190,7 @@ test('Real CLI watch reports an idle connection failure without starting receivi
   let stdout = '', stderr = '', trace, interrupted = false;
   child.stdout.on('data', chunk => {
     stdout += chunk;
-    if (!interrupted && stdout.includes('Last error:')) { interrupted = true; child.kill('SIGINT'); }
+    if (!interrupted && stdout.includes('Last error:')) { interrupted = true; interruptCli(child); }
   });
   child.stderr.on('data', chunk => { stderr += chunk; });
   child.on('message', value => { trace = value; });

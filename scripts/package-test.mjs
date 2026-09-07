@@ -30,7 +30,7 @@ async function runNpm(args, cwd) {
 
 async function install(prefix, artifacts, global = false) {
   await mkdir(prefix, { recursive: true });
-  await runNpm(['install', '--prefix', prefix, ...(global ? ['--global'] : []), '--ignore-scripts', '--offline', '--omit=dev', '--no-audit', '--no-fund', ...artifacts], temporary);
+  await runNpm(['install', '--prefix', prefix, ...(global ? ['--global'] : []), '--ignore-scripts', '--prefer-offline', '--omit=dev', '--no-audit', '--no-fund', ...artifacts], temporary);
   if (global) return (await runNpm(['root', '--global', '--prefix', prefix], temporary)).stdout.trim();
   return join(prefix, 'node_modules');
 }
@@ -44,7 +44,7 @@ async function verifySourceInstall() {
     await cp(join(root, workspace, 'package.json'), join(source, workspace, 'package.json'));
   }
   // This checks the source lockfile independently of the working node_modules.
-  await runNpm(['ci', '--offline', '--no-audit', '--no-fund'], source);
+  await runNpm(['ci', '--prefer-offline', '--no-audit', '--no-fund'], source);
   for (const workspace of ['cli', 'mcp']) {
     assert.equal(await realpath(join(source, 'node_modules', '@attocash', workspace)), join(source, `atto-${workspace}`));
   }
@@ -120,19 +120,19 @@ try {
   process.stdout.write('Installed pair passed: stdio tools, CLI parity, signing and payment journal.\n');
   // npm exec is the npx runner. Both unpublished artifacts are supplied together
   // here; after publication users only need the MCP package and its exact dependency.
-  const npxHelp = await runNpm(['exec', '--yes', '--offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'setup', '--help'], temporary);
+  const npxHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'setup', '--help'], temporary);
   assert.match(npxHelp.stdout, /Choose a wallet and approve MCP access/);
-  const doctorHelp = await runNpm(['exec', '--yes', '--offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'doctor', '--help'], temporary);
+  const doctorHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'doctor', '--help'], temporary);
   assert.match(doctorHelp.stdout, /keyring, node, and worker without\s+repairs/);
-  await assert.rejects(runNpm(['exec', '--yes', '--offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'limits', 'approve', 'synthetic-proposal'], temporary), error => {
+  await assert.rejects(runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'limits', 'approve', 'synthetic-proposal'], temporary), error => {
     assert.match(error.stderr, /interactive terminal/);
     return true;
   });
-  const labelsHelp = await runNpm(['exec', '--yes', '--offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto', 'labels', 'list', '--help'], temporary);
+  const labelsHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto', 'labels', 'list', '--help'], temporary);
   assert.match(labelsHelp.stdout, /--search/);
-  const nameSchema = await runNpm(['exec', '--yes', '--offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto', '--json', 'operations', 'send'], temporary);
+  const nameSchema = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto', '--json', 'operations', 'send'], temporary);
   assert.equal(JSON.parse(nameSchema.stdout).result.inputSchema.properties.destinationLabel.type, 'string');
-  process.stdout.write('npx runner passed: cached artifact setup and no noninteractive approval bypass.\n');
+  process.stdout.write('npx runner passed: artifact setup and no noninteractive approval bypass.\n');
   if (process.env.ATTO_TEST_PACKAGE_INTEGRATION === '1') {
     const integration = await execute(process.execPath, ['--test', join(root, 'test/integration.test.mjs')], {
       cwd: temporary, timeout: 180_000, maxBuffer: 8 * 1024 * 1024,

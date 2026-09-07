@@ -6,6 +6,7 @@ import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import { interruptCli, sigintHarness } from './support/signals.mjs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { AttoAddress, AttoAlgorithm, AttoPublicKey } from '@attocash/commons-core';
 
@@ -73,6 +74,7 @@ async function fixture(t, startupInterrupt = false) {
 
 async function runCli(t, f, json) {
   const harness = `
+    ${sigintHarness}
     process.env.KOTLIN_LOGGING_STARTUP_MESSAGE = 'false';
     const { OsSecretStore } = await import(process.env.ATTO_TEST_SECRETS_MODULE);
     let secretAccesses = 0;
@@ -99,7 +101,7 @@ async function runCli(t, f, json) {
   const interrupt = () => {
     if (interrupted) return;
     interrupted = true;
-    child.kill('SIGINT');
+    interruptCli(child);
   };
   if (f.startupInterrupt) f.onStartup(interrupt);
   child.stdout.on('data', chunk => {

@@ -95,15 +95,16 @@ test('read-only MCP may manage personal labels but cannot send', async t => {
   // Given a shared profile without spending approval.
   const f = await fixture(t);
   const mcp = new AttoApplication({ directory: f.directory, secrets: f.secrets, access: 'mcp', globalDirectory: f.globalDirectory });
-  t.after(() => mcp.close());
-  // When managing local names through the MCP permission boundary.
-  await mcp.call('labels_set', { address: A, label: 'Savings' });
-  assert.equal((await mcp.call('labels_list')).addressLabels[A].personal.label, 'Savings');
-  await assert.rejects(mcp.call('send', { destinationLabel: 'Savings', amount: '1', requestId: 'denied' }), { code: 'MCP_READ_ONLY' });
-  await mcp.call('labels_remove', { address: A });
-  // Then no access or key custody changed.
-  assert.equal(mcp.ledger.mcpAccess(), 'read-only');
-  assert.equal(f.reads, 0);
+  try {
+    // When managing local names through the MCP permission boundary.
+    await mcp.call('labels_set', { address: A, label: 'Savings' });
+    assert.equal((await mcp.call('labels_list')).addressLabels[A].personal.label, 'Savings');
+    await assert.rejects(mcp.call('send', { destinationLabel: 'Savings', amount: '1', requestId: 'denied' }), { code: 'MCP_READ_ONLY' });
+    await mcp.call('labels_remove', { address: A });
+    // Then no access or key custody changed.
+    assert.equal(mcp.ledger.mcpAccess(), 'read-only');
+    assert.equal(f.reads, 0);
+  } finally { await mcp.close(); }
 });
 
 test('global-only and unknown payment names fail locally with an available or unavailable directory', async t => {
