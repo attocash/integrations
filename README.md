@@ -145,11 +145,11 @@ git clone https://github.com/attocash/integrations.git
 cd integrations
 npm ci
 npm run pack
-npm install --global ./attocash-cli-0.1.1.tgz ./attocash-mcp-0.1.1.tgz
+npm install --global ./attocash-cli-0.0.0.tgz ./attocash-mcp-0.0.0.tgz
 atto wallet create
 ```
 
-To use only the terminal wallet, install just `attocash-cli-0.1.1.tgz`. Install
+To use only the terminal wallet, install just `attocash-cli-0.0.0.tgz`. Install
 both artifacts in the same npm command when testing MCP from this checkout so
 its exact CLI dependency resolves to the local artifact.
 

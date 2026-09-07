@@ -1,6 +1,6 @@
 {
   "name": "@attocash/cli",
-  "version": "0.1.1",
+  "version": "0.0.0",
   "description": "Atto wallet CLI and reusable wallet engine with local key custody and shared spending limits",
   "license": "BSD-3-Clause",
   "type": "module",

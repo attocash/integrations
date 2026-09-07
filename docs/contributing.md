@@ -42,7 +42,10 @@ npm run pack
 npm run pack -- --pack-destination /tmp/atto-artifacts
 ```
 
-This produces `attocash-cli-0.1.1.tgz` and `attocash-mcp-0.1.1.tgz`. The root
+Source checkouts use `0.0.0` as a development placeholder. CI replaces it with
+the version calculated by semantic-release before testing and publishing.
+
+This produces `attocash-cli-0.0.0.tgz` and `attocash-mcp-0.0.0.tgz`. The root
 `package-lock.json` records the development dependency tree for `npm ci`.
 Packaging uses a temporary staging directory and leaves source package files
 unchanged. Use the root script to produce release artifacts; plain `npm pack`

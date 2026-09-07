@@ -736,13 +736,13 @@ git clone https://github.com/attocash/integrations.git
 cd integrations
 npm ci
 npm run pack
-npm install --global ./attocash-cli-0.1.1.tgz
+npm install --global ./attocash-cli-0.0.0.tgz
 ```
 
 To test MCP with the same local CLI build, install both artifacts together:
 
 ```sh
-npm install --global ./attocash-cli-0.1.1.tgz ./attocash-mcp-0.1.1.tgz
+npm install --global ./attocash-cli-0.0.0.tgz ./attocash-mcp-0.0.0.tgz
 ```
 
 For development and testing, see the [contributor guide](https://github.com/attocash/integrations/blob/main/docs/contributing.md).

@@ -457,7 +457,7 @@ the CLI from the same checkout:
 
 ```sh
 npm run pack
-npm install --global ./attocash-cli-0.1.1.tgz ./attocash-mcp-0.1.1.tgz
+npm install --global ./attocash-cli-0.0.0.tgz ./attocash-mcp-0.0.0.tgz
 atto-mcp setup
 ```
 

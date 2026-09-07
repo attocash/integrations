@@ -1,6 +1,6 @@
 {
   "name": "@attocash/mcp",
-  "version": "0.1.1",
+  "version": "0.0.0",
   "description": "Local Atto MCP server using the Atto CLI wallet engine",
   "license": "BSD-3-Clause",
   "type": "module",
@@ -26,7 +26,7 @@
     "test": "node --test test/*.test.mjs"
   },
   "dependencies": {
-    "@attocash/cli": "0.1.1",
+    "@attocash/cli": "0.0.0",
     "@modelcontextprotocol/server": "2.0.0",
     "commander": "14.0.2"
   }
