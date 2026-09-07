@@ -1,19 +1,16 @@
-import { StateStore } from '../storage/state.js';
-import { WalletWork } from './work.js';
-import type { WalletSettings } from './types.js';
-
-const directory = process.argv[2];
-if (!directory) process.exitCode = 1;
-else {
-  const store = new StateStore(directory);
-  const release = store.tryProcessLock('work-daemon');
-  if (!release) store.close();
-  else {
-    const work = new WalletWork(store, () => store.get<WalletSettings>('settings')!);
-    const timer = setTimeout(() => process.exitCode = 0, 60_000);
-    work.drainPersisted();
-    // Work requests have a ten-second speculative deadline; allow queued work
-    // to settle, then close without retaining a service.
-    setTimeout(async () => { clearTimeout(timer); await work.close(); release(); store.close(); }, 59_000);
-  }
+process.env.KOTLIN_LOGGING_STARTUP_MESSAGE = 'false';
+const [directory, epoch] = process.argv.slice(2);
+if (directory && epoch) {
+  const { StateStore } = await import('../storage/state.js');
+  const { WalletWork } = await import('./work.js');
+  let store: InstanceType<typeof StateStore> | undefined;
+  let work: InstanceType<typeof WalletWork> | undefined;
+  try {
+    store = new StateStore(directory);
+    const state = store;
+    work = new WalletWork(state, () => state.get<import('./types.js').WalletSettings>('settings')!);
+    await work.runDetached(epoch);
+  } catch { /* Public jobs remain eligible after startup or storage failures. */ }
+  finally { await work?.close(); store?.close(); }
 }
+export {};

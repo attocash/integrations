@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
@@ -8,15 +8,42 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { promisify } from 'node:util';
-import {
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { createRequire } from 'node:module';
+const cliDirectory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? fileURLToPath(new URL('../', import.meta.url));
+const commonsUrl = pathToFileURL(createRequire(join(cliDirectory, 'package.json')).resolve('@attocash/commons-core')).href;
+const {
   AttoAccount, AttoAmount, AttoMnemonic, AttoTransaction, AttoUnit, AttoWork,
   attoAccountChange, attoBlockWorkTarget, toAttoIndex,
-} from '@attocash/commons-core';
-import { StateStore } from '../dist/storage/state.js';
-import { WalletWork } from '../dist/wallet/work.js';
-import { derivedSigner, signingWallet } from '../dist/wallet/signing.js';
+} = await import(commonsUrl);
+const moduleUrl = name => pathToFileURL(join(cliDirectory, 'dist', name)).href;
+const { StateStore } = await import(moduleUrl('storage/state.js'));
+const { WalletWork } = await import(moduleUrl('wallet/work.js'));
+const { derivedSigner, signingWallet } = await import(moduleUrl('wallet/signing.js'));
 
 const computed = new Map();
+
+function stopped(store) {
+  const release = store.tryProcessLock('work-daemon');
+  release?.();
+  return Boolean(release);
+}
+
+async function detachedPrepare(f, accounts = f.state.accounts) {
+  const source = `
+    import { AttoAccount } from ${JSON.stringify(commonsUrl)};
+    import { StateStore } from ${JSON.stringify(moduleUrl('storage/state.js'))};
+    import { WalletWork } from ${JSON.stringify(moduleUrl('wallet/work.js'))};
+    const store = new StateStore(process.argv[1]);
+    const work = new WalletWork(store, () => store.get('settings'), 'detached');
+    work.prepare(JSON.parse(process.argv[2]).map(AttoAccount.fromJson));
+    await work.close(); store.close();
+    process.stdout.write('launcher-exited');
+  `;
+  return promisify(execFile)(process.execPath, ['--input-type=module', '-e', source, f.directory, JSON.stringify(accounts.map(value => value.toJson()))], {
+    cwd: new URL('../..', import.meta.url), timeout: 5000,
+  });
+}
 function validWork(block, rejectBlock) {
   const key = `${block.network.name}:${attoBlockWorkTarget(block)}:${block.timestamp.toString().slice(0, 4)}`;
   const cached = computed.get(key);
@@ -54,7 +81,7 @@ async function until(predicate, timeout = 2500) {
 }
 
 async function fixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'atto-work-'));
+  const directory = await mkdtemp(join(tmpdir(), 'atto work-'));
   const store = new StateStore(directory);
   const state = { accounts: [account()], workRequests: [], publications: [], blocked: false, invalid: false, fail: false, publishFail: false, redirectRequests: 0 };
   const http = createServer((request, response) => {
@@ -105,10 +132,11 @@ async function fixture(t) {
   await once(http, 'listening');
   const url = `http://127.0.0.1:${http.address().port}`;
   const settings = { network: 'LOCAL', nodeUrl: url, workerUrl: url, representative: state.accounts[0].representativeAddress.value, autoReceive: false, minReceiveRaw: '1' };
+  store.set('settings', settings);
   const work = new WalletWork(store, () => settings);
   t.after(async () => {
+    await work.cancel();
     http.closeAllConnections();
-    await work.close();
     await new Promise(resolve => http.close(resolve));
     store.close();
     await rm(directory, { recursive: true, force: true });
@@ -129,9 +157,9 @@ test('prepared public work survives reopening state and is reused without a seco
   // consume the shorter default wait before its first response is processed.
   await until(() => f.work.isReady(source), 10_000);
   const script = `
-    import { AttoAccount, attoAccountChange } from '@attocash/commons-core';
-    import { StateStore } from './atto-cli/dist/storage/state.js';
-    import { WalletWork } from './atto-cli/dist/wallet/work.js';
+    import { AttoAccount, attoAccountChange } from ${JSON.stringify(commonsUrl)};
+    import { StateStore } from ${JSON.stringify(moduleUrl('storage/state.js'))};
+    import { WalletWork } from ${JSON.stringify(moduleUrl('wallet/work.js'))};
     const store = new StateStore(process.argv[1]);
     const account = AttoAccount.fromJson(process.argv[2]);
     const work = new WalletWork(store, () => JSON.parse(process.argv[3]));
@@ -148,7 +176,7 @@ test('prepared public work survives reopening state and is reused without a seco
   assert.deepEqual(JSON.parse(child.stdout), { ready: true, valid: true });
   assert.equal(f.state.workRequests.length, 1);
   const record = f.store.get(`work.LOCAL.${source.publicKey}`);
-  assert.deepEqual(Object.keys(record).sort(), ['height', 'target', 'work']);
+  assert.deepEqual(Object.keys(record).sort(), ['height', 'scope', 'target', 'work']);
 });
 
 test('readiness rejects a changed account head, network, corrupted work, and work below the current threshold', async t => {
@@ -375,4 +403,216 @@ test('the signing adapter rejects an account response for a different signer bef
   assert.equal(approvals, 0);
   assert.equal(f.state.workRequests.length, 0);
   assert.equal(f.state.publications.length, 0);
+});
+
+test('detached preparation outlives its launcher and a foreground process shares its computation', { timeout: 15000 }, async t => {
+  // Given an isolated profile with spaces in its path and a blocked worker.
+  const f = await fixture(t);
+  f.state.blocked = true;
+  const source = f.state.accounts[0];
+
+  // When the real launcher exits while its detached worker is still requesting work.
+  assert.equal((await detachedPrepare(f)).stdout, 'launcher-exited');
+  await until(() => f.state.workRequests.length === 1);
+  assert.equal(stopped(f.store), false);
+  const foreground = f.work.worker().workBlock(nextBlock(source));
+  await delay(150);
+  assert.equal(f.state.workRequests.length, 1);
+  f.state.workRequests[0].reply();
+
+  // Then foreground work shares the nonce, and the drained worker exits promptly.
+  assert.equal((await foreground).isValid(nextBlock(source)), true);
+  await until(() => stopped(f.store));
+  assert.deepEqual(f.store.get('work.queue'), []);
+  assert.equal(f.work.isReady(source), true);
+  assert.equal(f.state.workRequests.length, 1);
+});
+
+test('concurrent detached enqueues preserve all accounts and the global two-request limit', { timeout: 15000 }, async t => {
+  // Given five distinct public accounts and overlapping launch requests.
+  const f = await fixture(t);
+  f.state.accounts = Array.from({ length: 5 }, (_, index) => account((index + 4).toString(16).padStart(2, '0').repeat(32), (index + 20).toString(16).padStart(2, '0').repeat(32)));
+  f.state.blocked = true;
+
+  // When two CLI processes concurrently enqueue overlapping account sets.
+  await Promise.all([detachedPrepare(f, f.state.accounts.slice(0, 3)), detachedPrepare(f, f.state.accounts.slice(2))]);
+  await until(() => f.state.workRequests.length === 2);
+  await delay(100);
+  assert.equal(f.state.workRequests.length, 2);
+  for (let index = 0; index < 5; index++) {
+    await until(() => f.state.workRequests.length > index);
+    f.state.workRequests[index].reply();
+  }
+
+  // Then no enqueue is lost and each target is requested only once.
+  await until(() => f.state.accounts.every(value => f.work.isReady(value)), 10000);
+  await until(() => stopped(f.store));
+  assert.equal(new Set(f.state.workRequests.map(value => value.input.target)).size, 5);
+  assert.equal(f.state.workRequests.length, 5);
+});
+
+test('an older detached completion preserves the newer queued head and rejects obsolete cache writes', async t => {
+  // Given a speculative request already running for an old head.
+  const f = await fixture(t);
+  const old = f.state.accounts[0];
+  const newer = account(old.publicKey.toString(), '33'.repeat(32), 4);
+  f.state.accounts.push(newer);
+  f.state.blocked = true;
+  await detachedPrepare(f, [old]);
+  await until(() => f.state.workRequests.length === 1);
+
+  // When another process observes the next head before the old result arrives.
+  await detachedPrepare(f, [newer]);
+  await until(() => f.state.workRequests.length === 2);
+  f.state.workRequests[0].reply();
+  await delay(100);
+
+  // Then completing the old target cannot delete or replace the newer request.
+  assert.equal(f.store.get('work.queue')[0].target, newer.lastTransactionHash.toString());
+  assert.equal(f.work.isReady(old), false);
+  f.state.workRequests[1].reply();
+  await until(() => f.work.isReady(newer));
+  await until(() => stopped(f.store));
+});
+
+test('failed detached jobs remain eligible for a later invocation without an in-process retry loop', async t => {
+  // Given a worker returning a temporary error.
+  const f = await fixture(t);
+  f.state.fail = true;
+  await detachedPrepare(f);
+  await until(() => f.state.workRequests.length === 1 && stopped(f.store));
+  assert.equal(f.store.get('work.queue').length, 1);
+  await delay(200);
+  assert.equal(f.state.workRequests.length, 1);
+
+  // When a later invocation encounters a functioning worker.
+  f.state.fail = false;
+  await detachedPrepare(f);
+
+  // Then that invocation completes the retained job and exits.
+  await until(() => f.work.isReady(f.state.accounts[0]));
+  await until(() => stopped(f.store));
+  assert.equal(f.state.workRequests.length, 2);
+});
+
+test('reset cancellation stops detached work promptly and an old launch token cannot resume it', async t => {
+  // Given an unresponsive detached request and its launch generation.
+  const f = await fixture(t);
+  f.state.blocked = true;
+  await detachedPrepare(f);
+  await until(() => f.state.workRequests.length === 1);
+  const epoch = f.store.get('work.epoch');
+
+  // When reset cancels the public queue and the previous launcher is replayed.
+  const began = Date.now();
+  await f.work.cancel();
+  assert.ok(Date.now() - began < 3000);
+  await promisify(execFile)(process.execPath, [join(cliDirectory, 'dist/wallet/work-daemon.js'), f.directory, epoch], { timeout: 5000 });
+
+  // Then all work has stopped, the queue is empty, and no obsolete request resumes.
+  assert.equal(stopped(f.store), true);
+  assert.deepEqual(f.store.get('work.queue'), []);
+  assert.equal(f.state.workRequests.length, 1);
+  assert.equal(f.store.get(`work.LOCAL.${f.state.accounts[0].publicKey}`), undefined);
+});
+
+test('work caches and queued jobs are rejected after profile identity or endpoint changes', async t => {
+  // Given valid cached work and the same public head in another profile identity.
+  const f = await fixture(t);
+  const source = f.state.accounts[0];
+  f.work.prepare([source]);
+  await until(() => f.work.isReady(source));
+  f.store.set('identity', { address: source.address.value, fingerprint: 'replacement-public-identity' });
+  assert.equal(f.work.isReady(source), false);
+
+  // When a request begun under that identity completes after an endpoint change.
+  f.state.blocked = true;
+  f.work.prepare([source]);
+  await until(() => f.state.workRequests.length === 2);
+  f.settings.nodeUrl += '/changed';
+  f.state.workRequests[1].reply();
+  await delay(100);
+
+  // Then it cannot populate a cache usable under the changed configuration.
+  assert.equal(f.work.isReady(source), false);
+});
+
+test('work computation and process locks are released on worker death and another invocation resumes', { timeout: 15_000 }, async t => {
+  // Given a persisted public job and a worker child owned directly by this test.
+  const f = await fixture(t);
+  f.state.blocked = true;
+  f.work.prepare(f.state.accounts);
+  await f.work.close();
+  const child = spawn(process.execPath, [join(cliDirectory, 'dist/wallet/work-daemon.js'), f.directory, f.store.get('work.epoch')], {
+    stdio: 'ignore',
+  });
+  t.after(() => child.kill());
+  await until(() => f.state.workRequests.length >= 1 && !stopped(f.store));
+  // When that verified process dies in the middle of work generation.
+  const exit = once(child, 'exit');
+  child.kill('SIGKILL');
+  await exit;
+  assert.equal(stopped(f.store), true);
+  const before = f.state.workRequests.length;
+  f.state.blocked = false;
+  await detachedPrepare(f);
+  const observer = new WalletWork(f.store, () => f.settings);
+  // Then a new invocation obtains the released lock and completes the same job.
+  await until(() => observer.isReady(f.state.accounts[0]));
+  await until(() => stopped(f.store));
+  assert.equal(f.state.workRequests.length, before + 1);
+  await observer.close();
+});
+
+test('separate profiles compute independently even for the same network and account head', async t => {
+  // Given identical public accounts in two independent profiles.
+  const first = await fixture(t);
+  const second = await fixture(t);
+  first.state.blocked = true;
+  // When the first profile's worker is blocked and the second starts preparation.
+  await detachedPrepare(first);
+  await until(() => first.state.workRequests.length === 1);
+  await detachedPrepare(second);
+  // Then neither the process lock nor the cached nonce leaks across profiles.
+  await until(() => second.work.isReady(second.state.accounts[0]));
+  assert.equal(first.work.isReady(first.state.accounts[0]), false);
+  assert.equal(second.state.workRequests.length, 1);
+  first.state.workRequests[0].reply();
+  await until(() => first.work.isReady(first.state.accounts[0]));
+});
+
+test('the first foreground computation and a concurrent detached preparation share the same work generation', async t => {
+  // Given a profile with no prior work epoch and foreground generation in flight.
+  const f = await fixture(t);
+  f.state.blocked = true;
+  const foreground = f.work.worker().workBlock(nextBlock(f.state.accounts[0]));
+  foreground.catch(() => {});
+  await until(() => f.state.workRequests.length === 1);
+  // When another process prepares the same head for the first time.
+  await detachedPrepare(f);
+  await delay(300);
+  const requests = f.state.workRequests.length;
+  for (const request of f.state.workRequests) request.reply();
+  await foreground;
+  // Then initialization does not change the work-lock identity or duplicate work.
+  await until(() => f.work.isReady(f.state.accounts[0]));
+  await until(() => stopped(f.store));
+  assert.equal(requests, 1);
+});
+
+test('the finite worker budget stops an unresponsive queue at sixty seconds and retains at most 100 accounts', { timeout: 70_000 }, async t => {
+  // Given more accounts than the bounded queue and a completely unresponsive worker.
+  const f = await fixture(t);
+  f.state.blocked = true;
+  f.state.accounts = Array.from({ length: 110 }, (_, index) => account((index + 1).toString(16).padStart(64, '0'), (index + 111).toString(16).padStart(64, '0')));
+  const began = Date.now();
+  // When one detached worker attempts the retained jobs.
+  await detachedPrepare(f);
+  await until(() => f.state.workRequests.length === 2);
+  assert.equal(f.store.get('work.queue').length, 100);
+  await until(() => stopped(f.store), 63_000);
+  // Then it exits within its lifetime budget without discarding unfinished jobs.
+  assert.ok(Date.now() - began < 65_000);
+  assert.equal(f.store.get('work.queue').length, 100);
+  assert.ok(f.state.workRequests.length >= 10 && f.state.workRequests.length <= 12);
 });

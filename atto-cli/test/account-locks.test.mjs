@@ -58,6 +58,33 @@ test('busy accounts do not block disjoint accounts or short wallet reservations'
   reacquired();
 });
 
+test('same-process lock probes cannot drop account, work, process or lifecycle locks seen by another process', async t => {
+  // Given live locks and a second session probing the same files in this process.
+  const { store, open, directory } = fixture(t);
+  const releases = [store.tryAccountLocks([0]), store.tryWorkLock('head'), store.tryProcessLock('receive-daemon')];
+  const other = open();
+  for (const value of releases) assert.ok(value);
+  assert.equal(other.tryAccountLocks([0]), undefined);
+  assert.equal(other.tryWorkLock('head'), undefined);
+  assert.equal(other.tryProcessLock('receive-daemon'), undefined);
+  // When an independent process tries to acquire those same locks and reset.
+  const running = child(t, `
+    import { StateStore } from ${JSON.stringify(stateUrl)};
+    const store = new StateStore(process.argv[1]);
+    const results = [store.tryAccountLocks([0]), store.tryWorkLock('head'), store.tryProcessLock('receive-daemon')];
+    const acquired = results.map(Boolean);
+    for (const release of results) release?.();
+    let reset = true;
+    try { await store.withExclusiveReset(async () => {}); } catch { reset = false; }
+    process.send({ acquired, reset }); process.disconnect();
+  `, [directory]);
+  let result;
+  try { [result] = await once(running.process, 'message'); await running.exit; }
+  finally { for (const release of releases) release(); }
+  // Then every original lock and the lifecycle lease still excludes that process.
+  assert.deepEqual(result, { acquired: [false, false, false], reset: false });
+});
+
 test('a failed multi-account attempt releases partial acquisitions immediately', t => {
   // Given
   const { store, open } = fixture(t);

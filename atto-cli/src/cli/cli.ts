@@ -61,7 +61,7 @@ export async function runCli(argv = process.argv): Promise<void> {
   const currentVersion: string = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8')).version;
   let application: AttoApplication | undefined;
   let sendRequestId: string | undefined;
-  const app = (onReceiveProgress?: (event: ReceiveProgress) => void, sendRetry?: SendRetry, onDestination?: (binding: DestinationBinding) => void) => application ??= new AttoApplication({ directory: program.opts().dataDir as string | undefined, onReceiveProgress, sendRetry, onDestination });
+  const app = (onReceiveProgress?: (event: ReceiveProgress) => void, sendRetry?: SendRetry, onDestination?: (binding: DestinationBinding) => void) => application ??= new AttoApplication({ directory: program.opts().dataDir as string | undefined, onReceiveProgress, sendRetry, onDestination, workExecution: onReceiveProgress ? 'in-process' : 'detached' });
   const jsonOutput = (value: unknown) => { process.stdout.write(`${JSON.stringify(value, (_, value) => typeof value === 'bigint' ? value.toString() : value)}\n`); };
   const output = (result: unknown, operation?: string) => {
     if (program.opts().json) jsonOutput({ result });
@@ -70,6 +70,7 @@ export async function runCli(argv = process.argv): Promise<void> {
   const call = async (name: string, input: Record<string, unknown> = {}) => {
     if (name === 'doctor') { parseOperation(name, input); return diagnose(input); }
     const result = await app().call(name, compact(input));
+    app().resumeWork();
     output(result, name);
   };
   const waitForSignal = async (work: (signal: AbortSignal) => Promise<void>) => {
@@ -170,7 +171,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option('--background', 'Keep receiving after this terminal exits; restart manually after reboot')
     .action(async () => {
       if (activeCommand.opts().background) {
-        const status = app().startBackgroundReceiver();
+        const status = await app().startBackgroundReceiver();
         output({ backgroundReceive: status }, 'wallet_receive');
         return;
       }
@@ -186,7 +187,7 @@ export async function runCli(argv = process.argv): Promise<void> {
       });
     });
   receiveCommand.command('status').description('Read detached receiver status').action(() => call('wallet_status'));
-  receiveCommand.command('stop').description('Request detached receiver shutdown').action(() => output({ backgroundReceive: app().stopBackgroundReceiver() }, 'wallet_receive'));
+  receiveCommand.command('stop').description('Request detached receiver shutdown').action(async () => output({ backgroundReceive: await app().stopBackgroundReceiver() }, 'wallet_receive'));
 
   const address = program.command('address').description('Manage mnemonic-derived public addresses');
   address.command('list').description('List all saved addresses and their activation state').action(() => call('address_list'));
@@ -259,6 +260,7 @@ export async function runCli(argv = process.argv): Promise<void> {
           onRetry: (error, delayMs) => progress({ requestId: sendRequestId, error: errorResult(error), retryInMs: delayMs },
             `${error.message} Retrying in ${delayMs / 1000}s. Press Ctrl+C to stop.\n`),
         }, binding => progress({ requestId: sendRequestId, destination: binding.address, network: binding.network, ...(binding.label ? { personalName: binding.label } : {}) })).call('send', input);
+        app().resumeWork();
         output(result, 'send');
       });
     });

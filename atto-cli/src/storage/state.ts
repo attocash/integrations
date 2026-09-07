@@ -4,6 +4,15 @@ import { join, resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { setTimeout as delay } from 'node:timers/promises';
 import { AttoError } from '../domain/errors.js';
+import { createHash } from 'node:crypto';
+
+function ensureDatabaseFile(path: string): void {
+  // Closing any raw descriptor for an existing SQLite file drops this process's
+  // POSIX locks, even when a different connection still owns the lease.
+  try { closeSync(openSync(path, 'ax', 0o600)); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+  if (process.platform !== 'win32') chmodSync(path, 0o600);
+}
 
 export function defaultDataDirectory(): string {
   if (process.platform === 'win32') return join(process.env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'Atto MCP');
@@ -21,6 +30,7 @@ export class StateStore {
   private closed = false;
   private lockRequests = 0;
   private exclusiveReset = false;
+  private auxiliaryLocks = 0;
 
   get busy(): boolean { return this.lockRequests !== 0 || this.exclusiveReset; }
 
@@ -30,8 +40,7 @@ export class StateStore {
     const connections: DatabaseSync[] = [];
     const open = (name: string) => {
       const path = join(this.directory, name);
-      closeSync(openSync(path, 'a', 0o600));
-      if (process.platform !== 'win32') chmodSync(path, 0o600);
+      ensureDatabaseFile(path);
       const connection = new DatabaseSync(path);
       connections.push(connection);
       return connection;
@@ -90,7 +99,7 @@ export class StateStore {
    * store closes, even if another session prevents acquiring exclusivity. */
   async withExclusiveReset<T>(fn: () => Promise<T>): Promise<T> {
     this.requireOpen();
-    if (this.lockRequests !== 0 || this.exclusiveReset) throw new AttoError('WALLET_BUSY', 'Wait for wallet operations before resetting this profile.');
+    if (this.lockRequests !== 0 || this.auxiliaryLocks !== 0 || this.exclusiveReset) throw new AttoError('WALLET_BUSY', 'Wait for wallet operations before resetting this profile.');
     try {
       this.lifecycle.exec('ROLLBACK;');
       try { this.lifecycle.exec('BEGIN EXCLUSIVE;'); }
@@ -171,8 +180,7 @@ export class StateStore {
       // Sorted acquisition prevents cycles when payments consolidate accounts.
       for (const index of [...new Set(indexes)].sort((left, right) => left - right)) {
         const file = join(directory, `${index}.sqlite`);
-        closeSync(openSync(file, 'a', 0o600));
-        if (process.platform !== 'win32') chmodSync(file, 0o600);
+        ensureDatabaseFile(file);
         const connection = new DatabaseSync(file);
         connections.push(connection);
         connection.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;');
@@ -210,11 +218,20 @@ export class StateStore {
    * bearing on ordinary commands, and SQLite releases it if the owner dies. */
   tryProcessLock(name: string): (() => void) | undefined {
     if (!/^[a-z0-9-]{1,64}$/i.test(name)) throw new AttoError('INVALID_LOCK', 'Invalid process lock name.');
-    const directory = join(this.directory, 'process-locks');
+    return this.tryAuxiliaryLock('process-locks', name);
+  }
+
+  /** Computation locks never share the wallet/account mutation databases. */
+  tryWorkLock(target: string): (() => void) | undefined {
+    return this.tryAuxiliaryLock('work-locks', createHash('sha256').update(target).digest('hex'));
+  }
+
+  private tryAuxiliaryLock(folder: string, name: string): (() => void) | undefined {
+    this.requireOpen();
+    const directory = join(this.directory, folder);
     mkdirSync(directory, { recursive: true, mode: 0o700 });
     const file = join(directory, `${name}.sqlite`);
-    closeSync(openSync(file, 'a', 0o600));
-    if (process.platform !== 'win32') chmodSync(file, 0o600);
+    ensureDatabaseFile(file);
     const connection = new DatabaseSync(file);
     try { connection.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;'); }
     catch (error) {
@@ -223,18 +240,18 @@ export class StateStore {
       if (code === 5 || code === 6) return undefined;
       throw error;
     }
-    this.lockRequests++;
+    this.auxiliaryLocks++;
     let held = true;
     return () => {
       if (!held) return;
       held = false;
-      try { connection.close(); } finally { this.lockRequests--; }
+      try { connection.close(); } finally { this.auxiliaryLocks--; }
     };
   }
 
   close(): void {
     if (this.closed) return;
-    if (this.lockRequests !== 0) throw new AttoError('WALLET_BUSY', 'Wait for wallet operations before closing state.');
+    if (this.lockRequests !== 0 || this.auxiliaryLocks !== 0) throw new AttoError('WALLET_BUSY', 'Wait for wallet operations before closing state.');
     this.coordination.close();
     this.state.close();
     this.lifecycle.close();

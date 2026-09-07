@@ -22,7 +22,7 @@ const tarball = entry => join(artifacts, `${entry.name.replace(/^@/, '').replace
 const cliArtifact = tarball(cliManifest);
 const mcpArtifact = tarball(mcpManifest);
 await Promise.all([cliArtifact, mcpArtifact].map(async path => assert.ok((await stat(path)).isFile(), `Missing artifact: ${path}`)));
-const temporary = await realpath(await mkdtemp(join(tmpdir(), 'atto-package-verification-')));
+const temporary = await realpath(await mkdtemp(join(tmpdir(), 'atto package verification-')));
 
 async function runNpm(args, cwd) {
   return execute(process.execPath, [npm, ...args], { cwd, timeout: 120_000, maxBuffer: 8 * 1024 * 1024 });
@@ -109,6 +109,7 @@ try {
     join(root, 'atto-cli/test/usability.test.mjs'), join(root, 'atto-cli/test/labels.test.mjs'),
     join(root, 'atto-cli/test/doctor.test.mjs'), join(root, 'atto-mcp/test/doctor.test.mjs'),
     join(root, 'atto-cli/test/auto-receive.test.mjs'), join(root, 'atto-cli/test/receive-lookup.test.mjs'), join(root, 'atto-cli/test/receive-progress.test.mjs'),
+    join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'),
     join(root, 'atto-cli/test/network.test.mjs'), join(root, 'atto-cli/test/stream-idle.test.mjs'),
     join(root, 'atto-cli/test/reconciliation.test.mjs'),
     join(root, 'atto-cli/test/payments.test.mjs'), join(root, 'atto-mcp/test/interfaces.test.mjs'), join(root, 'atto-mcp/test/onboarding.test.mjs'),
@@ -154,6 +155,11 @@ try {
   const mcpVersion = await execute(process.execPath, [join(globalModules, '@attocash/mcp/dist/main.js'), '--version'], { cwd: temporary, timeout: 15_000 });
   assert.equal(cli.stdout.trim(), cliManifest.version);
   assert.equal(mcpVersion.stdout.trim(), mcpManifest.version);
+  const detached = await execute(process.execPath, ['--test', '--test-name-pattern=detached|background|stop retains|unavailable credentials|dead owner|real CLI send|lost receive|startup acknowledges',
+    join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'), join(root, 'atto-cli/test/payments.test.mjs'),
+  ], { cwd: temporary, timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
+    env: { ...process.env, ATTO_TEST_CLI_PACKAGE_DIR: join(globalModules, '@attocash/cli') } });
+  process.stdout.write(detached.stdout);
   process.stdout.write('Combined global artifact installation passed in an isolated prefix.\n');
 } catch (error) {
   if (error.stdout) process.stderr.write(error.stdout);

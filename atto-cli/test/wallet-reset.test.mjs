@@ -322,7 +322,8 @@ test('session process death releases the lifecycle lease for reset', { timeout: 
   const child = spawn(process.execPath, ['--input-type=module', '-e', `
     import { StateStore } from ${JSON.stringify(stateUrl)};
     const store = new StateStore(process.argv[1]);
-    process.on('message', () => {});
+    // Retain the live session; an unreachable DatabaseSync can be finalized.
+    process.on('message', () => process.send({ identity: store.get('identity') }));
     process.send('ready');
   `, directory], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   t.after(() => child.kill());

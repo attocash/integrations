@@ -292,14 +292,12 @@ export class Payments {
           throw new AttoError('RECEIVABLE_NOT_PENDING', 'The consolidation transfer is not available to receive yet. Resume this payment with the same request ID.');
         }
         const transaction = await execution.wallet.receive(receivable, parseAddress(settings.representative), null);
-        const account = await execution.wallet.getAccountByIndex(toAttoIndex(index));
-        if (account) this.work.prepare([account]);
+        this.work.prepareConfirmed(transaction.block);
         return transaction;
       }
       const transaction = await execution.wallet.sendByIndex(toAttoIndex(index), parseAddress(step?.destination ?? record.destination),
         AttoAmount.from(AttoUnit.RAW, step?.raw ?? record.raw), null);
-      const account = await execution.wallet.getAccountByIndex(toAttoIndex(index));
-      if (account) this.work.prepare([account]);
+      this.work.prepareConfirmed(transaction.block);
       return transaction;
     } finally { execution.wallet.close(); }
   }
@@ -334,6 +332,7 @@ export class Payments {
         else this.ledger.stepComplete(record.id, step.id, this.result(outcome.transaction), Number(outcome.transaction.block.timestamp.toEpochMilliseconds()));
       });
       if (outcome.status === 'rejected') return;
+      this.work.prepareConfirmed(outcome.transaction.block);
     }
     if (!record.hash) {
       if (!record.plan) await this.store.withWalletLock(async () => this.ledger.fail(record.id));
@@ -344,6 +343,7 @@ export class Payments {
       if (outcome.status === 'published') this.ledger.complete(record.id, this.paymentResult(this.ledger.get(record.id)!, outcome.transaction), Number(outcome.transaction.block.timestamp.toEpochMilliseconds()));
       else if (outcome.status === 'rejected') this.ledger.reject(record.id);
     });
+    if (outcome.status === 'published') this.work.prepareConfirmed(outcome.transaction.block);
   }
 
   async poolStatus() {

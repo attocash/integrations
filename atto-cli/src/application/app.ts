@@ -3,13 +3,11 @@ import { GlobalDirectory } from '../labels/directory.js';
 import { AddressLabels } from '../labels/presentation.js';
 import type { DestinationBinding } from '../spending/destination.js';
 import { createHash } from 'node:crypto';
-import { spawn } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
 import {
   AttoMnemonic, AttoReceivable, AttoTransaction, toAttoIndex,
 } from '@attocash/commons-core';
 import { amountOutput, amountRaw } from '../domain/amount.js';
-import { AttoError, errorResult } from '../domain/errors.js';
+import { AttoError } from '../domain/errors.js';
 import { NodeReader, parseAddress, publicModel } from '../network/reader.js';
 import type { SendRetry } from '../network/retry.js';
 import { OsSecretStore, type SecretStore } from '../storage/secrets.js';
@@ -17,7 +15,8 @@ import { StateStore } from '../storage/state.js';
 import { resolveWalletProfile } from '../storage/profiles.js';
 import { SpendLedger, type McpAccess } from '../spending/ledger.js';
 import { Payments } from '../spending/payments.js';
-import { WalletWork } from '../wallet/work.js';
+import { WalletWork, type WorkExecution } from '../wallet/work.js';
+import { BackgroundReceiver } from '../wallet/background-receive.js';
 import { WatchManager } from '../watches/manager.js';
 import { AutoReceiver, type ReceiveProgress } from '../wallet/auto-receive.js';
 import { defaultSettings } from '../wallet/defaults.js';
@@ -30,8 +29,6 @@ import { runDoctor } from '../doctor/doctor.js';
 
 interface ReceiveRecord { hash: string; index: number; blockHash: string; result?: unknown }
 const RESET_KEY = 'wallet.reset';
-interface BackgroundReceiveState { desired: boolean; state: 'running' | 'stopping' | 'stopped'; lastError: ReturnType<typeof import('../domain/errors.js').errorResult> | null }
-const BACKGROUND_RECEIVE_KEY = 'receive.background';
 
 export class AttoApplication {
   readonly store: StateStore;
@@ -42,6 +39,10 @@ export class AttoApplication {
   private readonly labels: AddressLabels;
   private readonly auto: AutoReceiver;
   private readonly work: WalletWork;
+  private readonly background: BackgroundReceiver;
+  private readonly receivingAllowed: () => boolean;
+  private preparation?: Promise<void>;
+  private readonly preparationAbort = new AbortController();
   private readonly payments: Payments;
   private watchManager?: WatchManager;
   private watchConfiguration = '';
@@ -54,7 +55,7 @@ export class AttoApplication {
   private readonly mcp: boolean;
   private readonly doctorAbort = new AbortController();
 
-  constructor(options: { directory?: string; secrets?: SecretStore; market?: MarketData; access?: 'mcp'; onReceiveProgress?: (event: ReceiveProgress) => void; sendRetry?: SendRetry; globalDirectory?: GlobalDirectory; onDestination?: (binding: DestinationBinding) => void } = {}) {
+  constructor(options: { directory?: string; secrets?: SecretStore; market?: MarketData; access?: 'mcp'; onReceiveProgress?: (event: ReceiveProgress) => void; sendRetry?: SendRetry; globalDirectory?: GlobalDirectory; onDestination?: (binding: DestinationBinding) => void; workExecution?: WorkExecution; receivingAllowed?: () => boolean } = {}) {
     const profile = resolveWalletProfile(options.directory);
     this.store = new StateStore(profile.directory);
     try {
@@ -67,13 +68,15 @@ export class AttoApplication {
       this.store.transaction(() => {
         if (!this.store.get('settings')) this.store.set('settings', defaultSettings());
       });
-      this.work = new WalletWork(this.store, () => this.settings());
+      this.work = new WalletWork(this.store, () => this.settings(), options.workExecution);
+      this.background = new BackgroundReceiver(this.store);
+      this.receivingAllowed = options.receivingAllowed ?? (() => true);
       this.payments = new Payments(this.store, this.ledger, {
         settings: () => this.settings(), addresses: () => this.addresses(), seed: () => this.seed(),
         requireWrite: () => this.requireMcpWrite(), mcp: this.mcp,
       }, this.market, this.work, options.sendRetry, options.onDestination);
       this.auto = new AutoReceiver(() => ({
-        settings: this.mcp && this.ledger.mcpAccess() !== 'spend' ? { ...this.settings(), autoReceive: false } : this.settings(),
+        settings: !this.receivingAllowed() || (this.mcp && this.ledger.mcpAccess() !== 'spend') ? { ...this.settings(), autoReceive: false } : this.settings(),
         addresses: this.addresses(),
       }),
         (index, hash) => this.receive({ index, hash }, true),
@@ -92,7 +95,6 @@ export class AttoApplication {
     return [...new Set(selected.map(address => parseAddress(address).value))];
   }
   private identity() { return this.store.get<WalletIdentity>('identity'); }
-  private backgroundReceive(): BackgroundReceiveState { return this.store.get<BackgroundReceiveState>(BACKGROUND_RECEIVE_KEY) ?? { desired: false, state: 'stopped', lastError: null }; }
   private reader() { return new NodeReader(this.settings()); }
 
   private requireSession(): void {
@@ -188,7 +190,7 @@ export class AttoApplication {
   private requireResetAvailable(): void {
     this.requireSession();
     if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Wallet reset requires approval in a local terminal.');
-    if (this.backgroundReceive().state !== 'stopped') throw new AttoError('WALLET_BUSY', 'Stop the background receiver before resetting this wallet.');
+    if (this.background.status().state !== 'stopped') throw new AttoError('WALLET_BUSY', 'Stop the background receiver before resetting this wallet.');
     if (this.started || this.calls.size || this.recoveryReads || this.store.busy
       || this.watchManager?.list().some(watch => ['running', 'reconnecting'].includes(watch.status))) {
       throw new AttoError('WALLET_BUSY', 'Stop active wallet operations and reset from a new terminal command.');
@@ -214,7 +216,7 @@ export class AttoApplication {
     try {
       // A previous completed send may still have speculative public work queued.
       // Stop it before clearing state; normal calls cannot start during reset.
-      await this.work.close();
+      await this.work.cancel();
       await this.store.withExclusiveReset(() => this.store.withWalletLock(async () => {
         if ((this.identity()?.fingerprint ?? null) !== expectedFingerprint) {
           throw new AttoError('WALLET_CHANGED', 'The wallet changed after confirmation. Review it before resetting again.');
@@ -342,6 +344,7 @@ export class AttoApplication {
   }
 
   private async receive(request: ReceiveRequest, automatic = false) {
+    if (automatic && !this.receivingAllowed()) throw new AttoError('AUTO_RECEIVE_DISABLED', 'Automatic receiving is stopping.');
     const index = request.index ?? 0;
     const operation = async () => {
       await this.store.withWalletLock(async () => {
@@ -360,6 +363,7 @@ export class AttoApplication {
         if (transaction && transaction.hash.toString() === prior.blockHash && await transaction.isValid()) {
           const result = this.result(transaction, 'received');
           this.store.set(key, { ...prior, result });
+          this.work.prepareConfirmed(transaction.block);
           return result;
         }
         // Refresh pending state below: an unconsumed send permits retrying receive
@@ -382,12 +386,11 @@ export class AttoApplication {
             this.store.set(key, { hash, index, blockHash: block.hash.toString() } satisfies ReceiveRecord);
           });
         }, this.work.worker());
-      wallet = execution.wallet;
-      const transaction = await wallet.receive(receivable, parseAddress(request.representative ?? this.settings().representative), null);
-      const result = { ...this.result(transaction, 'received'), index, amount: amountOutput(receivable.amount.toString()) };
+        wallet = execution.wallet;
+        const transaction = await wallet.receive(receivable, parseAddress(request.representative ?? this.settings().representative), null);
+        const result = { ...this.result(transaction, 'received'), index, amount: amountOutput(receivable.amount.toString()) };
         this.store.set(key, { hash, index, blockHash: transaction.hash.toString(), result } satisfies ReceiveRecord);
-        const account = await wallet.getAccountByIndex(toAttoIndex(index));
-        if (account) this.work.prepare([account]);
+        this.work.prepareConfirmed(transaction.block);
         return result;
       } finally { wallet?.close(); seed.value.fill(0); }
     };
@@ -429,8 +432,7 @@ export class AttoApplication {
         }, this.work.worker());
         wallet = execution.wallet;
         const transaction = await wallet.change(toAttoIndex(index), parseAddress(representative), null);
-        const account = await wallet.getAccountByIndex(toAttoIndex(index));
-        if (account) this.work.prepare([account]);
+        this.work.prepareConfirmed(transaction.block);
         return this.result(transaction, 'representative_changed');
       } finally { wallet?.close(); seed.value.fill(0); }
     });
@@ -458,7 +460,7 @@ export class AttoApplication {
     const reader = this.reader();
     switch (name) {
       case 'doctor': return runDoctor({ directory: this.store.directory, access: this.mcp ? 'mcp' : undefined, signal: this.doctorAbort.signal, globalDirectory: args.globalDirectory as boolean | undefined });
-      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.backgroundReceive(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
+      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.background.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
       case 'wallet_configure': return this.configure(args as Partial<WalletSettings>);
       case 'address_list': return { addresses: this.addresses() };
       case 'address_add': return this.store.withWalletLock(async () => {
@@ -579,36 +581,30 @@ export class AttoApplication {
     this.requireReady();
     this.started = true;
     this.auto.start();
-    await this.preparePoolWork();
+    this.preparation ??= this.preparePoolWork();
+    await this.preparation;
   }
 
   /** Terminal-only detached receiver control; it never changes MCP approval. */
-  startBackgroundReceiver(): BackgroundReceiveState {
+  async startBackgroundReceiver() {
     this.requireReady();
-    const current = this.backgroundReceive();
-    if (current.desired && current.state !== 'stopped') return current;
-    const next: BackgroundReceiveState = { desired: true, state: 'running', lastError: null };
-    this.store.set(BACKGROUND_RECEIVE_KEY, next);
-    try {
-      const child = spawn(process.execPath, [fileURLToPath(new URL('../wallet/receive-daemon.js', import.meta.url)), this.store.directory], { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ATTO_RECEIVE_DAEMON: '1' } });
-      child.on('error', () => {}); child.unref();
-    } catch (error) { this.store.set(BACKGROUND_RECEIVE_KEY, { desired: false, state: 'stopped', lastError: errorResult(error) }); }
-    return this.backgroundReceive();
+    if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Start background receiving through the CLI.');
+    return this.background.start();
   }
 
-  stopBackgroundReceiver(): BackgroundReceiveState {
-    const current = this.backgroundReceive();
-    if (current.state === 'stopped') return current;
-    const next: BackgroundReceiveState = { ...current, desired: false, state: 'stopping' };
-    this.store.set(BACKGROUND_RECEIVE_KEY, next);
-    return next;
+  async stopBackgroundReceiver() {
+    this.requireSession();
+    if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Stop background receiving through the CLI.');
+    return this.background.stop();
   }
+
+  resumeWork(): void { this.work.resume(); }
 
   private async preparePoolWork() {
     if (this.mcp && this.ledger.mcpAccess() !== 'spend') return;
     const indexes = this.ledger.pool().indexes;
     await Promise.allSettled(this.addresses().filter(address => indexes.includes(address.index)).map(async address => {
-      const account = await this.reader().account(address.address);
+      const account = await this.reader().account(address.address, this.preparationAbort.signal);
       if (account && !this.closed) this.work.prepare([account]);
     }));
   }
@@ -617,7 +613,9 @@ export class AttoApplication {
     if (this.closed) return;
     this.closed = true;
     this.doctorAbort.abort();
+    this.preparationAbort.abort();
     await this.auto.close();
+    await this.preparation;
     await Promise.allSettled([...this.calls]);
     await this.watchManager?.close();
     await this.work.close();

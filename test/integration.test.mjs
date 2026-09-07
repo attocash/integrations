@@ -185,6 +185,35 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     await app.approveLimitsProposal(restored.proposal.id);
   });
 
+  await t.test('detached receiving opens and advances a real account after the CLI launcher exits', { skip: process.platform !== 'linux' }, async receiveTest => {
+    // Given real Commons services and a test-only password store for this profile.
+    const fake = await fakeKeyring(receiveTest, mnemonic.phrase);
+    const receiver = (await app.call('address_activate', { index: 9 })).address;
+    const command = async args => JSON.parse((await execute(process.execPath,
+      [join(cliDirectory, 'dist/cli/main.js'), '--data-dir', directory, '--json', 'wallet', 'receive', ...args],
+      { env: { ...process.env, ...fake.env }, timeout: 15_000 })).stdout).result;
+    await app.call('wallet_configure', { autoReceive: true });
+    try {
+      assert.equal((await command(['--background'])).backgroundReceive.state, 'running');
+      // When both sends happen after the launching process has exited.
+      for (let sequence = 1; sequence <= 2; sequence++) {
+        const sent = await app.call('send', { index: 0, destination: receiver, amount: '3', unit: 'RAW', requestId: `detached-real-${sequence}` });
+        await eventually(() => app.call('account_get', { index: 9 }), value => value.account?.height === String(sequence), 'detached real receive');
+        await eventually(() => app.call('receive', { index: 9, hash: sent.hash }), value => value.status === 'received', 'receive journal replay');
+        const account = (await app.call('account_get', { index: 9 })).account;
+        assert.equal(account.balance, String(sequence * 3));
+        await eventually(async () => app.store.get(`work.LOCAL.${account.publicKey}`), value => value?.target === account.lastTransactionHash, 'subsequent detached work');
+      }
+      // Then the receiver has signed exactly once per send and granted no MCP access.
+      assert.equal((await app.call('wallet_status')).mcpAccess, 'read-only');
+      assert.ok((await fake.trace()).length >= 2);
+    } finally {
+      await command(['stop']);
+      await eventually(() => app.call('wallet_status'), value => value.backgroundReceive.state === 'stopped', 'graceful detached shutdown');
+      await app.call('wallet_configure', { autoReceive: false });
+    }
+  });
+
   await t.test('all four watch types deliver a payment published after subscription', async () => {
     await app.call('labels_set', { index: 0, label: 'Sender' });
     await app.call('labels_set', { index: 2, label: 'Watch recipient' });

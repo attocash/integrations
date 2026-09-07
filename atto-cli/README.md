@@ -706,11 +706,27 @@ receiving setting. It does not install a service, does not start after reboot,
 and does not grant MCP spending access. `wallet status` reports its separate
 state and latest operational error. Stop it before resetting a profile.
 
+All three commands accept `--data-dir <directory>` and `--json`. Starting or
+stopping repeatedly is safe. Start acknowledges local initialization; it does
+not promise that the node or password store is reachable. The detached process
+inherits your login environment and needs access to the OS password store. On
+Linux, keep the Secret Service session available; on macOS and Windows, allow
+the CLI to access its credential. Check `wallet receive status` for retry errors.
+No recovery phrase is stored in the public profile or passed on the command line.
+
+Stop prevents new receives and reports `stopping` until the current operation
+finishes. A crashed receiver reports `stopped`; start it explicitly again after
+a crash, reboot, or restoring a backup. Foreground and MCP receivers may coexist,
+but stopping this background receiver does not stop those separate sessions.
+
 After a completed send, receive, representative change, or approved pool step,
 the CLI may finish public proof-of-work preparation in a short detached process.
 This contains only public account heads and worker settings, runs for at most a
 minute, and caches usable work for a later transaction. A changed account head
 or an immediate transaction can still require fresh work.
+The worker exits when its queue is drained, keeps at most two speculative
+requests active, and leaves failed or unfinished jobs eligible for a later CLI
+invocation. Reset cancels queued preparation before clearing the profile.
 
 ## Update notices
 
