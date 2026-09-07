@@ -689,6 +689,29 @@ mnemonic is lost from the password store, recover it from your private backup
 using `atto wallet import` in an uninitialized profile. Preserve the old public
 state and pending-send records for reconciliation before resuming payments.
 
+## Background receiving and work preparation
+
+`atto wallet receive` keeps automatic receiving in the current terminal. To
+keep receiving after the terminal exits, use:
+
+```sh
+atto wallet receive --background
+atto wallet receive status
+atto wallet receive stop
+```
+
+The background receiver uses the same profile selected by `--data-dir`, the OS
+password store, active addresses, minimum receive amount, and automatic
+receiving setting. It does not install a service, does not start after reboot,
+and does not grant MCP spending access. `wallet status` reports its separate
+state and latest operational error. Stop it before resetting a profile.
+
+After a completed send, receive, representative change, or approved pool step,
+the CLI may finish public proof-of-work preparation in a short detached process.
+This contains only public account heads and worker settings, runs for at most a
+minute, and caches usable work for a later transaction. A changed account head
+or an immediate transaction can still require fresh work.
+
 ## Update notices
 
 Interactive CLI commands can show a notice on stderr when a newer stable CLI

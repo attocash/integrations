@@ -5,6 +5,8 @@ import { requestWork } from '../network/work.js';
 import { AttoError } from '../domain/errors.js';
 import type { StateStore } from '../storage/state.js';
 import type { WalletSettings } from './types.js';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 
 export interface BlockWorker {
   workBlock(block: AttoBlock, signal?: AbortSignal): Promise<AttoWork>;
@@ -13,6 +15,7 @@ export interface BlockWorker {
 
 interface StoredWork { target: string; height: string; work: string }
 interface WorkJob { promise: Promise<AttoWork>; speculative: boolean }
+interface QueuedWork { account: string; network: string; head: string; height: string }
 const BACKGROUND_LIMIT = 2;
 const QUEUE_LIMIT = 100;
 
@@ -38,7 +41,24 @@ export class WalletWork {
       const block = this.nextBlock(account);
       if (this.read(block)) continue;
       const key = this.key(block);
-      if (this.queued.size < QUEUE_LIMIT || this.queued.has(key)) this.queued.set(key, block);
+      if (this.queued.size < QUEUE_LIMIT || this.queued.has(key)) {
+        this.queued.set(key, block);
+        this.persist(account);
+      }
+    }
+    this.drain();
+    this.launchDetached();
+  }
+
+  /** Used only by the detached public-work entrypoint. */
+  drainPersisted(): void {
+    const jobs = this.store.get<QueuedWork[]>('work.queue') ?? [];
+    for (const job of jobs.slice(0, QUEUE_LIMIT)) {
+      if (job.network !== this.settings().network) continue;
+      try {
+        const account = AttoAccount.fromJson(job.account);
+        if (account.lastTransactionHash.toString() === job.head && account.height.toString() === job.height) this.queued.set(this.key(this.nextBlock(account)), this.nextBlock(account));
+      } catch { /* Invalid public queue data is discarded below. */ }
     }
     this.drain();
   }
@@ -81,6 +101,7 @@ export class WalletWork {
       // including work another CLI/MCP process has already persisted.
       if (prior && /^\d+$/.test(prior.height) && BigInt(prior.height) > BigInt(block.height.toString())) return;
       this.store.set(key, { target: attoBlockWorkTarget(block), height: block.height.toString(), work: work.toString() } satisfies StoredWork);
+      this.removePersisted(block);
     });
   }
 
@@ -140,5 +161,35 @@ export class WalletWork {
         this.drain();
       });
     }
+  }
+
+  private persist(account: AttoAccount): void {
+    const item: QueuedWork = { account: account.toJson(), network: account.network.name, head: account.lastTransactionHash.toString(), height: account.height.toString() };
+    this.store.transaction(() => {
+      const prior = this.store.get<QueuedWork[]>('work.queue') ?? [];
+      const rest = prior.filter(value => !(value.network === item.network && AttoAccount.fromJson(value.account).publicKey.toString() === account.publicKey.toString()));
+      this.store.set('work.queue', [...rest, item].slice(-QUEUE_LIMIT));
+    });
+  }
+
+  private removePersisted(block: AttoBlock): void {
+    const prior = this.store.get<QueuedWork[]>('work.queue') ?? [];
+    this.store.set('work.queue', prior.filter(value => {
+      try { const account = AttoAccount.fromJson(value.account); return !(value.network === block.network.name && account.publicKey.toString() === block.publicKey.toString()); }
+      catch { return false; }
+    }));
+  }
+
+  private launchDetached(): void {
+    if (process.env.ATTO_WORK_DAEMON === '1' || process.env.NODE_TEST_CONTEXT !== undefined) return;
+    const release = this.store.tryProcessLock('work-daemon');
+    if (!release) return;
+    // The child obtains the same lock before doing network work. Release this
+    // short launch reservation so an exited parent never leaves it stranded.
+    release();
+    try {
+      const child = spawn(process.execPath, [fileURLToPath(new URL('./work-daemon.js', import.meta.url)), this.store.directory], { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ATTO_WORK_DAEMON: '1' } });
+      child.on('error', () => {}); child.unref();
+    } catch { /* Foreground preparation remains available. */ }
   }
 }

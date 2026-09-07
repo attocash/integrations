@@ -166,8 +166,14 @@ export async function runCli(argv = process.argv): Promise<void> {
       showRecovery(await app().backupMnemonic());
       if (program.opts().json) output({ displayed: true });
     });
-  wallet.command('receive').description('Keep automatic receiving running until Ctrl+C')
+  const receiveCommand = wallet.command('receive').description('Keep automatic receiving running until Ctrl+C')
+    .option('--background', 'Keep receiving after this terminal exits; restart manually after reboot')
     .action(async () => {
+      if (activeCommand.opts().background) {
+        const status = app().startBackgroundReceiver();
+        output({ backgroundReceive: status }, 'wallet_receive');
+        return;
+      }
       const receiving = app(event => output(event, 'receive_progress'));
       const status = await receiving.call('wallet_status') as { initialized: boolean; settings: { autoReceive: boolean }; addresses: { active: boolean }[] };
       if (!status.initialized) throw new AttoError('WALLET_NOT_INITIALIZED', 'Create or import a wallet before receiving: atto wallet create or atto wallet import.');
@@ -179,6 +185,8 @@ export async function runCli(argv = process.argv): Promise<void> {
         if (!signal.aborted) await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
       });
     });
+  receiveCommand.command('status').description('Read detached receiver status').action(() => call('wallet_status'));
+  receiveCommand.command('stop').description('Request detached receiver shutdown').action(() => output({ backgroundReceive: app().stopBackgroundReceiver() }, 'wallet_receive'));
 
   const address = program.command('address').description('Manage mnemonic-derived public addresses');
   address.command('list').description('List all saved addresses and their activation state').action(() => call('address_list'));
@@ -377,6 +385,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto wallet configure': 'atto wallet configure --node-url https://node-public.live.application.atto.cash --auto-receive',
     'atto wallet create': 'atto wallet create', 'atto wallet import': 'atto wallet import',
     'atto wallet reset': 'atto wallet reset', 'atto wallet backup': 'atto wallet backup', 'atto wallet receive': 'atto wallet receive',
+    'atto wallet receive status': 'atto wallet receive status', 'atto wallet receive stop': 'atto wallet receive stop',
     'atto address': 'atto address add\n  atto address list', 'atto address list': 'atto address list',
     'atto address add': 'atto address add', 'atto address derive': 'atto address derive 3',
     'atto address activate': 'atto address activate 1', 'atto address deactivate': 'atto address deactivate 1',

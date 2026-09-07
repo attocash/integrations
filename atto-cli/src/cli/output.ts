@@ -132,7 +132,7 @@ function formatUnlabeledHumanResult(result: unknown, operation?: string): string
         address: record(result.identity) ? result.identity.address : null,
         network: result.settings.network,
         automaticReceiving: result.settings.autoReceive ? 'Enabled' : 'Disabled',
-        ...(operation === 'wallet_status' ? { receivingInThisProcess: receiver.running, lastReceiveError: receiver.lastError } : {}),
+        ...(operation === 'wallet_status' ? { receivingInThisProcess: receiver.running, lastReceiveError: receiver.lastError, backgroundReceiver: result.backgroundReceive } : {}),
         representative: result.settings.representative,
         minReceiveRaw: result.settings.minReceiveRaw,
         nodeUrl: result.settings.nodeUrl,

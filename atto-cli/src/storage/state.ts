@@ -206,6 +206,32 @@ export class StateStore {
     }
   }
 
+  /** A process lifetime lock.  Unlike the wallet mutation lock this has no
+   * bearing on ordinary commands, and SQLite releases it if the owner dies. */
+  tryProcessLock(name: string): (() => void) | undefined {
+    if (!/^[a-z0-9-]{1,64}$/i.test(name)) throw new AttoError('INVALID_LOCK', 'Invalid process lock name.');
+    const directory = join(this.directory, 'process-locks');
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const file = join(directory, `${name}.sqlite`);
+    closeSync(openSync(file, 'a', 0o600));
+    if (process.platform !== 'win32') chmodSync(file, 0o600);
+    const connection = new DatabaseSync(file);
+    try { connection.exec('PRAGMA busy_timeout = 0; BEGIN IMMEDIATE;'); }
+    catch (error) {
+      connection.close();
+      const code = (error as { errcode?: number }).errcode;
+      if (code === 5 || code === 6) return undefined;
+      throw error;
+    }
+    this.lockRequests++;
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      try { connection.close(); } finally { this.lockRequests--; }
+    };
+  }
+
   close(): void {
     if (this.closed) return;
     if (this.lockRequests !== 0) throw new AttoError('WALLET_BUSY', 'Wait for wallet operations before closing state.');

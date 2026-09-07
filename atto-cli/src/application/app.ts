@@ -3,11 +3,13 @@ import { GlobalDirectory } from '../labels/directory.js';
 import { AddressLabels } from '../labels/presentation.js';
 import type { DestinationBinding } from '../spending/destination.js';
 import { createHash } from 'node:crypto';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import {
   AttoMnemonic, AttoReceivable, AttoTransaction, toAttoIndex,
 } from '@attocash/commons-core';
 import { amountOutput, amountRaw } from '../domain/amount.js';
-import { AttoError } from '../domain/errors.js';
+import { AttoError, errorResult } from '../domain/errors.js';
 import { NodeReader, parseAddress, publicModel } from '../network/reader.js';
 import type { SendRetry } from '../network/retry.js';
 import { OsSecretStore, type SecretStore } from '../storage/secrets.js';
@@ -28,6 +30,8 @@ import { runDoctor } from '../doctor/doctor.js';
 
 interface ReceiveRecord { hash: string; index: number; blockHash: string; result?: unknown }
 const RESET_KEY = 'wallet.reset';
+interface BackgroundReceiveState { desired: boolean; state: 'running' | 'stopping' | 'stopped'; lastError: ReturnType<typeof import('../domain/errors.js').errorResult> | null }
+const BACKGROUND_RECEIVE_KEY = 'receive.background';
 
 export class AttoApplication {
   readonly store: StateStore;
@@ -88,6 +92,7 @@ export class AttoApplication {
     return [...new Set(selected.map(address => parseAddress(address).value))];
   }
   private identity() { return this.store.get<WalletIdentity>('identity'); }
+  private backgroundReceive(): BackgroundReceiveState { return this.store.get<BackgroundReceiveState>(BACKGROUND_RECEIVE_KEY) ?? { desired: false, state: 'stopped', lastError: null }; }
   private reader() { return new NodeReader(this.settings()); }
 
   private requireSession(): void {
@@ -183,6 +188,7 @@ export class AttoApplication {
   private requireResetAvailable(): void {
     this.requireSession();
     if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Wallet reset requires approval in a local terminal.');
+    if (this.backgroundReceive().state !== 'stopped') throw new AttoError('WALLET_BUSY', 'Stop the background receiver before resetting this wallet.');
     if (this.started || this.calls.size || this.recoveryReads || this.store.busy
       || this.watchManager?.list().some(watch => ['running', 'reconnecting'].includes(watch.status))) {
       throw new AttoError('WALLET_BUSY', 'Stop active wallet operations and reset from a new terminal command.');
@@ -452,7 +458,7 @@ export class AttoApplication {
     const reader = this.reader();
     switch (name) {
       case 'doctor': return runDoctor({ directory: this.store.directory, access: this.mcp ? 'mcp' : undefined, signal: this.doctorAbort.signal, globalDirectory: args.globalDirectory as boolean | undefined });
-      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), addresses: this.addresses(), autoReceive: this.auto.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
+      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.backgroundReceive(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
       case 'wallet_configure': return this.configure(args as Partial<WalletSettings>);
       case 'address_list': return { addresses: this.addresses() };
       case 'address_add': return this.store.withWalletLock(async () => {
@@ -574,6 +580,28 @@ export class AttoApplication {
     this.started = true;
     this.auto.start();
     await this.preparePoolWork();
+  }
+
+  /** Terminal-only detached receiver control; it never changes MCP approval. */
+  startBackgroundReceiver(): BackgroundReceiveState {
+    this.requireReady();
+    const current = this.backgroundReceive();
+    if (current.desired && current.state !== 'stopped') return current;
+    const next: BackgroundReceiveState = { desired: true, state: 'running', lastError: null };
+    this.store.set(BACKGROUND_RECEIVE_KEY, next);
+    try {
+      const child = spawn(process.execPath, [fileURLToPath(new URL('../wallet/receive-daemon.js', import.meta.url)), this.store.directory], { detached: true, stdio: 'ignore', windowsHide: true, env: { ...process.env, ATTO_RECEIVE_DAEMON: '1' } });
+      child.on('error', () => {}); child.unref();
+    } catch (error) { this.store.set(BACKGROUND_RECEIVE_KEY, { desired: false, state: 'stopped', lastError: errorResult(error) }); }
+    return this.backgroundReceive();
+  }
+
+  stopBackgroundReceiver(): BackgroundReceiveState {
+    const current = this.backgroundReceive();
+    if (current.state === 'stopped') return current;
+    const next: BackgroundReceiveState = { ...current, desired: false, state: 'stopping' };
+    this.store.set(BACKGROUND_RECEIVE_KEY, next);
+    return next;
   }
 
   private async preparePoolWork() {
