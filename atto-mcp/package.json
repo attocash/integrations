@@ -1,0 +1,33 @@
+{
+  "name": "@attocash/mcp",
+  "version": "0.1.0",
+  "description": "Local Atto MCP server using the Atto CLI wallet engine",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "bin": {
+    "atto-mcp": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attocash/integrations.git",
+    "directory": "atto-mcp"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@attocash/cli": "0.1.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "commander": "14.0.2"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "description": "Public state captured from the pre-split 0.1.0 application with an in-memory synthetic credential.",
+  "userVersion": 1,
+  "rows": [
+    {
+      "key": "addresses",
+      "value": "[{\"index\":0,\"address\":\"atto://adxseu7ne6h3h5avlrmapalc6qw2dsygbungfscakf6re44prhufjy7syamqo\",\"publicKey\":\"EF2253ED278FB3F4155C58078162F42DA1CB060D1A62C840517D12738F89E854\",\"active\":true},{\"index\":1,\"address\":\"atto://abjur6fd2bgtrmabyrr6xcbtlwjelqadx24epn5b6vaxagh4b4ms4qgdlhjhu\",\"publicKey\":\"5348F8A3D04D38B001C463EB88335D9245C003BEB847B7A1F5417018FC0F192E\",\"active\":true}]"
+    },
+    {
+      "key": "identity",
+      "value": "{\"address\":\"atto://adxseu7ne6h3h5avlrmapalc6qw2dsygbungfscakf6re44prhufjy7syamqo\",\"fingerprint\":\"5baee2f535cb3fb8985a6a3587caa4269c5953b72c1d1297b7a473bee84441b2\"}"
+    },
+    {
+      "key": "market.terms",
+      "value": "{\"version\":\"2026-09-05\",\"acceptedAt\":\"2026-09-05T09:31:21.093Z\"}"
+    },
+    {
+      "key": "settings",
+      "value": "{\"network\":\"LIVE\",\"nodeUrl\":\"http://127.0.0.1:1\",\"workerUrl\":\"http://127.0.0.1:1\",\"representative\":\"atto://adkq2jzidx4t44pg46rht7bqrvpjbci4e6qrfhgqx4sl7fdtd5kh6dip3b3gs\",\"autoReceive\":false,\"minReceiveRaw\":\"7\"}"
+    },
+    {
+      "key": "spending.policy",
+      "value": "{\"perRequest\":{\"amount\":\"100\",\"unit\":\"RAW\"},\"rolling\":[{\"amount\":\"1000\",\"unit\":\"RAW\",\"days\":7}]}"
+    },
+    {
+      "key": "spending.records",
+      "value": "[{\"id\":\"legacy-pending\",\"index\":0,\"destination\":\"atto://abjur6fd2bgtrmabyrr6xcbtlwjelqadx24epn5b6vaxagh4b4ms4qgdlhjhu\",\"raw\":\"10\",\"createdAt\":1704616009211,\"status\":\"unknown\",\"hash\":\"163FCDE8D2ECA25322D437320062AED534AB84B98AE7776FA8B434487E6A07EB\",\"blockJson\":\"{\\\"type\\\":\\\"SEND\\\",\\\"network\\\":\\\"LIVE\\\",\\\"version\\\":0,\\\"algorithm\\\":\\\"V1\\\",\\\"publicKey\\\":\\\"EF2253ED278FB3F4155C58078162F42DA1CB060D1A62C840517D12738F89E854\\\",\\\"height\\\":2,\\\"balance\\\":90,\\\"timestamp\\\":1704616009211,\\\"previous\\\":\\\"1111111111111111111111111111111111111111111111111111111111111111\\\",\\\"receiverAlgorithm\\\":\\\"V1\\\",\\\"receiverPublicKey\\\":\\\"5348F8A3D04D38B001C463EB88335D9245C003BEB847B7A1F5417018FC0F192E\\\",\\\"amount\\\":10,\\\"address\\\":\\\"atto://adxseu7ne6h3h5avlrmapalc6qw2dsygbungfscakf6re44prhufjy7syamqo\\\",\\\"receiverAddress\\\":\\\"atto://abjur6fd2bgtrmabyrr6xcbtlwjelqadx24epn5b6vaxagh4b4ms4qgdlhjhu\\\"}\"}]"
+    }
+  ]
+}

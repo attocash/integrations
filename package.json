@@ -1,0 +1,32 @@
+{
+  "name": "@attocash/integrations",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "workspaces": [
+    "atto-cli",
+    "atto-mcp"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @attocash/cli && npm run build --workspace @attocash/mcp",
+    "check": "npm run build --workspace @attocash/cli && npm run check --workspaces",
+    "test": "npm run build && node --test atto-cli/test/*.test.mjs atto-mcp/test/*.test.mjs test/*.test.mjs",
+    "test:integration": "npm run build && node scripts/integration.mjs",
+    "test:keychain": "npm run build --workspace @attocash/cli && npm run test:keychain --workspace @attocash/cli",
+    "pack": "npm run build && node scripts/pack.mjs",
+    "test:package": "npm run pack && node scripts/package-test.mjs",
+    "prepack": "node scripts/require-packed-artifact.mjs"
+  },
+  "overrides": {
+    "ws": "8.21.3"
+  },
+  "devDependencies": {
+    "@attocash/commons-test": "7.0.2",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@types/node": "^24.0.0",
+    "@types/semver": "7.8.0",
+    "typescript": "5.9.3"
+  }
+}

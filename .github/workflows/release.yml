@@ -1,0 +1,191 @@
+name: Release CLI and MCP
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Serialize version calculation as well as publication. Cancelling between the
+# two npm publishes would leave an incomplete release.
+concurrency:
+  group: atto-release
+  cancel-in-progress: false
+
+jobs:
+  version:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Semantic Release verifies push access even in dry-run mode.
+    outputs:
+      version: ${{ steps.semantic.outputs.new_release_version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Calculate the next shared version
+        id: semantic
+        uses: cycjimmy/semantic-release-action@v6
+        with:
+          semantic_version: 24.2.7
+          dry_run: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Save release notes
+        if: steps.semantic.outputs.new_release_version != ''
+        uses: actions/github-script@v7
+        env:
+          RELEASE_NOTES: ${{ steps.semantic.outputs.new_release_notes }}
+        with:
+          script: |
+            require('node:fs').writeFileSync('release-notes.md', process.env.RELEASE_NOTES);
+      - uses: actions/upload-artifact@v4
+        if: steps.semantic.outputs.new_release_version != ''
+        with:
+          name: atto-release-notes
+          path: release-notes.md
+          if-no-files-found: error
+          retention-days: 14
+
+  checks:
+    needs: version
+    if: needs.version.outputs.version != ''
+    uses: ./.github/workflows/ci.yml
+
+  build:
+    needs: [version, checks]
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - name: Prepare both package versions and the exact CLI dependency
+        run: node scripts/release-version.mjs "$RELEASE_VERSION"
+      - name: Test the release version
+        run: npm test
+      - name: Verify the release tarballs, including AttoNodeMock integration
+        run: npm run test:package
+        env:
+          ATTO_TEST_PACKAGE_INTEGRATION: '1'
+      - uses: actions/download-artifact@v4
+        with:
+          name: atto-release-notes
+          path: artifacts
+      - name: Preserve the tested tarballs
+        run: |
+          mv "./attocash-cli-$RELEASE_VERSION.tgz" artifacts/
+          mv "./attocash-mcp-$RELEASE_VERSION.tgz" artifacts/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: atto-release-packages
+          path: artifacts/
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+    env:
+      RELEASE_VERSION: ${{ needs.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          registry-url: https://registry.npmjs.org/
+      - uses: actions/download-artifact@v4
+        with:
+          name: atto-release-packages
+          path: artifacts
+      - name: Publish CLI, then MCP, using npm trusted publishing
+        run: node scripts/publish-release.mjs "$RELEASE_VERSION" artifacts
+        env:
+          NODE_AUTH_TOKEN: ''
+          NPM_TOKEN: ''
+      - name: Prepare the GitHub release after both npm packages are available
+        id: github_release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tag = `atto-v${process.env.RELEASE_VERSION}`;
+            const repository = context.repo;
+            // An existing tag must point at this exact workflow commit.
+            try {
+              const { data } = await github.rest.git.getRef({ ...repository, ref: `tags/${tag}` });
+              if (data.object.type !== 'commit' || data.object.sha !== context.sha) {
+                throw new Error(`${tag} already points at another commit or is not a lightweight release tag.`);
+              }
+            } catch (error) {
+              if (error.status !== 404) throw error;
+            }
+            // Authenticated listing includes drafts; the by-tag endpoint does not.
+            const releases = await github.paginate(github.rest.repos.listReleases, {
+              ...repository, per_page: 100,
+            });
+            const matching = releases.filter(release => release.tag_name === tag);
+            if (matching.length > 1) throw new Error(`Multiple releases already use ${tag}.`);
+            if (matching.length) {
+              const data = matching[0];
+              if (data.target_commitish !== context.sha) {
+                throw new Error(`Existing release ${tag} does not match this workflow commit.`);
+              }
+              if (!data.draft) {
+                const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
+                  ...repository, release_id: data.id,
+                });
+                for (const name of ['cli', 'mcp']) {
+                  const filename = `attocash-${name}-${process.env.RELEASE_VERSION}.tgz`;
+                  const bytes = require('node:fs').readFileSync(`artifacts/${filename}`);
+                  const digest = `sha256:${require('node:crypto').createHash('sha256').update(bytes).digest('hex')}`;
+                  if (assets.find(asset => asset.name === filename)?.digest !== digest) {
+                    throw new Error(`Published release asset ${filename} is missing or differs from the tested artifact.`);
+                  }
+                }
+                core.setOutput('complete', 'true');
+              }
+              core.setOutput('release_id', data.id);
+            } else {
+              const { data } = await github.rest.repos.createRelease({
+                ...repository, tag_name: tag, target_commitish: context.sha,
+                name: `Atto CLI and MCP ${process.env.RELEASE_VERSION}`,
+                body: require('node:fs').readFileSync('artifacts/release-notes.md', 'utf8'),
+                draft: true,
+              });
+              core.setOutput('release_id', data.id);
+            }
+      - name: Attach the tested packages
+        if: steps.github_release.outputs.complete != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "atto-v$RELEASE_VERSION" \
+            "artifacts/attocash-cli-$RELEASE_VERSION.tgz" \
+            "artifacts/attocash-mcp-$RELEASE_VERSION.tgz" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Make the complete GitHub release public
+        if: steps.github_release.outputs.complete != 'true'
+        uses: actions/github-script@v7
+        env:
+          RELEASE_ID: ${{ steps.github_release.outputs.release_id }}
+        with:
+          script: |
+            await github.rest.repos.updateRelease({
+              ...context.repo, release_id: Number(process.env.RELEASE_ID),
+              draft: false, make_latest: 'legacy',
+            });

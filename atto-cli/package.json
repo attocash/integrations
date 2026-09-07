@@ -1,0 +1,54 @@
+{
+  "name": "@attocash/cli",
+  "version": "0.1.0",
+  "description": "Atto wallet CLI and reusable wallet engine with local key custody and shared spending limits",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "bin": {
+    "atto": "dist/cli/main.js"
+  },
+  "exports": {
+    "./core": {
+      "types": "./dist/core.d.ts",
+      "import": "./dist/core.js"
+    },
+    "./terminal": {
+      "types": "./dist/cli/onboarding.d.ts",
+      "import": "./dist/cli/onboarding.js"
+    },
+    "./profiles": {
+      "types": "./dist/storage/profiles.d.ts",
+      "import": "./dist/storage/profiles.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attocash/integrations.git",
+    "directory": "atto-cli"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs",
+    "test:keychain": "node --test test/keychain-platform.test.mjs",
+    "prepack": "node ../scripts/require-packed-artifact.mjs"
+  },
+  "dependencies": {
+    "@attocash/commons-core": "7.0.2",
+    "@attocash/commons-node": "7.0.2",
+    "@attocash/commons-node-remote": "7.0.2",
+    "@attocash/commons-worker-remote": "7.0.2",
+    "@napi-rs/keyring": "2.0.0",
+    "commander": "14.0.2",
+    "semver": "7.8.5",
+    "zod": "^4.0.0"
+  }
+}
