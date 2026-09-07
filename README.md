@@ -133,11 +133,11 @@ git clone https://github.com/attocash/integrations.git
 cd integrations
 npm ci
 npm run pack
-npm install --global ./attocash-cli-0.1.0.tgz ./attocash-mcp-0.1.0.tgz
+npm install --global ./attocash-cli-0.1.1.tgz ./attocash-mcp-0.1.1.tgz
 atto wallet create
 ```
 
-To use only the terminal wallet, install just `attocash-cli-0.1.0.tgz`. Install
+To use only the terminal wallet, install just `attocash-cli-0.1.1.tgz`. Install
 both artifacts in the same npm command when testing MCP from this checkout so
 its exact CLI dependency resolves to the local artifact.
 
@@ -178,7 +178,7 @@ npm run pack
 npm run pack -- --pack-destination /tmp/atto-artifacts
 ```
 
-This produces `attocash-cli-0.1.0.tgz` and `attocash-mcp-0.1.0.tgz`. The root
+This produces `attocash-cli-0.1.1.tgz` and `attocash-mcp-0.1.1.tgz`. The root
 `package-lock.json` records the development dependency tree for `npm ci`.
 Packaging uses a temporary staging directory and leaves source package files
 unchanged. Use the root script to produce release artifacts; plain `npm pack`
@@ -206,9 +206,9 @@ release notes from commit history, using tags named `atto-v<version>`. When
 there is no release to make, publication is skipped. Release runs are serialized
 without cancelling an active release.
 
-The initial beta release is `0.1.0`. Publish the tested bootstrap artifacts
-and record the successful release with tag `atto-v0.1.0` before enabling
-automated releases. Subsequent versions are calculated from that tag. Without
+The initial beta release, `0.1.0`, was published from tested bootstrap artifacts
+and is recorded with tag `atto-v0.1.0`. Automated releases calculate subsequent
+versions from that tag. Without
 an `atto-v` tag, semantic-release defaults to `1.0.0`. Historical n8n tags
 belong to a separate release series and do not set the CLI/MCP version.
 
