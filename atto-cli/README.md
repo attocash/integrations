@@ -725,45 +725,9 @@ If MCP is installed too, update the matching pair and restart the MCP process:
 npm install --global @attocash/cli@VERSION @attocash/mcp@VERSION
 ```
 
-## Library API
+To use the wallet engine in another application, see the [library API guide](https://github.com/attocash/integrations/blob/main/docs/library-api.md).
 
-Other local adapters can import the supported engine interface:
-
-```js
-import { createApplication, operations } from '@attocash/cli/core';
-
-const application = createApplication({ directory: '/absolute/path/to/profile' });
-try {
-  const balances = await application.call('balances_get');
-  console.log(balances);
-  console.log(operations.map(operation => operation.name));
-} finally {
-  await application.close();
-}
-```
-
-Omit `directory` to use the CLI default wallet. The exported `ApplicationSession`
-interface provides `call(name, input?)`, `start()`, and `close()`. Call `start()`
-for a persistent session that should run automatic receiving, and always call
-`close()` when the session ends. Watches belong to that application session.
-The library's `send` operation selects from the approved pool when `index` is
-omitted, matching MCP. The `atto send` command supplies index `0` by default and
-uses that automatic selection only with `--pool`.
-
-Adapters requiring the MCP permission policy pass `access: 'mcp'`; that session
-rechecks the profile's approved access before wallet mutations. Automatic
-receiving follows that access mode too. Generic `limits_propose` only creates a
-proposal in either mode.
-
-The entry point also exports `operations`, `errorResult`, and the `Operation`,
-`ApplicationOptions`, and `ApplicationSession` types. It does not expose recovery
-methods. Wallet creation, import, backup, and reset remain terminal commands. The MCP
-package calls this API directly and keeps one application session for its stdio
-connection. `@attocash/cli/profiles` provides shared directory resolution;
-`@attocash/cli/terminal` provides interactive setup and proposal review for the
-terminal executables.
-
-## Install from source and develop
+## Install from source
 
 Clone the repository and build the local packages:
 
@@ -772,41 +736,13 @@ git clone https://github.com/attocash/integrations.git
 cd integrations
 npm ci
 npm run pack
-npm install --global ./attocash-cli-0.1.0.tgz
+npm install --global ./attocash-cli-0.1.1.tgz
 ```
 
 To test MCP with the same local CLI build, install both artifacts together:
 
 ```sh
-npm install --global ./attocash-cli-0.1.0.tgz ./attocash-mcp-0.1.0.tgz
+npm install --global ./attocash-cli-0.1.1.tgz ./attocash-mcp-0.1.1.tgz
 ```
 
-Use the root `npm run pack` script to create the supported artifacts. See the
-[packaging notes](https://github.com/attocash/integrations#packaging) for dependency
-locking and installed-package verification. Protocol signing and publication use
-[Atto Commons](https://github.com/attocash/commons).
-
-Run verification commands from the repository root:
-
-```sh
-npm ci
-npm run check
-npm test
-npm run test:integration
-ATTO_TEST_KEYCHAIN=1 npm run test:keychain
-npm run pack
-npm run test:package
-```
-
-For CLI development alone, use `npm run build --workspace @attocash/cli`,
-`npm run check --workspace @attocash/cli`, and
-`npm test --workspace @attocash/cli` after building. Run the source checkout with
-`node atto-cli/dist/cli/main.js --help`.
-
-Tests use temporary state, synthetic recovery material, and mock nodes/workers.
-Platform credential-store tests run when `ATTO_TEST_KEYCHAIN=1`, use isolated
-entries, and remove them afterward. Linux native credential persistence has
-been verified in an isolated Secret Service session. macOS Keychain and Windows
-Credential Manager verification is configured in CI and requires those
-platforms. Container integration tests run on Linux. Tests never place live-fund
-transactions or publish the package.
+For development and testing, see the [contributor guide](https://github.com/attocash/integrations/blob/main/docs/contributing.md).

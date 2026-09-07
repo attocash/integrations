@@ -88,7 +88,7 @@ atto-mcp setup
 
 You can then use `atto-mcp` as the configured command, with `--data-dir` and the
 selected path as its arguments. Source installation is covered in
-[Install from source and develop](#install-from-source-and-develop) below.
+[Install from source](#install-from-source) below.
 
 ## Try these prompts
 
@@ -404,7 +404,7 @@ is reported as intentional. Repair suggestions are data for the agent to review;
 apply only changes authorized by the user, then rerun doctor. See the
 [full report and timeout semantics](https://github.com/attocash/integrations/tree/main/atto-cli#diagnostics).
 
-## Install from source and develop
+## Install from source
 
 Clone the repository, build both workspaces, and run setup from source:
 
@@ -439,28 +439,8 @@ the CLI from the same checkout:
 
 ```sh
 npm run pack
-npm install --global ./attocash-cli-0.1.0.tgz ./attocash-mcp-0.1.0.tgz
+npm install --global ./attocash-cli-0.1.1.tgz ./attocash-mcp-0.1.1.tgz
 atto-mcp setup
 ```
 
-For local proposal review, use the built entry point and the same profile:
-
-```sh
-node atto-mcp/dist/main.js --data-dir /absolute/path/to/profile limits approve PROPOSAL_ID
-node atto-mcp/dist/main.js --data-dir /absolute/path/to/profile limits reject PROPOSAL_ID
-```
-
-Run verification commands from the repository root:
-
-```sh
-npm run build
-npm run check --workspace @attocash/mcp
-npm test --workspace @attocash/mcp
-```
-
-The root build compiles the CLI library before MCP. The server uses the public
-`@attocash/cli/core` and `@attocash/cli/profiles` exports; terminal setup and review
-use `@attocash/cli/terminal`. It does not spawn CLI commands or import wallet
-internals. Tests use the real SDK stdio client with temporary profiles and mock
-network services. The root packaging checks also exercise the installed CLI and
-MCP artifacts together.
+For development and testing, see the [contributor guide](https://github.com/attocash/integrations/blob/main/docs/contributing.md).
