@@ -373,6 +373,12 @@ outstanding checks, including native credential probes and their subprocesses.
 Doctor does not check npm for updates.
 
 An agent should call the MCP **`doctor` tool** to inspect the server's own process.
+`wallet_status.initialized` describes the saved public wallet identity; status
+does not read the password store. If a signing operation returns
+`WALLET_CREDENTIAL_MISSING`, the profile remains initialized but its credential
+lookup returned empty. Run doctor in that session before attempting recovery;
+do not reset or replace the wallet to repair credential access.
+
 A terminal result cannot establish that an already-running MCP has the same
 environment. When a user-owned Linux session socket is available, doctor may test
 environment overrides in an isolated credential probe. It returns

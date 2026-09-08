@@ -113,7 +113,7 @@ try {
     join(root, 'atto-cli/test/network.test.mjs'), join(root, 'atto-cli/test/stream-idle.test.mjs'),
     join(root, 'atto-cli/test/reconciliation.test.mjs'),
     join(root, 'atto-cli/test/payments.test.mjs'), join(root, 'atto-mcp/test/interfaces.test.mjs'), join(root, 'atto-mcp/test/onboarding.test.mjs'),
-    join(root, 'atto-mcp/test/stream-failure.test.mjs'),
+    join(root, 'atto-mcp/test/stream-failure.test.mjs'), join(root, 'atto-mcp/test/configuration.test.mjs'),
   ], {
     cwd: temporary, timeout: 240_000, maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, ATTO_TEST_CLI_PACKAGE_DIR: cliDirectory, ATTO_TEST_MCP_PACKAGE_DIR: mcpDirectory },

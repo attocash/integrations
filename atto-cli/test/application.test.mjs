@@ -60,6 +60,23 @@ test('credential mismatch prevents deriving new keys without changing public wal
   assert.equal((await first.app.call('address_list')).addresses.length, 1);
 });
 
+test('empty credential lookups distinguish an initialized profile from a new wallet', async t => {
+  // Given a new profile with neither public identity nor a saved credential.
+  const f = fixture(t);
+  await assert.rejects(f.app.backupMnemonic(), { code: 'WALLET_NOT_INITIALIZED' });
+  await f.app.createWallet();
+  const before = await f.app.call('wallet_status');
+
+  // When its external password store subsequently returns no credential.
+  await f.secrets.set(null);
+
+  // Then recovery and key derivation report missing credentials while retaining public identity.
+  await assert.rejects(f.app.backupMnemonic(), { code: 'WALLET_CREDENTIAL_MISSING' });
+  await assert.rejects(f.app.call('address_derive', { index: 1 }), { code: 'WALLET_CREDENTIAL_MISSING' });
+  assert.deepEqual((await f.app.call('wallet_status')).identity, before.identity);
+  assert.deepEqual((await f.app.call('address_list')).addresses, before.addresses);
+});
+
 test('USD terms must be explicitly accepted at the current version before price lookup', async t => {
   let lookups = 0;
   const market = new MarketData(undefined, async () => { lookups++; throw new Error('not requested'); });

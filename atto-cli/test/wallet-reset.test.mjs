@@ -115,7 +115,7 @@ test('reset resumes when the credential was deleted before interruption was repo
   // When
   await assert.rejects(app.resetWallet(identity.fingerprint), /Synthetic interruption after deletion/);
   const interrupted = open();
-  await assert.rejects(interrupted.backupMnemonic(), { code: 'WALLET_NOT_INITIALIZED' });
+  await assert.rejects(interrupted.backupMnemonic(), { code: 'WALLET_RESET_REQUIRED' });
   await interrupted.resetWallet(identity.fingerprint);
 
   // Then

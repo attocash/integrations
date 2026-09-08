@@ -182,7 +182,11 @@ export class AttoApplication {
     this.recoveryReads++;
     try {
       const phrase = await this.secrets.get();
-      if (!phrase) throw new AttoError('WALLET_NOT_INITIALIZED', 'Create or import a wallet through the CLI first.');
+      if (!phrase) {
+        this.requireResetFinished();
+        if (this.identity()) throw new AttoError('WALLET_CREDENTIAL_MISSING', 'The wallet is initialized, but the OS password store returned no recovery phrase for this profile. Run doctor in this session to check credential access. Do not reset or replace the wallet.');
+        throw new AttoError('WALLET_NOT_INITIALIZED', 'Create or import a wallet through the CLI first.');
+      }
       return phrase;
     } finally { this.recoveryReads--; }
   }

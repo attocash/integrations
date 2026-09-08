@@ -109,7 +109,7 @@ test('finding the requested receivable aborts lookup successfully and proceeds t
 
   // When / Then: this synthetic wallet deliberately has no credential, so it
   // stops immediately after the successful lookup and never signs anything.
-  await assert.rejects(f.app.call('receive', { index: 0, hash: hashes[0].toLowerCase() }), { code: 'WALLET_NOT_INITIALIZED' });
+  await assert.rejects(f.app.call('receive', { index: 0, hash: hashes[0].toLowerCase() }), { code: 'WALLET_CREDENTIAL_MISSING' });
   assert.equal(f.secretReads, 1);
   assert.equal(f.app.store.get(`receive.LOCAL.${hashes[0]}`), undefined);
 });
