@@ -119,7 +119,13 @@ export async function signingWallet(
     },
     async change(value: AttoKeyIndex, representative: AttoAddress, timestamp?: AttoInstant | null) {
       requireIndex(value);
-      return perform(time => attoAccountChange(requireAccount(), representative, time), timestamp);
+      return perform(time => {
+        const current = requireAccount();
+        if (current.representativeAddress.value === representative.value) {
+          throw new AttoError('REPRESENTATIVE_UNCHANGED', 'This account already uses the requested representative. Choose a different representative to publish a change.');
+        }
+        return attoAccountChange(current, representative, time);
+      }, timestamp);
     },
     async getAccountByIndex(value: AttoKeyIndex) { requireIndex(value); return account ?? null; },
     close() { signer = undefined; },

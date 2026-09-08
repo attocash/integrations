@@ -6,7 +6,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setImmediate as yieldToServer, setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
-import { AttoAccount, AttoMnemonic, AttoReceivable, AttoSendBlock, AttoTransaction, AttoWork, attoAccountChange, attoBlockWorkTarget } from '@attocash/commons-core';
+import { AttoAccount, AttoChangeBlock, AttoMnemonic, AttoReceivable, AttoSendBlock, AttoTransaction, AttoWork, attoAccountChange, attoBlockWorkTarget } from '@attocash/commons-core';
 
 const applicationUrl = process.env.ATTO_TEST_CLI_PACKAGE_DIR
   ? pathToFileURL(join(process.env.ATTO_TEST_CLI_PACKAGE_DIR, 'dist/application/app.js'))
@@ -138,6 +138,12 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
             block.publicKey, block.timestamp, block.receiverAlgorithm, block.receiverPublicKey, block.amount);
           state.receivables.set(transaction.hash.toString(), receivable);
           for (const subscription of state.streams) subscription.emit(receivable);
+        } else if (block instanceof AttoChangeBlock) {
+          if (block.representativePublicKey.toString() === prior.representativePublicKey.toString()) {
+            response.statusCode = 400;
+            return json({ reason: 'INVALID_REPRESENTATIVE' });
+          }
+          assert.equal(block.balance.toString(), prior.balance.toString());
         } else {
           const receivable = state.receivables.get(block.sendHash.toString());
           assert.ok(receivable, 'Receives must consume a published pending transfer.');
@@ -148,6 +154,9 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
         const next = JSON.parse(prior.toJson());
         Object.assign(next, { height: Number(block.height.toString()), balance: Number(block.balance.toString()),
           lastTransactionHash: transaction.hash.toString(), lastTransactionTimestamp: Number(block.timestamp.toEpochMilliseconds()) });
+        if (block instanceof AttoChangeBlock) Object.assign(next, {
+          representativeAlgorithm: block.representativeAlgorithm.name, representativePublicKey: block.representativePublicKey.toString(),
+        });
         saveAccount(AttoAccount.fromJson(JSON.stringify(next)));
         state.publications.push(transaction);
         if (state.failPublication === state.publications.length) { response.statusCode = 503; return response.end(); }

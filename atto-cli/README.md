@@ -621,6 +621,8 @@ atto wallet configure --representative <atto-address>
 Configuration updates preserve omitted settings. Supply at least one option.
 `--representative` changes the default used to open accounts; use
 `atto representative change <address>` to change an existing account's representative.
+Selecting the account's current representative returns `REPRESENTATIVE_UNCHANGED`
+without signing or publishing a transaction.
 `wallet status` shows the profile directory and whether receiving runs in that
 process; it does not report receiving sessions in other terminals.
 

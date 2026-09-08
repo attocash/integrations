@@ -238,9 +238,17 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
   });
 
   await t.test('representative changes and entry/transaction pages use actual network account history', async () => {
+    // Given an opened account whose current representative differs from address 2.
+    const before = (await app.call('account_get', { index: 1 })).account;
+
+    // When its representative changes and the same choice is submitted again.
     const changed = await app.call('representative_change', { index: 1, representative: address2 });
+    await assert.rejects(app.call('representative_change', { index: 1, representative: address2 }), { code: 'REPRESENTATIVE_UNCHANGED' });
+
+    // Then only the real change advances the account and history remains complete.
     assert.equal(changed.status, 'representative_changed');
     const account1 = (await app.call('account_get', { index: 1 })).account;
+    assert.equal(BigInt(account1.height), BigInt(before.height) + 1n);
     assert.equal(account1.representativePublicKey, changed.transaction.block.representativePublicKey);
     assert.equal(account1.balance, '1000000001');
     for (const event of ['entry', 'transaction']) {
