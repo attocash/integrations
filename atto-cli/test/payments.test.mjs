@@ -48,7 +48,7 @@ for (const mode of ['transient', 'persistent', 'unexpected']) {
         }
       } finally {
         blockedFile = undefined;
-        await rm(f.directory, { recursive: true, force: true });
+        await rm(f.directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
       }
     `;
     // When the actual fixture teardown encounters transient, persistent, or unrelated errors.
