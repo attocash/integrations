@@ -146,7 +146,8 @@ async function fixture(t) {
     http.closeAllConnections();
     await new Promise(resolve => http.close(resolve));
     store.close();
-    await rm(directory, { recursive: true, force: true });
+    // Work ownership can end before the detached process closes its last SQLite handle.
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     assert.equal(state.error, undefined);
   });
   return { directory, store, state, settings, work };

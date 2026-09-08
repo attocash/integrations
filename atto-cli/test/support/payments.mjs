@@ -187,7 +187,9 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
     http.closeAllConnections();
     await new Promise(resolve => http.close(resolve));
     phrase = undefined;
-    await rm(directory, { recursive: true, force: true });
+    // A stopped detached process may still be closing SQLite handles on Windows.
+    // Retry transient deletion failures without hiding a persistent lock.
+    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     assert.equal(state.error, undefined);
   });
   await app.call('wallet_configure', { network: 'LOCAL', nodeUrl: url, workerUrl: url, representative: addresses[0].address, autoReceive: false });

@@ -1,15 +1,62 @@
 import assert from 'node:assert/strict';
+import { execFile } from 'node:child_process';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
 import { unlink, writeFile } from 'node:fs/promises';
+import { promisify } from 'node:util';
 import { fixture, gate, until } from './support/payments.mjs';
 import { cli, credentialEnvironment } from './support/detached.mjs';
 const applicationUrl = process.env.ATTO_TEST_CLI_PACKAGE_DIR
   ? pathToFileURL(join(process.env.ATTO_TEST_CLI_PACKAGE_DIR, 'dist/application/app.js'))
   : new URL('../dist/application/app.js', import.meta.url);
 const { MarketData } = await import(new URL('../pricing/market.js', applicationUrl).href);
+
+for (const mode of ['transient', 'persistent', 'unexpected']) {
+  test(`payment fixture cleanup handles ${mode} file-removal errors`, { timeout: 30_000 }, async () => {
+    // Given an isolated process emulating Windows refusing to unlink a busy SQLite file.
+    const source = `
+      import assert from 'node:assert/strict';
+      import fs from 'node:fs';
+      import { rm, stat } from 'node:fs/promises';
+      import { join } from 'node:path';
+      const mode = process.argv[1];
+      const code = mode === 'unexpected' ? 'EIO' : 'EBUSY';
+      let blockedFile;
+      let attempts = 0;
+      const unlink = fs.unlink;
+      fs.unlink = (file, callback) => {
+        if (String(file) === blockedFile && (mode !== 'transient' || attempts < 2)) {
+          attempts++;
+          queueMicrotask(() => callback(Object.assign(new Error('Synthetic file-removal failure'), { code })));
+        } else unlink(file, callback);
+      };
+      const { fixture } = await import(${JSON.stringify(new URL('./support/payments.mjs', import.meta.url).href)});
+      const cleanups = [];
+      const f = await fixture({ after: cleanup => cleanups.push(cleanup) }, [10]);
+      blockedFile = join(f.directory, 'coordination.sqlite');
+      try {
+        if (mode === 'transient') {
+          await cleanups[0]();
+          assert.equal(attempts, 2);
+          await assert.rejects(stat(f.directory), { code: 'ENOENT' });
+        } else {
+          await assert.rejects(cleanups[0](), { code });
+          if (mode === 'unexpected') assert.equal(attempts, 1);
+          else assert.ok(attempts > 1);
+        }
+      } finally {
+        blockedFile = undefined;
+        await rm(f.directory, { recursive: true, force: true });
+      }
+    `;
+    // When the actual fixture teardown encounters transient, persistent, or unrelated errors.
+    const execution = promisify(execFile)(process.execPath, ['--input-type=module', '-e', source, mode], { timeout: 25_000 });
+    // Then transient locks are retried; persistent and unrelated errors remain failures.
+    await assert.doesNotReject(execution);
+  });
+}
 
 test('a confirmed payment stays published when speculative persistence fails', async t => {
   // Given a working payment path and a storage failure limited to the work queue.
