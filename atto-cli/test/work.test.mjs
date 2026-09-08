@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
 import { promisify } from 'node:util';
@@ -31,18 +32,24 @@ function stopped(store) {
 
 async function detachedPrepare(f, accounts = f.state.accounts) {
   const source = `
+    import { text } from 'node:stream/consumers';
     import { AttoAccount } from ${JSON.stringify(commonsUrl)};
     import { StateStore } from ${JSON.stringify(moduleUrl('storage/state.js'))};
     import { WalletWork } from ${JSON.stringify(moduleUrl('wallet/work.js'))};
     const store = new StateStore(process.argv[1]);
     const work = new WalletWork(store, () => store.get('settings'), 'detached');
-    work.prepare(JSON.parse(process.argv[2]).map(AttoAccount.fromJson));
+    work.prepare(JSON.parse(await text(process.stdin)).map(AttoAccount.fromJson));
     await work.close(); store.close();
     process.stdout.write('launcher-exited');
   `;
-  return promisify(execFile)(process.execPath, ['--input-type=module', '-e', source, f.directory, JSON.stringify(accounts.map(value => value.toJson()))], {
+  const execution = promisify(execFile)(process.execPath, ['--input-type=module', '-e', source, f.directory], {
     cwd: new URL('../..', import.meta.url), timeout: 5000,
   });
+  const [result] = await Promise.all([
+    execution,
+    pipeline([JSON.stringify(accounts.map(value => value.toJson()))], execution.child.stdin),
+  ]);
+  return result;
 }
 function validWork(block, rejectBlock) {
   const key = `${block.network.name}:${attoBlockWorkTarget(block)}:${block.timestamp.toString().slice(0, 4)}`;
@@ -601,10 +608,11 @@ test('the first foreground computation and a concurrent detached preparation sha
 });
 
 test('the finite worker budget stops an unresponsive queue at sixty seconds and retains at most 100 accounts', { timeout: 70_000 }, async t => {
-  // Given more accounts than the bounded queue and a completely unresponsive worker.
+  // Given an unresponsive worker and a batch exceeding the queue and Windows command-line limits.
   const f = await fixture(t);
   f.state.blocked = true;
   f.state.accounts = Array.from({ length: 110 }, (_, index) => account((index + 1).toString(16).padStart(64, '0'), (index + 111).toString(16).padStart(64, '0')));
+  assert.ok(JSON.stringify(f.state.accounts.map(value => value.toJson())).length > 32_767);
   const began = Date.now();
   // When one detached worker attempts the retained jobs.
   await detachedPrepare(f);
