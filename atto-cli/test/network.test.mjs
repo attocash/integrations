@@ -198,3 +198,30 @@ test('nonreplayable list timeout is bounded and never advertises a misleading co
   assert.equal(page.timedOut, true);
   assert.equal(page.nextCursor, undefined);
 });
+
+test('a fetch headers timeout rejects the subscription without leaking upstream details', async t => {
+  // Given: the same fetch rejection shape captured from the terminated MCP server.
+  const cause = Object.assign(new Error('Private upstream headers timeout details.'), { name: 'HeadersTimeoutError', code: 'UND_ERR_HEADERS_TIMEOUT' });
+  t.mock.method(globalThis, 'fetch', async () => { throw new TypeError('fetch failed', { cause }); });
+  const reader = new NodeReader({ network: 'LOCAL', nodeUrl: 'http://127.0.0.1' });
+
+  // When / Then: the network failure reaches the caller as a sanitized error.
+  await assert.rejects(reader.stream({ event: 'account' }, () => assert.fail('No events expected'), new AbortController().signal), {
+    code: 'NODE_STREAM_ERROR', message: 'The node stream failed. Check endpoint availability and node responses.',
+  });
+});
+
+test('a dropped response body rejects the subscription after its delivered event', async t => {
+  // Given: a stream disconnects after sending one complete record.
+  const reader = await server(t, (_req, res) => {
+    res.write(entry() + '\n');
+    setTimeout(() => res.destroy(), 30);
+  });
+  const events = [];
+
+  // When
+  await assert.rejects(reader.stream({ event: 'entry' }, model => events.push(publicModel(model)), new AbortController().signal), { code: 'NODE_STREAM_ERROR' });
+
+  // Then: delivered data remains valid, and the connection failure is catchable.
+  assert.deepEqual(events.map(value => value.height), ['1']);
+});
