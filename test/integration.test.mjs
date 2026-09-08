@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { Readable } from 'node:stream';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -38,14 +37,6 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
   skip: process.env.ATTO_TEST_INTEGRATION !== '1' ? 'Set ATTO_TEST_INTEGRATION=1 to run isolated Docker/Podman containers.' : false,
   timeout: 300_000,
 }, async t => {
-  const uid = typeof process.getuid === 'function' ? process.getuid() : undefined;
-  const socket = uid === undefined ? undefined : `/run/user/${uid}/podman/podman.sock`;
-  if (!process.env.DOCKER_HOST && socket && existsSync(socket)) {
-    process.env.DOCKER_HOST = `unix://${socket}`;
-    process.env.TESTCONTAINERS_RYUK_DISABLED ??= 'true';
-    process.env.TESTCONTAINERS_CHECKS_DISABLE ??= 'true';
-  }
-
   const mnemonic = await AttoMnemonic.generate();
   const seed = await mnemonic.toSeedAsync();
   const genesisKey = await seed.toPrivateKey(toAttoIndex(0));
