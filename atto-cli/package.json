@@ -42,10 +42,10 @@
     "prepack": "node ../scripts/require-packed-artifact.mjs"
   },
   "dependencies": {
-    "@attocash/commons-core": "7.0.2",
-    "@attocash/commons-node": "7.0.2",
-    "@attocash/commons-node-remote": "7.0.2",
-    "@attocash/commons-worker-remote": "7.0.2",
+    "@attocash/commons-core": "8.0.0",
+    "@attocash/commons-node": "8.0.0",
+    "@attocash/commons-node-remote": "8.0.0",
+    "@attocash/commons-worker-remote": "8.0.0",
     "@napi-rs/keyring": "2.0.0",
     "commander": "14.0.2",
     "semver": "7.8.5",
