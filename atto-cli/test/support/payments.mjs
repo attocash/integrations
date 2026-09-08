@@ -4,7 +4,7 @@ import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { setTimeout as delay } from 'node:timers/promises';
+import { setImmediate as yieldToServer, setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { AttoAccount, AttoMnemonic, AttoReceivable, AttoSendBlock, AttoTransaction, AttoWork, attoAccountChange, attoBlockWorkTarget } from '@attocash/commons-core';
 
@@ -17,7 +17,7 @@ const { WalletWork } = await import(new URL('../wallet/work.js', applicationUrl)
 const { BackgroundReceiver } = await import(new URL('../wallet/background-receive.js', applicationUrl).href);
 const workCache = new Map();
 
-function validWork(block) {
+async function validWork(block) {
   const key = attoBlockWorkTarget(block);
   const cached = workCache.get(key);
   if (cached?.isValid(block)) return cached;
@@ -26,6 +26,9 @@ function validWork(block) {
     new DataView(bytes.buffer).setUint32(0, nonce, true);
     const work = new AttoWork(new Int8Array(bytes.buffer));
     if (work.isValid(block)) { workCache.set(key, work); return work; }
+    // The mock worker shares the client's event loop. Keep unrelated node
+    // requests responsive while a speculative proof is being computed.
+    if (nonce % 1000 === 999) await yieldToServer();
   }
   throw new Error('No bounded synthetic LOCAL work found.');
 }
@@ -116,7 +119,7 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
         state.works.push(input);
         if (state.failWork) { response.statusCode = 503; return response.end(); }
         if (state.holdWork) await state.holdWork.promise;
-        return json({ work: validWork(block).toString() });
+        return json({ work: (await validWork(block)).toString() });
       }
       if (request.method === 'POST' && url.pathname === '/transactions/stream') {
         const transaction = AttoTransaction.fromJson(body);
