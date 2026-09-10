@@ -40,6 +40,11 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.equal(result.tools.some(tool => /approv|reject/.test(tool.name)), false);
   assert.equal(result.tools.find(tool => tool.name === 'send').annotations.destructiveHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'limits_propose').annotations.idempotentHint, false);
+  assert.match(client.getInstructions(), /approval\.commands\.atto and approval\.commands\.npx/);
+  assert.match(client.getInstructions(), /approval\.changes/);
+  assert.match(client.getInstructions(), /do not assume a globally installed atto-mcp/);
+  assert.doesNotMatch(client.getInstructions(), /review it with atto-mcp limits approve/);
+  assert.match(result.tools.find(tool => tool.name === 'limits_propose').description, /profile-specific approval\.commands/);
   assert.equal(result.tools.find(tool => tool.name === 'balances_get').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'watch_start').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'price_quote').annotations.readOnlyHint, true);
@@ -91,6 +96,11 @@ test('MCP limit changes only propose, and an existing connection observes termin
   assert.equal(proposal.access, 'spend');
   assert.deepEqual(proposal.policy, requested);
   assert.deepEqual(proposal.pool, { indexes: [0], consolidate: true });
+  assert.deepEqual(result.structuredContent.result.approval.changes, {
+    access: { from: 'read-only', to: 'spend' },
+    policy: { from: policy, to: requested },
+    pool: { from: { indexes: [0], consolidate: false }, to: { indexes: [0], consolidate: true } },
+  });
   const before = (await client.callTool({ name: 'limits_get', arguments: {} })).structuredContent.result;
   assert.deepEqual(before.policy, policy);
   assert.deepEqual(before.pool, { indexes: [0], consolidate: false });
@@ -105,6 +115,49 @@ test('MCP limit changes only propose, and an existing connection observes termin
   assert.deepEqual(after.pool, { indexes: [0], consolidate: true });
   assert.equal(after.proposal.status, 'approved');
   assert.equal(reads, readsBefore, 'Proposal, approval, and public address metadata do not read recovery material.');
+});
+
+test('MCP approval commands preserve the shared profile and proposal through the native shell', async t => {
+  // Given a shared profile whose path contains spaces, quotes, and literal shell metacharacters.
+  const root = await mkdtemp(join(tmpdir(), 'atto approval commands-'));
+  const directory = join(root, "shared ' $ATTO_TEST_PATH_INJECTION `literal` & ; (profile)");
+  const local = new AttoApplication({ directory });
+  const mcp = new AttoApplication({ directory, access: 'mcp' });
+  const other = new AttoApplication({ directory: join(root, 'other profile') });
+  t.after(async () => {
+    await mcp.close(); await local.close(); await other.close();
+    await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+  });
+  const client = await connected(mcp, t);
+  const policy = { perRequest: null, rolling: [] };
+
+  // When MCP proposes spending access and its returned commands are parsed by the user's shell.
+  const response = await client.callTool({ name: 'limits_propose', arguments: { policy, access: 'spend' } });
+  assert.equal(response.isError, undefined);
+  const { proposal, approval } = response.structuredContent.result;
+  assert.deepEqual(JSON.parse(response.content[0].text), response.structuredContent);
+  assert.equal(approval.shell, process.platform === 'win32' ? 'powershell' : 'posix');
+  const capture = process.platform === 'win32'
+    ? 'function atto { ConvertTo-Json -InputObject @($args) -Compress }; function npx { ConvertTo-Json -InputObject @($args) -Compress }'
+    : `atto() { "$ATTO_TEST_NODE" --input-type=module -e 'process.stdout.write(JSON.stringify(process.argv.slice(1)))' -- "$@"; }; npx() { atto "$@"; }`;
+  for (const name of ['atto', 'npx']) {
+    const source = `${capture}\n${approval.commands[name]}`;
+    const parsed = await execute(process.platform === 'win32' ? 'powershell.exe' : '/bin/sh',
+      process.platform === 'win32' ? ['-NoProfile', '-NonInteractive', '-Command', source] : ['-c', source], {
+        timeout: 10_000, windowsHide: true,
+        env: { ...process.env, ATTO_TEST_NODE: process.execPath, ATTO_TEST_PATH_INJECTION: 'must not expand' },
+      });
+
+    // Then neither command can drop/change the profile, expand shell characters, or approve another wallet.
+    assert.equal(parsed.stderr, '');
+    assert.deepEqual(JSON.parse(parsed.stdout), [...(name === 'npx' ? ['--yes', '@attocash/mcp@latest'] : []),
+      '--data-dir', directory, 'limits', 'approve', proposal.id]);
+  }
+  assert.deepEqual(approval.changes, { access: { from: 'read-only', to: 'spend' } });
+  assert.equal((await local.reviewLimitsProposal(proposal.id)).proposal.id, proposal.id);
+  await assert.rejects(other.reviewLimitsProposal(proposal.id), { code: 'PROPOSAL_NOT_FOUND' });
+  assert.equal(local.ledger.mcpAccess(), 'read-only');
+  assert.equal(local.ledger.proposal().status, 'pending');
 });
 
 test('MCP rejects forged approval fields and the public core facade cannot approve proposals', async t => {

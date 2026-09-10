@@ -433,8 +433,19 @@ atto --data-dir /absolute/path/to/profile limits set --access spend \
 MCP `limits_propose` and generic `atto call limits_propose` **only propose** a change.
 They cannot apply it. `limits_propose` also accepts `pool` with `indexes` and
 `consolidate`; omitting it preserves the current pool. `limits_get` returns the
-active policy, usage, `mcpAccess`, pool, and current proposal. A human approves or rejects the proposal in their own
-terminal, using the same directory as the MCP client's configuration:
+active policy, usage, `mcpAccess`, pool, and current proposal.
+
+The proposal response also includes `approval.changes`: changed `access`, `policy`,
+and `pool` settings with `from` and `to` values. Source-pool approval is separate
+from spending access and amount limits; adding another sending account does not
+necessarily change either. An unlimited policy means no amount cap.
+`approval.commands.atto` and `approval.commands.npx` provide approval alternatives
+with the exact profile directory and proposal ID. Preserve their quoting and use
+the indicated `approval.shell` (`posix` on Linux/macOS, `powershell` on Windows).
+Only the user should run an approval command.
+
+A human approves or rejects the proposal in their own terminal, using the same
+directory as the MCP client's configuration:
 
 ```sh
 atto --data-dir /absolute/path/to/profile limits approve PROPOSAL_ID

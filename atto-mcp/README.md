@@ -152,6 +152,21 @@ it does not change limits or grant access. For example:
 Omitting `pool` from `limits_propose` preserves the current approved pool. Read-only
 MCP can propose pool changes. Approval derives missing indexes without activating
 them for automatic receiving.
+
+`limits_propose` returns the immutable `proposal` and public `approval` guidance:
+
+- `approval.changes` contains only changed `access`, `policy`, and `pool` settings,
+  each with `from` and `to` values. Adding a source account can require approval
+  even when spending access and amount limits are already approved. An unlimited
+  policy means no amount cap; MCP spending access is a separate setting.
+- `approval.commands.atto` is for an installed CLI; `approval.commands.npx` works
+  through Node.js/npm without a globally installed `atto-mcp`. Both include the
+  exact profile directory and proposal ID.
+- `approval.shell` identifies the command quoting: `posix` on Linux/macOS or
+  `powershell` on Windows. Preserve the returned quoting, including paths with
+  spaces; PowerShell commands are not Command Prompt commands.
+
+Explain the changes and present one returned command. Do not run it for the user.
 A human must run approval in their own local terminal using the proposal ID
 returned by `limits_propose`. For the default MCP wallet:
 

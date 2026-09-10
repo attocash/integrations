@@ -16,8 +16,8 @@ const { parseAddress } = await import(pathToFileURL(join(cliDirectory, 'dist/net
 const unlimited = { perRequest: null, rolling: [] };
 const bounded = { perRequest: { amount: '100', unit: 'RAW' }, rolling: [{ days: 1, amount: '200', unit: 'RAW' }] };
 
-async function fixture(t) {
-  const directory = await mkdtemp(join(tmpdir(), 'atto-limit-approval-'));
+async function fixture(t, prefix = 'atto-limit-approval-') {
+  const directory = await mkdtemp(join(tmpdir(), prefix));
   let phrase = null;
   let secretReads = 0;
   const secrets = { get: async () => { secretReads++; return phrase; }, set: async value => { phrase = value; } };
@@ -51,7 +51,7 @@ async function fixture(t) {
 
 async function propose(application, policy = bounded, access) {
   const result = await application.call('limits_propose', { policy, ...(access ? { access } : {}) });
-  assert.deepEqual(Object.keys(result), ['proposal']);
+  assert.deepEqual(Object.keys(result), ['proposal', 'approval']);
   return result.proposal;
 }
 
@@ -76,6 +76,47 @@ test('existing shared CLI budgets do not implicitly authorize MCP spending', asy
   assert.deepEqual((await f.mcp.call('wallet_status')).identity, f.wallet.identity);
   await assert.rejects(f.mcp.call('address_deactivate', { index: 0 }), { code: 'MCP_READ_ONLY' });
   assert.equal((await f.local.call('address_deactivate', { index: 0 })).active, false);
+});
+
+test('approval guidance distinguishes source-pool changes from access and spending limits', async t => {
+  // Given shared CLI/MCP sessions already allowed to spend within bounded limits from account zero.
+  const f = await fixture(t, 'atto shared approval ');
+  const original = { indexes: [0], consolidate: false };
+  const initial = await f.local.call('limits_propose', { policy: bounded, access: 'spend', pool: original });
+  await f.local.approveLimitsProposal(initial.proposal.id);
+  const reads = f.secretReads;
+  const requests = f.requests.length;
+  const next = { indexes: [0, 1], consolidate: false };
+
+  // When MCP requests permission to send from another owned account without changing its allowance.
+  const { proposal, approval } = await f.mcp.call('limits_propose', { policy: bounded, access: 'spend', pool: next });
+
+  // Then the guidance identifies only the pool change and leaves the active policy and credentials alone.
+  assert.deepEqual(approval.changes, { pool: { from: original, to: next } });
+  assert.equal(approval.method, 'local-terminal');
+  assert.equal(proposal.directory, f.directory);
+  assert.deepEqual(f.local.ledger.pool(), original);
+  assert.deepEqual(f.local.ledger.policy(), bounded);
+  assert.equal(f.local.ledger.mcpAccess(), 'spend');
+  assert.equal(f.secretReads, reads);
+  assert.equal(f.requests.length, requests);
+});
+
+test('approval guidance reports access and policy changes independently, including unlimited policies', async t => {
+  // Given a read-only profile with no spending cap and an unchanged default pool.
+  const f = await fixture(t);
+
+  // When a proposal changes only MCP access, only limits, or neither.
+  const access = await f.mcp.call('limits_propose', { policy: unlimited, access: 'spend' });
+  const limits = await f.mcp.call('limits_propose', { policy: bounded, access: 'read-only' });
+  const unchanged = await f.mcp.call('limits_propose', { policy: unlimited, access: 'read-only' });
+
+  // Then unlimited means no cap, not missing spending authorization or a missing policy.
+  assert.deepEqual(access.approval.changes, { access: { from: 'read-only', to: 'spend' } });
+  assert.deepEqual(limits.approval.changes, { policy: { from: unlimited, to: bounded } });
+  assert.deepEqual(unchanged.approval.changes, {});
+  assert.equal(f.local.ledger.mcpAccess(), 'read-only');
+  assert.deepEqual(f.local.ledger.policy(), unlimited);
 });
 
 test('all shared limit requests only propose and the latest proposal survives restart', async t => {

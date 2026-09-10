@@ -14,6 +14,7 @@ import { OsSecretStore, type SecretStore } from '../storage/secrets.js';
 import { StateStore } from '../storage/state.js';
 import { resolveWalletProfile } from '../storage/profiles.js';
 import { SpendLedger, type McpAccess } from '../spending/ledger.js';
+import { approvalInstructions } from '../spending/approval.js';
 import { Payments } from '../spending/payments.js';
 import { WalletWork, type WorkExecution } from '../wallet/work.js';
 import { BackgroundReceiver } from '../wallet/background-receive.js';
@@ -537,7 +538,11 @@ export class AttoApplication {
         if (!record) throw new AttoError('JOURNAL_NOT_FOUND', 'This payment request is not in the local journal.');
         return { record };
       }
-      case 'limits_propose': return this.store.withWalletLock(async () => ({ proposal: this.ledger.proposePolicy(args.policy as SpendingPolicy, args.access as McpAccess, this.proposalWallet(), args.pool as AccountPool | undefined) }));
+      case 'limits_propose': return this.store.withWalletLock(async () => {
+        const current = { access: this.ledger.mcpAccess(), policy: this.ledger.policy(), pool: this.ledger.pool() };
+        const proposal = this.ledger.proposePolicy(args.policy as SpendingPolicy, args.access as McpAccess, this.proposalWallet(), args.pool as AccountPool | undefined);
+        return { proposal, approval: approvalInstructions(proposal, current) };
+      });
       case 'metrics_get': return this.market.metrics();
       case 'price_quote': return this.market.quoteUsd(args.amount as string);
       case 'terms_get': return { ...marketTerms, accepted: this.store.get<{ version: string }>('market.terms')?.version === marketTerms.version };
