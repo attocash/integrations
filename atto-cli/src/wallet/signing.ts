@@ -61,23 +61,33 @@ export async function signingWallet(
     return account;
   }
 
-  async function perform(build: (timestamp: string) => AccountUpdate, timestamp?: AttoInstant | null): Promise<AttoTransaction> {
+  async function serialized<T>(operation: () => Promise<T>): Promise<T> {
     const previous = queue;
     let release!: () => void;
     queue = new Promise<void>(resolve => { release = resolve; });
     await previous;
-    try {
-      if (!signer) throw new AttoError('WALLET_CLOSED', 'This signing operation is closed.');
-      const update = build((timestamp ?? await retryNetwork(() => client.now(), retry)).toString());
-      const block = update.block;
-      if (block.address.value !== address.value) throw new AttoError('ACCOUNT_MISMATCH', 'The constructed block belongs to a different wallet account.');
-      if (block.network.name !== settings.network) throw new AttoError('NETWORK_MISMATCH', 'Account network differs from the configured wallet network.');
-      if (!block.isValid()) throw new AttoError('INVALID_TRANSACTION', 'The constructed transaction is invalid.');
-      await beforeSign(block);
-      const signature = await signer.signBlock(block);
-      const work = await retryNetwork(() => suppliedWorker ? suppliedWorker.workBlock(block, retry?.signal) : worker.workBlock(block), retry);
-      const transaction = new AttoTransaction(block, signature, work);
-      if (!await transaction.isValid()) throw new AttoError('INVALID_TRANSACTION', 'The signed transaction is invalid.');
+    try { return await operation(); }
+    finally { release(); }
+  }
+
+  async function prepareTransaction(build: (timestamp: string) => AccountUpdate, timestamp?: AttoInstant | null) {
+    if (!signer) throw new AttoError('WALLET_CLOSED', 'This signing operation is closed.');
+    const update = build((timestamp ?? await retryNetwork(() => client.now(), retry)).toString());
+    const block = update.block;
+    if (block.address.value !== address.value) throw new AttoError('ACCOUNT_MISMATCH', 'The constructed block belongs to a different wallet account.');
+    if (block.network.name !== settings.network) throw new AttoError('NETWORK_MISMATCH', 'Account network differs from the configured wallet network.');
+    if (!block.isValid()) throw new AttoError('INVALID_TRANSACTION', 'The constructed transaction is invalid.');
+    await beforeSign(block);
+    const signature = await signer.signBlock(block);
+    const work = await retryNetwork(() => suppliedWorker ? suppliedWorker.workBlock(block, retry?.signal) : worker.workBlock(block), retry);
+    const transaction = new AttoTransaction(block, signature, work);
+    if (!await transaction.isValid()) throw new AttoError('INVALID_TRANSACTION', 'The signed transaction is invalid.');
+    return { update, block, transaction };
+  }
+
+  async function perform(build: (timestamp: string) => AccountUpdate, timestamp?: AttoInstant | null): Promise<AttoTransaction> {
+    return serialized(async () => {
+      const { update, block, transaction } = await prepareTransaction(build, timestamp);
       let attempted = false;
       await retryNetwork(async () => {
         if (attempted) {
@@ -98,7 +108,11 @@ export async function signingWallet(
       }, retry);
       account = update.account;
       return transaction;
-    } finally { release(); }
+    });
+  }
+
+  async function prepareOnly(build: (timestamp: string) => AccountUpdate, timestamp?: AttoInstant | null): Promise<AttoTransaction> {
+    return serialized(async () => (await prepareTransaction(build, timestamp)).transaction);
   }
 
   // Commons' wallet builder calls its private Kotlin worker interface directly.
@@ -108,6 +122,10 @@ export async function signingWallet(
     async sendByIndex(value: AttoKeyIndex, destination: AttoAddress, amount: AttoAmount, timestamp?: AttoInstant | null) {
       requireIndex(value);
       return perform(time => attoAccountSend(requireAccount(), destination, amount, time), timestamp);
+    },
+    async prepareSendByIndex(value: AttoKeyIndex, destination: AttoAddress, amount: AttoAmount, timestamp?: AttoInstant | null) {
+      requireIndex(value);
+      return prepareOnly(time => attoAccountSend(requireAccount(), destination, amount, time), timestamp);
     },
     async receive(receivable: AttoReceivable, representative?: AttoAddress | null, timestamp?: AttoInstant | null) {
       if (receivable.receiverAddress.value !== address.value) throw new AttoError('WRONG_RECEIVER', 'The payment belongs to a different address.');

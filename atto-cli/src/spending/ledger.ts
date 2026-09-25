@@ -1,6 +1,7 @@
 import { validateDestinationBinding, type DestinationBinding } from './destination.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
+import { AttoBlock, AttoSendBlock, AttoTransaction } from '@attocash/commons-core';
 import { amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
 import type { StateStore } from '../storage/state.js';
@@ -27,14 +28,48 @@ export interface SendRecord {
   quote?: unknown;
   selection?: 'automatic' | 'explicit';
   plan?: PaymentPlan;
+  external?: ExternalPaymentRecord;
+}
+
+export interface ExternalPaymentRecord {
+  kind: 'market-topup';
+  version: 1;
+  paymentIdentifier: string;
+  network: 'atto:live' | 'atto:local';
+  intentId: string;
+  resourceUrl: string;
+  requirementHash: string;
+  intentExpiresAt: string;
+  marketState: 'ISSUED' | 'PENDING' | 'CREDITED' | 'EXPIRED';
+  paymentState: 'PREPARED' | 'ATTEMPTED' | 'UNKNOWN' | 'CONFIRMED' | 'FAILED' | null;
+  nativeState: 'challenged' | 'unknown' | 'confirmed' | 'rejected';
+  attemptedAt?: number;
+  receivePending?: boolean | null;
+}
+
+export interface ExternalPaymentSecrets {
+  version: 1;
+  apiUrl: string;
+  audience: string;
+  accountId: string;
+  agentId: string;
+  identityId: string;
+  walletFingerprint: string;
+  controllerIndex: number;
+  controllerAddress: string;
+  requirementJson: string;
+  transactionJson?: string;
+  paymentJson?: string;
+  paymentSignature?: string;
 }
 
 export type SendReservation = Pick<SendRecord, 'id' | 'index' | 'destination' | 'raw' | 'createdAt'>
-  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding'>>;
+  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding' | 'external'>>;
 
 const DAY_MS = 86_400_000;
 const POLICY_KEY = 'spending.policy';
 const RECORDS_KEY = 'spending.records';
+const EXTERNAL_SECRETS_KEY = 'spending.externalSecrets';
 const REVISION_KEY = 'spending.policyRevision';
 const ACCESS_KEY = 'spending.mcpAccess';
 const PROPOSAL_KEY = 'spending.proposal';
@@ -218,7 +253,8 @@ export class SpendLedger {
           || ['sourceAddress', 'network', 'metadata', 'quote', 'selection'].some(key => {
             const field = key as 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection';
             return request[field] !== undefined && !isDeepStrictEqual(request[field], existing[field]);
-          }) || (request.plan !== undefined && !isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)))) {
+          }) || (request.plan !== undefined && !isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)))
+          || (request.external !== undefined && !isDeepStrictEqual(this.externalDefinition(request.external), this.externalDefinition(existing.external)))) {
           throw new AttoError('REQUEST_CONFLICT', 'This request ID already belongs to a different payment.');
         }
         return existing;
@@ -267,6 +303,107 @@ export class SpendLedger {
       if (!hash || !blockJson) throw new AttoError('SEND_STATE', 'A signed payment requires its block hash and block.');
       if (record.plan?.steps.some(step => step.status !== 'published')) throw new AttoError('SEND_STATE', 'Complete every consolidation step before signing the external payment.');
       return { ...record, hash, blockJson, status: 'signed' };
+    });
+  }
+
+  /** Persist the exact offered requirement before any external SEND is signed. */
+  externalChallenge(id: string, requirementJson: string,
+    owner: Omit<ExternalPaymentSecrets, 'requirementJson' | 'transactionJson' | 'paymentJson' | 'paymentSignature'>): void {
+    if (typeof requirementJson !== 'string' || Buffer.byteLength(requirementJson, 'utf8') < 1
+      || Buffer.byteLength(requirementJson, 'utf8') > 65_536) throw new AttoError('SEND_STATE', 'The x402 requirement is invalid.');
+    this.store.transaction(() => {
+      const records = this.records();
+      const record = records.find(value => value.id === id);
+      if (!record?.external || record.hash || record.status !== 'reserved') throw new AttoError('SEND_STATE', 'This Market payment no longer accepts a challenge.');
+      if (createHashHex(requirementJson) !== record.external.requirementHash) throw new AttoError('SEND_STATE', 'The x402 requirement fingerprint does not match.');
+      const secrets = this.externalSecrets();
+      const current = secrets[id];
+      if (current && (current.requirementJson !== requirementJson || !isDeepStrictEqual(this.ownerDefinition(current), owner))) {
+        throw new AttoError('REQUEST_CONFLICT', 'This payment ID received a different x402 requirement or controller binding.');
+      }
+      if (!current) {
+        secrets[id] = { ...owner, requirementJson };
+        this.store.set(EXTERNAL_SECRETS_KEY, secrets);
+      }
+    });
+  }
+
+  /** Exact signed bytes and the attempt fence commit atomically before HTTP submission. */
+  externalAttempt(id: string, input: { hash: string; blockJson: string; transactionJson: string; paymentJson: string; paymentSignature: string; attemptedAt: number }): void {
+    if (!/^[A-F0-9]{64}$/.test(input.hash) || !input.blockJson || !input.transactionJson || !input.paymentJson
+      || !input.paymentSignature || !Number.isSafeInteger(input.attemptedAt) || input.attemptedAt < 0
+      || Buffer.byteLength(input.transactionJson, 'utf8') > 65_536 || Buffer.byteLength(input.paymentJson, 'utf8') > 65_536
+      || input.paymentSignature.length > 90_000) throw new AttoError('SEND_STATE', 'The signed x402 payment is invalid.');
+    this.store.transaction(() => {
+      const records = this.records();
+      const position = records.findIndex(value => value.id === id);
+      const record = records[position];
+      if (!record?.external || record.status !== 'reserved' || record.hash) throw new AttoError('SEND_STATE', 'This Market payment cannot be assigned another SEND.');
+      const secrets = this.externalSecrets();
+      const current = secrets[id];
+      if (!current || createHashHex(current.requirementJson) !== record.external.requirementHash) {
+        throw new AttoError('SEND_STATE', 'The original x402 requirement is unavailable.');
+      }
+      let transaction: AttoTransaction;
+      let block: AttoBlock;
+      try {
+        transaction = AttoTransaction.fromJson(input.transactionJson);
+        block = AttoBlock.fromJson(input.blockJson);
+      } catch { throw new AttoError('SEND_STATE', 'The signed x402 transaction is invalid.'); }
+      if (!(transaction.block instanceof AttoSendBlock) || !(block instanceof AttoSendBlock)
+        || transaction.hash.toString() !== input.hash || block.hash.toString() !== input.hash
+        || transaction.block.hash.toString() !== block.hash.toString()
+        || block.amount.toString() !== record.raw || block.receiverAddress.value !== record.destination
+        || (record.sourceAddress && block.address.value !== record.sourceAddress)
+        || block.network.name !== record.network
+        || !input.paymentJson.includes(input.transactionJson)) {
+        throw new AttoError('SEND_STATE', 'The signed x402 transaction does not match its request or payment envelope.');
+      }
+      const payloadBytes = Buffer.from(input.paymentSignature, 'base64');
+      if (payloadBytes.toString('base64') !== input.paymentSignature
+        || payloadBytes.toString('utf8') !== input.paymentJson) {
+        throw new AttoError('SEND_STATE', 'The saved x402 header does not match its payment envelope.');
+      }
+      const nextSecrets = { ...current, transactionJson: input.transactionJson,
+        paymentJson: input.paymentJson, paymentSignature: input.paymentSignature };
+      secrets[id] = nextSecrets;
+      records[position] = { ...record, hash: input.hash, blockJson: input.blockJson, status: 'signed',
+        external: { ...record.external, nativeState: 'unknown', attemptedAt: input.attemptedAt } };
+      this.validateDetails(records[position]!);
+      this.store.set(EXTERNAL_SECRETS_KEY, secrets);
+      this.store.set(RECORDS_KEY, records);
+    });
+  }
+
+  externalSecretsFor(id: string): ExternalPaymentSecrets | undefined {
+    return this.externalSecrets()[id];
+  }
+
+  externalStatus(id: string, update: Partial<Pick<ExternalPaymentRecord, 'marketState' | 'paymentState' | 'receivePending'>>): void {
+    this.update(id, record => {
+      if (!record.external) throw new AttoError('SEND_STATE', 'This request is not a Market top-up.');
+      const external = { ...record.external, ...update };
+      this.validateExternal(external);
+      return { ...record, external };
+    });
+  }
+
+  completeExternal(id: string, result: unknown, publishedAt: number): void {
+    this.update(id, record => {
+      if (!record.external || !record.hash || record.status === 'failed' || !Number.isSafeInteger(publishedAt) || publishedAt < 0) {
+        throw new AttoError('SEND_STATE', 'Only a recorded Market SEND can be confirmed.');
+      }
+      return { ...record, status: 'published', result, publishedAt,
+        external: { ...record.external, nativeState: 'confirmed' } };
+    });
+  }
+
+  /** Call only after the canonical account height proves a competing block. */
+  rejectExternal(id: string, result: unknown): void {
+    this.update(id, record => {
+      if (!record.external || !record.hash || record.status === 'published') throw new AttoError('SEND_STATE', 'Only an unresolved Market SEND can be rejected.');
+      return { ...record, status: 'failed', result,
+        external: { ...record.external, nativeState: 'rejected' } };
     });
   }
 
@@ -383,6 +520,7 @@ export class SpendLedger {
         if (record.status === 'signed' && !record.hash) throw new Error();
         if (record.status === 'published' && (!record.hash || !Number.isSafeInteger(record.publishedAt) || (record.publishedAt ?? -1) < 0)) throw new Error();
         this.validateDetails(record);
+        if (record.external !== undefined) this.validateExternal(record.external);
         ids.add(record.id);
       }
       return records;
@@ -463,6 +601,60 @@ export class SpendLedger {
     if (record.selection !== undefined && record.selection !== 'automatic' && record.selection !== 'explicit') throw new Error();
     if (record.metadata !== undefined) paymentMetadataSchema.parse(record.metadata);
     if (record.plan !== undefined) validatePaymentPlan(record.plan, record);
+    if (record.external !== undefined) this.validateExternal(record.external);
+  }
+
+  private validateExternal(external: ExternalPaymentRecord): void {
+    if (!external || external.kind !== 'market-topup' || external.version !== 1
+      || !/^[A-Za-z0-9_-]{16,128}$/.test(external.paymentIdentifier)
+      || !['atto:live', 'atto:local'].includes(external.network)
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(external.intentId)
+      || typeof external.resourceUrl !== 'string' || external.resourceUrl.length > 2048
+      || !/^[a-f0-9]{64}$/.test(external.requirementHash)
+      || typeof external.intentExpiresAt !== 'string' || !Number.isFinite(Date.parse(external.intentExpiresAt))
+      || !['ISSUED', 'PENDING', 'CREDITED', 'EXPIRED'].includes(external.marketState)
+      || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'UNKNOWN', 'CONFIRMED', 'FAILED'].includes(external.paymentState))
+      || !['challenged', 'unknown', 'confirmed', 'rejected'].includes(external.nativeState)
+      || (external.attemptedAt !== undefined && (!Number.isSafeInteger(external.attemptedAt) || external.attemptedAt < 0))
+      || (external.receivePending !== undefined && external.receivePending !== null && typeof external.receivePending !== 'boolean')) {
+      throw new Error('Invalid external payment record.');
+    }
+    if (external.nativeState === 'challenged' && external.attemptedAt !== undefined) throw new Error('Invalid external attempt state.');
+    if (['unknown', 'confirmed', 'rejected'].includes(external.nativeState) && external.attemptedAt === undefined) throw new Error('Missing external attempt marker.');
+  }
+
+  private externalSecrets(): Record<string, ExternalPaymentSecrets> {
+    const value = this.store.get<Record<string, ExternalPaymentSecrets>>(EXTERNAL_SECRETS_KEY) ?? {};
+    try {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
+      for (const [id, secret] of Object.entries(value)) {
+        if (!id || !secret || secret.version !== 1 || typeof secret.apiUrl !== 'string' || secret.apiUrl.length > 2048
+          || typeof secret.audience !== 'string' || secret.audience.length < 1 || secret.audience.length > 255
+          || typeof secret.accountId !== 'string' || typeof secret.agentId !== 'string'
+          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(secret.agentId)
+          || typeof secret.identityId !== 'string'
+          || typeof secret.walletFingerprint !== 'string' || !Number.isSafeInteger(secret.controllerIndex)
+          || typeof secret.controllerAddress !== 'string' || typeof secret.requirementJson !== 'string'
+          || Buffer.byteLength(secret.requirementJson, 'utf8') > 65_536
+          || (secret.transactionJson !== undefined && Buffer.byteLength(secret.transactionJson, 'utf8') > 65_536)
+          || (secret.paymentJson !== undefined && Buffer.byteLength(secret.paymentJson, 'utf8') > 65_536)
+          || (secret.paymentSignature !== undefined && secret.paymentSignature.length > 90_000)) throw new Error();
+      }
+      return value;
+    } catch {
+      throw new AttoError('INVALID_STATE', 'The private x402 payment journal is invalid. Restore verified wallet state before recovery.');
+    }
+  }
+
+  private externalDefinition(external: ExternalPaymentRecord | undefined): unknown {
+    if (!external) return undefined;
+    const { kind, version, paymentIdentifier, network, intentId, resourceUrl, requirementHash, intentExpiresAt } = external;
+    return { kind, version, paymentIdentifier, network, intentId, resourceUrl, requirementHash, intentExpiresAt };
+  }
+
+  private ownerDefinition(owner: ExternalPaymentSecrets): unknown {
+    const { version, apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress } = owner;
+    return { version, apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress };
   }
 
   private planDefinition(plan: PaymentPlan | undefined): unknown {
@@ -471,4 +663,8 @@ export class SpendLedger {
       id, kind, index, sourceAddress, destination, raw, ...(sourceStepId === undefined ? {} : { sourceStepId }),
     })) };
   }
+}
+
+function createHashHex(value: string): string {
+  return createHash('sha256').update(value, 'utf8').digest('hex');
 }

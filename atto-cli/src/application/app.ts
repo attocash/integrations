@@ -27,6 +27,7 @@ import { operations, parseOperation } from './operations.js';
 import { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import { runDoctor } from '../doctor/doctor.js';
+import { MarketTopUpClient } from '../market/topups.js';
 
 interface ReceiveRecord { hash: string; index: number; blockHash: string; result?: unknown }
 const RESET_KEY = 'wallet.reset';
@@ -45,6 +46,7 @@ export class AttoApplication {
   private preparation?: Promise<void>;
   private readonly preparationAbort = new AbortController();
   private readonly payments: Payments;
+  private readonly topUps: MarketTopUpClient;
   private watchManager?: WatchManager;
   private watchConfiguration = '';
   private watchQueue: Promise<void> = Promise.resolve();
@@ -72,10 +74,13 @@ export class AttoApplication {
       this.work = new WalletWork(this.store, () => this.settings(), options.workExecution);
       this.background = new BackgroundReceiver(this.store);
       this.receivingAllowed = options.receivingAllowed ?? (() => true);
+      this.topUps = new MarketTopUpClient(this.store, {
+        settings: () => this.settings(), addresses: () => this.addresses(), seed: () => this.seed(), mcp: this.mcp,
+      });
       this.payments = new Payments(this.store, this.ledger, {
         settings: () => this.settings(), addresses: () => this.addresses(), seed: () => this.seed(),
         requireWrite: () => this.requireMcpWrite(), mcp: this.mcp,
-      }, this.market, this.work, options.sendRetry, options.onDestination);
+      }, this.market, this.work, options.sendRetry, options.onDestination, this.topUps);
       this.auto = new AutoReceiver(() => ({
         settings: !this.receivingAllowed() || (this.mcp && this.ledger.mcpAccess() !== 'spend') ? { ...this.settings(), autoReceive: false } : this.settings(),
         addresses: this.addresses(),
@@ -527,6 +532,8 @@ export class AttoApplication {
       case 'send': return this.payments.send({ ...args,
         destination: args.destinationIndex !== undefined ? this.address(args.destinationIndex as number).address : args.destination,
       } as SendRequest);
+      case 'market_topup': return this.payments.marketTopUp(args as { amount: string; unit: 'ATTO' | 'RAW'; requestId: string; index?: number });
+      case 'market_topup_status': return this.payments.marketTopUpStatus(args.requestId as string);
       case 'receive': return this.receive(args as unknown as ReceiveRequest);
       case 'receive_all': return this.receiveAll(args);
       case 'representative_change': return this.changeRepresentative(args.index as number, args.representative as string);
@@ -581,6 +588,14 @@ export class AttoApplication {
     })();
     this.calls.add(call);
     try { return await call; } finally { this.calls.delete(call); }
+  }
+
+  /** Terminal-only Market controller connection; session tokens remain in memory. */
+  async connectMarket(input: { apiUrl: string; audience: string; controllerIndex: number }) {
+    this.requireReady();
+    const connection = await this.store.withWalletLock(() => this.topUps.connect(input));
+    return { connected: true, apiUrl: connection.apiUrl, audience: connection.audience,
+      controllerIndex: connection.controllerIndex, accountId: connection.accountId, identityId: connection.identityId };
   }
 
   // The receiver observes current MCP access on every snapshot, and receive()

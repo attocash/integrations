@@ -35,7 +35,7 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   const result = await client.listTools();
   // Then
   assert.deepEqual(result.tools.map(tool => tool.name).sort(), operations.map(operation => operation.name).sort());
-  assert.equal(result.tools.length, 36);
+  assert.equal(result.tools.length, 38);
   assert.equal(result.tools.some(tool => /mnemonic|backup|import|create_wallet/.test(tool.name)), false);
   assert.equal(result.tools.some(tool => /approv|reject/.test(tool.name)), false);
   assert.equal(result.tools.find(tool => tool.name === 'send').annotations.destructiveHint, true);
@@ -48,6 +48,13 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.equal(result.tools.find(tool => tool.name === 'balances_get').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'watch_start').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'price_quote').annotations.readOnlyHint, true);
+  assert.equal(result.tools.find(tool => tool.name === 'market_topup').annotations.readOnlyHint, false);
+  assert.equal(result.tools.find(tool => tool.name === 'market_topup').annotations.destructiveHint, true);
+  assert.equal(result.tools.find(tool => tool.name === 'market_topup').annotations.idempotentHint, true);
+  assert.equal(result.tools.find(tool => tool.name === 'market_topup_status').annotations.readOnlyHint, true);
+  assert.equal(result.tools.find(tool => tool.name === 'market_topup_status').inputSchema.properties.requestId.type, 'string');
+  assert.match(client.getInstructions(), /funds only the configured Market account/);
+  assert.match(client.getInstructions(), /does not create jobs, hire agents, or submit work/);
   assert.equal(result.tools.find(tool => tool.name === 'terms_accept').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'pool_get').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'address_add').annotations.idempotentHint, false);
@@ -86,6 +93,9 @@ test('MCP limit changes only propose, and an existing connection observes termin
   const denied = await client.callTool({ name: 'address_deactivate', arguments: { index: 0 } });
   assert.equal(denied.isError, true);
   assert.equal(denied.structuredContent.error.code, 'MCP_READ_ONLY');
+  const deniedTopUp = await client.callTool({ name: 'market_topup', arguments: { amount: '1', unit: 'RAW', requestId: 'mcp-read-only-topup' } });
+  assert.equal(deniedTopUp.isError, true);
+  assert.equal(deniedTopUp.structuredContent.error.code, 'MCP_READ_ONLY');
   const requested = { perRequest: null, rolling: [] };
   // When
   const result = await client.callTool({ name: 'limits_propose', arguments: { policy: requested, pool: { indexes: [0], consolidate: true } } });

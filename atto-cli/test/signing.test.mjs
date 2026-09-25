@@ -3,8 +3,20 @@ import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
 import test from 'node:test';
-import { AttoAmount, AttoMnemonic, AttoUnit, toAttoIndex } from '@attocash/commons-core';
+import { AttoAmount, AttoMnemonic, AttoTransaction, AttoUnit, AttoWork, toAttoIndex } from '@attocash/commons-core';
 import { derivedSigner, signingWallet } from '../dist/wallet/signing.js';
+
+function validWork(block) {
+  const candidate = AttoWork.Companion.parse('914C000000000000');
+  if (candidate.isValid(block)) return candidate;
+  for (let nonce = 0; nonce < 1_000_000; nonce++) {
+    const bytes = new Uint8Array(8);
+    new DataView(bytes.buffer).setUint32(0, nonce, true);
+    const work = new AttoWork(new Int8Array(bytes.buffer));
+    if (work.isValid(block)) return work;
+  }
+  throw new Error('Could not generate bounded synthetic LOCAL work.');
+}
 
 async function fixture(t, stalledRoute) {
   const seed = await (await AttoMnemonic.generate()).toSeedAsync();
@@ -20,18 +32,32 @@ async function fixture(t, stalledRoute) {
   });
   const http = createServer((request, response) => {
     requests.push(request.url);
-    request.resume();
     if (request.url.startsWith(stalledRoute)) {
+      request.resume();
       stalledSocket = request.socket;
       return;
     }
-    if (request.method === 'POST' && request.url === '/accounts') {
+    void (async () => {
+      let body = '';
+      for await (const chunk of request) body += chunk;
       response.writeHead(200, { 'content-type': 'application/json' });
-      response.end(`[${account}]`);
-    } else {
+      if (request.method === 'POST' && request.url === '/accounts') return response.end(`[${account}]`);
+      if (request.url.startsWith('/instants/')) {
+        const now = new Date().toISOString();
+        return response.end(JSON.stringify({ clientInstant: now, serverInstant: now, differenceMillis: 0 }));
+      }
+      if (request.method === 'POST' && request.url === '/transactions/stream') {
+        const transaction = AttoTransaction.fromJson(body);
+        assert.equal(await transaction.isValid(), true);
+        return response.end(`${transaction.toJson()}\n`);
+      }
+      response.writeHead(404);
+      response.end();
+    })().catch(error => {
       response.writeHead(500);
       response.end();
-    }
+      throw error;
+    });
   });
   http.listen(0, '127.0.0.1');
   await once(http, 'listening');
@@ -73,4 +99,39 @@ test('Commons time lookup cancels a stalled send before signing or publication',
   assert.equal(signatures, 0);
   assert.equal(f.requests.filter(path => path.startsWith('/instants/')).length, 1);
   assert.equal(f.requests.some(path => path.startsWith('/works') || path.startsWith('/transactions')), false);
+});
+
+test('prepare-only SEND returns a Commons-valid transaction without publishing or advancing the cached account', async t => {
+  // Given an opened LOCAL account, a valid worker, and a signing wallet.
+  const f = await fixture(t, '/never');
+  const worker = { workBlock: async block => validWork(block), close() {} };
+  let approvals = 0;
+  const { wallet } = await signingWallet(f.seed, 0, f.settings, () => { approvals++; }, worker);
+  t.after(() => wallet.close());
+  const index = toAttoIndex(0);
+  const before = await wallet.getAccountByIndex(index);
+  // When preparing a SEND without asking the wallet to publish it.
+  const transaction = await wallet.prepareSendByIndex(index, f.recipient.address, AttoAmount.from(AttoUnit.RAW, '1'), null);
+
+  // Then the transaction is valid, the policy hook ran, and the wallet head is unchanged.
+  assert.equal(await transaction.isValid(), true);
+  assert.equal(approvals, 1);
+  assert.equal(f.requests.some(path => path.startsWith('/transactions')), false);
+  assert.equal((await wallet.getAccountByIndex(index)).lastTransactionHash.toString(), before.lastTransactionHash.toString());
+});
+
+test('ordinary SEND still publishes and advances the cached account after confirmation', async t => {
+  // Given the same LOCAL signing fixture.
+  const f = await fixture(t, '/never');
+  const worker = { workBlock: async block => validWork(block), close() {} };
+  const { wallet } = await signingWallet(f.seed, 0, f.settings, () => {}, worker);
+  t.after(() => wallet.close());
+  const index = toAttoIndex(0);
+  // When the existing SEND operation completes.
+  const transaction = await wallet.sendByIndex(index, f.recipient.address, AttoAmount.from(AttoUnit.RAW, '1'), null);
+
+  // Then the ordinary behavior still publishes and advances its cached head.
+  assert.equal(await transaction.isValid(), true);
+  assert.equal(f.requests.includes('/transactions/stream'), true);
+  assert.equal((await wallet.getAccountByIndex(index)).lastTransactionHash.toString(), transaction.hash.toString());
 });

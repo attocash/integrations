@@ -265,6 +265,31 @@ export async function runCli(argv = process.argv): Promise<void> {
       });
     });
   program.command('metrics').description('Read public Atto market metrics').action(() => call('metrics_get'));
+  const market = program.command('market').description('Fund and inspect the configured Market account');
+  market.command('connect').description('Connect this wallet to Market in a local terminal')
+    .requiredOption('--api-url <url>', 'Market /v1/agent/topups URL')
+    .requiredOption('--audience <audience>', 'Exact Market controller-proof audience')
+    .option('--controller-index <index>', 'Saved wallet controller account index (default: 0)', number, 0)
+    .action(async options => {
+      requireTerminal();
+      const result = await app().connectMarket({ apiUrl: options.apiUrl, audience: options.audience, controllerIndex: options.controllerIndex });
+      output(result, 'market_connect');
+    });
+  market.command('topup <amount>').description('Fund the configured Market ATTO account under wallet spending limits')
+    .option('--unit <unit>', 'ATTO (default) or RAW')
+    .option('--request-id <id>', 'Payment ID (generated if omitted); reuse it after uncertainty')
+    .option('--index <index>', 'Source account index (defaults to the approved pool)', number)
+    .action(async (amount, options) => {
+      const requestId = options.requestId ?? randomUUID();
+      const input = compact({ amount, unit: options.unit, requestId, index: options.index });
+      parseOperation('market_topup', input);
+      sendRequestId = requestId;
+      process.stderr.write(program.opts().json ? `${JSON.stringify({ progress: { requestId } })}\n`
+        : `Market top-up request ID: ${requestId}\n`);
+      await call('market_topup', input);
+    });
+  market.command('status <request-id>').description('Read and reconcile a Market top-up by its original request ID')
+    .action(requestId => call('market_topup_status', { requestId }));
   program.command('quote').description('Preview a USD-to-Atto conversion using the indicative market price; does not send funds')
     .requiredOption('--usd <amount>', 'Exact USD amount')
     .action(options => call('price_quote', { amount: options.usd }));
@@ -399,6 +424,10 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto labels set': 'atto labels set 1 \"Savings\"', 'atto labels remove': 'atto labels remove 1',
     'atto labels show': 'atto labels show 1', 'atto labels list': 'atto labels list --all --search treasury',
     'atto send': 'atto send <address> 1\n  atto send --to-index 1 --amount 1\n  atto send --to-label "Savings" --amount 1\n  atto send <address> --usd 1',
+    'atto market': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0\n  atto market topup 1 --request-id marketplace-funding-001\n  atto market status marketplace-funding-001',
+    'atto market connect': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0',
+    'atto market topup': 'atto market topup 1 --request-id marketplace-funding-001',
+    'atto market status': 'atto market status marketplace-funding-001',
     'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1',
     'atto terms': 'atto terms show', 'atto terms show': 'atto terms show',
     'atto terms accept': 'atto terms accept --version <version-shown-by-terms-show> --accepted',

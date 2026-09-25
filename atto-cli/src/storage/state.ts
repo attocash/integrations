@@ -54,8 +54,24 @@ export class StateStore {
       this.state = open('state.sqlite');
       this.state.exec('PRAGMA busy_timeout = 5000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
       const version = this.state.prepare('PRAGMA user_version').get()?.user_version;
-      if (version !== 0 && version !== 1) throw new AttoError('STATE_VERSION', 'This wallet state requires a newer Atto CLI.');
-      this.state.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version = 1;');
+      if (version !== 0 && version !== 1 && version !== 2) throw new AttoError('STATE_VERSION', 'This wallet state requires a newer Atto CLI.');
+      if (version === 1) {
+        // x402 adds durable request semantics that older binaries must not
+        // reinterpret. Migrate only when no process already owns this profile.
+        this.lifecycle.exec('ROLLBACK;');
+        try { this.lifecycle.exec('BEGIN EXCLUSIVE;'); }
+        catch (error) {
+          const code = (error as { errcode?: number }).errcode;
+          if (code === 5 || code === 6) throw new AttoError('WALLET_BUSY', 'Close other sessions using this wallet before upgrading its payment journal.');
+          throw error;
+        }
+        try { this.state.exec('PRAGMA user_version = 2;'); }
+        finally { this.lifecycle.exec('COMMIT; BEGIN; SELECT COUNT(*) FROM lease;'); }
+      } else if (version === 0) {
+        this.state.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version = 2;');
+      } else {
+        this.state.exec('CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);');
+      }
       this.coordination = open('coordination.sqlite');
       this.coordination.exec('PRAGMA busy_timeout = 0;');
     } catch (error) {

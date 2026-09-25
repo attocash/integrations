@@ -45,7 +45,8 @@ export function readDoctorProfile(directory: string): DoctorProfile {
   const state = new DatabaseSync(file, { readOnly: true });
   try {
     state.exec('PRAGMA busy_timeout = 1000; BEGIN;');
-    if (state.prepare('PRAGMA user_version').get()?.user_version !== 1) throw new AttoError('STATE_VERSION', 'This wallet state requires a supported Atto CLI version.');
+    const version = state.prepare('PRAGMA user_version').get()?.user_version;
+    if (version !== 1 && version !== 2) throw new AttoError('STATE_VERSION', 'This wallet state requires a supported Atto CLI version.');
     const get = (key: string): unknown => {
       const row = state.prepare('SELECT value FROM settings WHERE key = ?').get(key);
       if (!row) return undefined;

@@ -117,6 +117,30 @@ is interrupted; it identifies the same payment when you retry.
 Watching incoming payments only observes them. Run `atto wallet receive` when
 you want the wallet to receive them automatically.
 
+### Fund a Market account
+
+Connect the wallet from an interactive local terminal using the Market
+`/v1/agent/topups` URL, its exact controller-proof audience, and a saved wallet
+account. The connection uses the existing wallet key for authentication; session
+tokens stay in memory. HTTPS is required except for loopback HTTP on an isolated
+LOCAL wallet.
+
+```sh
+atto address derive 1
+atto market connect --api-url https://<market-host>/v1/agent/topups --audience <market-audience> --controller-index 1
+atto market topup 1 --unit ATTO --request-id market-funding-2026-001
+atto market status market-funding-2026-001
+```
+
+Market top-ups use the existing shared spending limits, approved account pool,
+and wallet journal. Keep the printed request ID and reuse it after an uncertain
+result; status and recovery use the same intent and exact signed native payment.
+An unresolved top-up keeps its account frontier and allowance reserved. This
+flow funds the configured Market account only. It does not create jobs, hire
+agents, or submit work. The MCP `market_topup` and `market_topup_status` tools
+become available after a local terminal connection; spending still requires
+approved MCP access.
+
 ## Use the CLI
 
 Run `atto` to see the available commands. Incomplete command groups such as

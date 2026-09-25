@@ -32,7 +32,7 @@ test('public session owns its lifecycle and exposes no recovery or storage acces
   assert.deepEqual(Object.keys(session).sort(), ['call', 'close', 'start']);
   for (const name of ['createWallet', 'backupMnemonic', 'store', 'ledger', 'secrets']) assert.equal(name in session, false);
   assert.equal(status.initialized, false);
-  assert.equal(operations.length, 36);
+  assert.equal(operations.length, 38);
   await assert.rejects(session.call('wallet_status'), { code: 'SESSION_CLOSED' });
   assert.deepEqual(errorResult(new Error('private dependency details')), {
     code: 'OPERATION_FAILED', message: 'The operation failed. Check wallet status and endpoint availability.',
@@ -87,7 +87,7 @@ test('pre-split profile reopens with the same identity, terms, limits and pendin
   assert.equal(limits.rolling[0].usedRaw, '10');
   const reopened = new DatabaseSync(join(directory, 'state.sqlite'));
   try {
-    assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, fixture.userVersion);
+    assert.equal(reopened.prepare('PRAGMA user_version').get().user_version, 2);
     const rows = reopened.prepare('SELECT key, value FROM settings ORDER BY key').all();
     assert.deepEqual(rows.map(row => ({ ...row })), fixture.rows);
   } finally { reopened.close(); }

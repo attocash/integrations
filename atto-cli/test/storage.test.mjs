@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
+import { DatabaseSync } from 'node:sqlite';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
@@ -43,6 +44,47 @@ function child(source, args = []) {
   });
   return { process, exit };
 }
+
+test('version 1 profiles migrate without changing saved rows and wait for existing sessions before the version fence', t => {
+  // Given a wallet database with existing journal and allowance rows plus an older process lease.
+  const directory = mkdtempSync(join(tmpdir(), 'atto-state-migration-'));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const statePath = join(directory, 'state.sqlite');
+  const state = new DatabaseSync(statePath);
+  state.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version = 1;');
+  state.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('spending.records', JSON.stringify([
+    { id: 'existing-unknown-send', index: 0, destination: 'existing-destination', raw: '7', createdAt: 100,
+      status: 'unknown', hash: 'existing-hash', blockJson: '{"type":"SEND"}' },
+  ]));
+  state.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('spending.policy', JSON.stringify({
+    perRequest: { amount: '10', unit: 'RAW' }, rolling: [{ days: 1, amount: '20', unit: 'RAW' }],
+  }));
+  state.close();
+  const lifecyclePath = join(directory, 'lifecycle.sqlite');
+  const oldSession = new DatabaseSync(lifecyclePath);
+  oldSession.exec('PRAGMA busy_timeout = 0; PRAGMA journal_mode = DELETE; CREATE TABLE lease (id INTEGER PRIMARY KEY); BEGIN; SELECT COUNT(*) FROM lease;');
+
+  // When a new version attempts to upgrade while the old process still owns its profile lease.
+  assert.throws(() => new StateStore(directory), { code: 'WALLET_BUSY' });
+  const blocked = new DatabaseSync(statePath);
+  assert.equal(blocked.prepare('PRAGMA user_version').get().user_version, 1);
+  blocked.close();
+  oldSession.exec('ROLLBACK;');
+  oldSession.close();
+
+  // Then migration applies only the compatibility fence and preserves every prior row verbatim.
+  const store = new StateStore(directory);
+  t.after(() => store.close());
+  assert.deepEqual(store.get('spending.records'), [{ id: 'existing-unknown-send', index: 0,
+    destination: 'existing-destination', raw: '7', createdAt: 100, status: 'unknown',
+    hash: 'existing-hash', blockJson: '{"type":"SEND"}' }]);
+  assert.deepEqual(store.get('spending.policy'), {
+    perRequest: { amount: '10', unit: 'RAW' }, rolling: [{ days: 1, amount: '20', unit: 'RAW' }],
+  });
+  const migrated = new DatabaseSync(statePath);
+  assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 2);
+  migrated.close();
+});
 
 test('state is durable across connections and rolls back incomplete transactions', async (t) => {
   // Given
