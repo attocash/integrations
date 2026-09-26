@@ -16,6 +16,7 @@ import { configureHelp, commandErrorMessage } from './help.js';
 import type { AccountPool, SpendingPolicy } from '../wallet/types.js';
 import type { ReceiveProgress } from '../wallet/auto-receive.js';
 import { runDoctor } from '../doctor/doctor.js';
+import { readMarketProofApprovalRequest, writeMarketProofApprovalResponse } from '../market/approval-files.js';
 
 function number(value: string): number {
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InvalidArgumentError('Use an unsigned integer.');
@@ -34,6 +35,41 @@ function json(value: string): Record<string, unknown> {
 
 function compact(input: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+}
+
+function formatMarketApprovalPreview(preview: ReturnType<AttoApplication['inspectMarketProofApproval']>['preview']): string {
+  const action = preview.action;
+  const command = action.command && typeof action.command === 'object' ? action.command as Record<string, unknown> : {};
+  const fields = [
+    `Market: ${preview.marketOrigin}`,
+    `Transport: ${preview.transport}`,
+    `Proof origin: ${preview.proofOrigin ?? '(none; Agent API audience)'}`,
+    `Audience: ${preview.audience}`,
+    `Purpose: ${preview.purpose}`,
+    `Controller: ATTO index ${preview.controller.index}, ${preview.controller.address}`,
+    ...(preview.accountId ? [`Account: ${preview.accountId}`, `Identity: ${preview.identityId}`] : []),
+    `Challenge: ${preview.challengeId}`,
+    `Expires: ${preview.expiresAt}`,
+  ];
+  if (action.kind === 'withdrawal') {
+    fields.push(`Action: withdraw ${String(command.atomicAmount)} ${String(command.asset)} on ${String(action.network)}`,
+      `Destination: ${String(action.destinationAddress)} (${String(command.destinationId)})`);
+  } else if (action.kind === 'payout-address') {
+    fields.push(`Action: ${String(command.action)} ${String(command.asset)} payout address on ${String(action.network)}`,
+      `Destination: ${String(action.canonicalTargetAddress)}`);
+  } else if (action.kind === 'credential') {
+    const credential = command.credential && typeof command.credential === 'object' ? command.credential as Record<string, unknown> : {};
+    fields.push(`Action: ${String(command.operation)} scoped credential`,
+      ...(typeof credential.name === 'string' ? [`Name: ${credential.name.trim()}`] : []),
+      ...(Array.isArray(credential.scopes) ? [`Scopes: ${credential.scopes.join(', ')}`] : []),
+      ...(typeof command.targetApiKeyId === 'string' ? [`Credential ID: ${command.targetApiKeyId}`] : []));
+    for (const [name, label] of [['publishAttoLimit','ATTO publish ceiling'],['publishXnoLimit','XNO publish ceiling'],['applyAttoLimit','ATTO application ceiling']] as const) {
+      if (typeof credential[name] === 'string') fields.push(`${label}: ${String(credential[name])} atomic units`);
+    }
+  } else if (action.kind === 'login') {
+    fields.push(`Action: create a controller session for ${String(action.address)}`);
+  }
+  return `Review this server-authored Market wallet proof before signing:\n${fields.map(field => `  ${field}`).join('\n')}`;
 }
 
 function addressOptions(command: Command): Command {
@@ -290,6 +326,20 @@ export async function runCli(argv = process.argv): Promise<void> {
     });
   market.command('status <request-id>').description('Read and reconcile a Market top-up by its original request ID')
     .action(requestId => call('market_topup_status', { requestId }));
+  market.command('approve <request-file>').description('Review and sign one exact typed Market controller-proof request')
+    .action(async requestFile => {
+      requireTerminal();
+      const request = readMarketProofApprovalRequest(requestFile);
+      const { preview } = app().inspectMarketProofApproval(request);
+      process.stderr.write(`${formatMarketApprovalPreview(preview)}\n`);
+      if (await terminalPrompt('Type approve to sign this exact Market challenge: ') !== 'approve') {
+        throw new AttoError('CANCELLED', 'No Market wallet approval was signed.');
+      }
+      const response = await app().approveMarketProof(request);
+      const responseFile = writeMarketProofApprovalResponse(requestFile, response);
+      output({ approved: true, responseFile, handoffId: preview.handoffId,
+        challengeId: preview.challengeId, expiresAt: preview.expiresAt }, 'market_approve');
+    });
   program.command('quote').description('Preview a USD-to-Atto conversion using the indicative market price; does not send funds')
     .requiredOption('--usd <amount>', 'Exact USD amount')
     .action(options => call('price_quote', { amount: options.usd }));

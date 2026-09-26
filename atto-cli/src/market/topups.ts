@@ -4,6 +4,10 @@ import type { StateStore } from '../storage/state.js';
 import type { AttoSeed } from '@attocash/commons-core';
 import { AttoError } from '../domain/errors.js';
 import { parseAttoExactRequirement, type AttoExactRequirement } from '../spending/atto-x402.js';
+import {
+  createMarketProofApprovalResponse, inspectMarketProofApproval,
+  type MarketProofApprovalResponse,
+} from './proof-approval.js';
 
 const CONNECTION_KEY = 'market.topups.connection';
 const RESPONSE_BYTES = 65_536;
@@ -156,6 +160,30 @@ export class MarketTopUpClient {
       if (error instanceof AttoError) throw error;
       throw new AttoError('MARKET_NOT_CONNECTED', 'Connect this wallet to Market from a local terminal before using top-ups.');
     }
+  }
+
+  inspectProofApproval(input: unknown) {
+    if (this.wallet.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Approve Market wallet proofs from the local terminal.');
+    const candidate = input !== null && typeof input === 'object' && !Array.isArray(input)
+      ? (input as Record<string, unknown>) : {};
+    let connection: MarketConnection | undefined;
+    try { connection = this.connection(); }
+    catch (error) {
+      if (!(candidate.purpose === 'login' && error instanceof AttoError && error.code === 'MARKET_NOT_CONNECTED')) throw error;
+    }
+    return inspectMarketProofApproval(input, connection, index => this.wallet.addresses().find(address => address.index === index)?.address);
+  }
+
+  async signProofApproval(input: unknown): Promise<MarketProofApprovalResponse> {
+    if (this.wallet.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Approve Market wallet proofs from the local terminal.');
+    const { request } = this.inspectProofApproval(input);
+    const seed = await this.wallet.seed();
+    try {
+      const signer = await derivedSigner(seed, request.controller.index);
+      if (signer.address.value !== request.controller.address) throw new AttoError('WALLET_MISMATCH', 'The Market approval controller does not match this wallet key.');
+      const signature = (await signer.signMessage(new Int8Array(Buffer.from(request.challenge.message, 'utf8')))).toString();
+      return createMarketProofApprovalResponse(request, signature);
+    } finally { seed.value.fill(0); }
   }
 
   async challenge(connection: MarketConnection, paymentIdentifier: string, amountRaw: string): Promise<{ status: MarketTopUpStatus; challenge?: TopUpChallenge }> {

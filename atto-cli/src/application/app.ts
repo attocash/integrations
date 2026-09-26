@@ -598,6 +598,16 @@ export class AttoApplication {
       controllerIndex: connection.controllerIndex, accountId: connection.accountId, identityId: connection.identityId };
   }
 
+  inspectMarketProofApproval(input: unknown) {
+    this.requireReady();
+    return this.topUps.inspectProofApproval(input);
+  }
+
+  async approveMarketProof(input: unknown) {
+    this.requireReady();
+    return this.store.withWalletLock(() => this.topUps.signProofApproval(input));
+  }
+
   // The receiver observes current MCP access on every snapshot, and receive()
   // rechecks it under the wallet lock before signing any queued payment.
   async start() {
