@@ -23,6 +23,7 @@ export interface MarketConnection {
   agentId: string;
   identityId: string;
   walletFingerprint: string;
+  browserOrigins?: string[];
 }
 
 export interface MarketTopUpStatus {
@@ -114,12 +115,36 @@ export function validateMarketApiUrl(value: string, network: WalletSettings['net
   return `${url.origin}/v1/agent/topups`;
 }
 
+function validateBrowserOrigins(value: unknown, network: WalletSettings['network']): string[] {
+  if (!Array.isArray(value) || value.length < 1 || value.length > 8
+    || value.some(origin => typeof origin !== 'string')) {
+    throw new AttoError('MARKET_CONFIGURATION', 'Configure between 1 and 8 exact browser origins.');
+  }
+  const origins = value.map(origin => {
+    const text = origin as string;
+    let parsed: URL;
+    try { parsed = new URL(text); }
+    catch { throw new AttoError('MARKET_CONFIGURATION', 'Browser origins must be canonical HTTPS origins or loopback HTTP for an isolated LOCAL wallet.'); }
+    const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(parsed.hostname.toLowerCase());
+    if (parsed.origin !== text || parsed.hostname.includes('*') || parsed.username || parsed.password
+      || parsed.pathname !== '/' || parsed.search || parsed.hash
+      || (parsed.protocol !== 'https:' && !(parsed.protocol === 'http:' && network === 'LOCAL' && loopback))) {
+      throw new AttoError('MARKET_CONFIGURATION', 'Browser origins must be canonical HTTPS origins or loopback HTTP for an isolated LOCAL wallet.');
+    }
+    return text;
+  });
+  if (new Set(origins).size !== origins.length) {
+    throw new AttoError('MARKET_CONFIGURATION', 'Browser origins must not contain duplicates.');
+  }
+  return origins;
+}
+
 export class MarketTopUpClient {
   private session?: { key: string; value: MarketSession };
 
   constructor(private readonly store: StateStore, private readonly wallet: MarketWalletAccess) {}
 
-  async connect(input: { apiUrl: string; audience: string; controllerIndex: number }): Promise<MarketConnection> {
+  async connect(input: { apiUrl: string; audience: string; controllerIndex: number; browserOrigins?: string[] }): Promise<MarketConnection> {
     if (this.wallet.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Configure the Market connection from a local terminal.');
     const apiUrl = validateMarketApiUrl(input.apiUrl, this.wallet.settings().network);
     if (!Number.isSafeInteger(input.controllerIndex) || input.controllerIndex < 0 || input.controllerIndex > 0x7fff_ffff
@@ -127,12 +152,15 @@ export class MarketTopUpClient {
       || input.audience.trim() !== input.audience || /[\r\n\0]/.test(input.audience)) {
       throw new AttoError('MARKET_CONFIGURATION', 'Choose a saved controller index and a single-line API audience of at most 255 characters.');
     }
+    const browserOrigins = input.browserOrigins === undefined
+      ? undefined : validateBrowserOrigins(input.browserOrigins, this.wallet.settings().network);
     const controller = this.wallet.addresses().find(address => address.index === input.controllerIndex);
     const identity = this.store.get<WalletIdentity>('identity');
     if (!controller || !identity) throw new AttoError('ADDRESS_NOT_DERIVED', 'Derive the controller address in this wallet before connecting Market.');
     const candidate = {
       version: 1 as const, apiUrl, audience: input.audience, controllerIndex: controller.index,
       controllerAddress: controller.address, walletFingerprint: identity.fingerprint,
+      ...(browserOrigins ? { browserOrigins } : {}),
     };
     const session = await this.login(candidate);
     const connection: MarketConnection = { ...candidate, accountId: session.accountId, agentId: session.agentId, identityId: session.identityId };
@@ -149,6 +177,10 @@ export class MarketTopUpClient {
       const canonicalUrl = validateMarketApiUrl(value.apiUrl, this.wallet.settings().network);
       if (canonicalUrl !== value.apiUrl || typeof value.audience !== 'string' || !value.audience
         || value.audience.length > 255 || value.audience.trim() !== value.audience || /[\r\n\0]/.test(value.audience)) throw new Error();
+      if (value.browserOrigins !== undefined) {
+        const canonicalOrigins = validateBrowserOrigins(value.browserOrigins, this.wallet.settings().network);
+        if (JSON.stringify(canonicalOrigins) !== JSON.stringify(value.browserOrigins)) throw new Error();
+      }
       const identity = this.store.get<WalletIdentity>('identity');
       const controller = this.wallet.addresses().find(address => address.index === value.controllerIndex);
       if (!identity || identity.fingerprint !== value.walletFingerprint || !controller

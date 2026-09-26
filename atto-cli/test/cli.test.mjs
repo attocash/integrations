@@ -222,6 +222,12 @@ test('Market connection command requires a terminal and accepts only the named c
   // When the same fixed connection command runs in a terminal, it forwards only the bound configuration.
   const result = JSON.parse((await run(['market', 'connect', '--api-url', 'https://market.example/v1/agent/topups', '--audience', 'agent', '--controller-index', '2'], true)).stdout).result;
   assert.deepEqual(result, { connected: true, apiUrl: 'https://market.example/v1/agent/topups', audience: 'agent', controllerIndex: 2 });
+
+  // Repeated browser origins remain an explicit ordered allowlist in the local connection request.
+  const provisioned = JSON.parse((await run(['market', 'connect', '--api-url', 'https://market.example/v1/agent/topups',
+    '--audience', 'agent', '--controller-index', '2', '--browser-origin', 'https://site.example',
+    '--browser-origin', 'https://admin.example'], true)).stdout).result;
+  assert.deepEqual(provisioned.browserOrigins, ['https://site.example', 'https://admin.example']);
 });
 
 test('real CLI refuses nonterminal recovery commands and prints only public JSON', async t => {

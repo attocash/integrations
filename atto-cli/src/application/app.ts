@@ -591,11 +591,12 @@ export class AttoApplication {
   }
 
   /** Terminal-only Market controller connection; session tokens remain in memory. */
-  async connectMarket(input: { apiUrl: string; audience: string; controllerIndex: number }) {
+  async connectMarket(input: { apiUrl: string; audience: string; controllerIndex: number; browserOrigins?: string[] }) {
     this.requireReady();
     const connection = await this.store.withWalletLock(() => this.topUps.connect(input));
     return { connected: true, apiUrl: connection.apiUrl, audience: connection.audience,
-      controllerIndex: connection.controllerIndex, accountId: connection.accountId, identityId: connection.identityId };
+      controllerIndex: connection.controllerIndex, accountId: connection.accountId, identityId: connection.identityId,
+      ...(connection.browserOrigins ? { browserOrigins: connection.browserOrigins } : {}) };
   }
 
   inspectMarketProofApproval(input: unknown) {

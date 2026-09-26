@@ -17,6 +17,7 @@ import type { AccountPool, SpendingPolicy } from '../wallet/types.js';
 import type { ReceiveProgress } from '../wallet/auto-receive.js';
 import { runDoctor } from '../doctor/doctor.js';
 import { readMarketProofApprovalRequest, writeMarketProofApprovalResponse } from '../market/approval-files.js';
+import { normalizeDisputeText, normalizeEvidenceUrls } from '../market/proof-approval.js';
 
 function number(value: string): number {
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InvalidArgumentError('Use an unsigned integer.');
@@ -37,7 +38,7 @@ function compact(input: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
 }
 
-function formatMarketApprovalPreview(preview: ReturnType<AttoApplication['inspectMarketProofApproval']>['preview']): string {
+export function formatMarketApprovalPreview(preview: ReturnType<AttoApplication['inspectMarketProofApproval']>['preview']): string {
   const action = preview.action;
   const command = action.command && typeof action.command === 'object' ? action.command as Record<string, unknown> : {};
   const fields = [
@@ -66,10 +67,46 @@ function formatMarketApprovalPreview(preview: ReturnType<AttoApplication['inspec
     for (const [name, label] of [['publishAttoLimit','ATTO publish ceiling'],['publishXnoLimit','XNO publish ceiling'],['applyAttoLimit','ATTO application ceiling']] as const) {
       if (typeof credential[name] === 'string') fields.push(`${label}: ${String(credential[name])} atomic units`);
     }
+  } else if (action.kind === 'identity-link') {
+    fields.push(`Action: link controller (${String(action.operation)})`,
+      `Link ID: ${String(action.linkId)}`, `Authorizing identity: ${String(action.authorizingIdentityId)}`,
+      `Authorizing address: ${String(action.authorizingAddress)}`, `New controller address: ${String(action.newIdentityAddress)}`);
+  } else if (action.kind === 'identity-unlink') {
+    fields.push('Action: unlink controller', `Controller to remove: ${String(action.targetIdentityId)}`,
+      `Authorizing identity: ${String(action.authorizingIdentityId)}`);
+  } else if (action.kind === 'adminModeration') {
+    fields.push(`Action: ${String(action.action)} ${String(action.targetKind)}`, `Target: ${String(action.targetId)}`,
+      `Target version: ${String(action.expectedTargetVersion)}`, `Moderation version: ${String(action.expectedModerationVersion)}`,
+      `Reason: ${String(action.reason).replace(/^ +| +$/g, '')}`);
+  } else if (action.kind === 'adminJobClose') {
+    fields.push(`Action: ${String(action.action)} job`, `Job: ${String(action.jobId)}`,
+      `Expected version: ${String(action.expectedVersion)}`, `Reason: ${String(action.reason).replace(/^ +| +$/g, '')}`);
+  } else if (action.kind === 'adminDisputeOpen') {
+    fields.push('Action: administrator opens dispute', `Job: ${String(action.jobId)}`,
+      `Engagement version: ${String(action.expectedEngagementVersion)}`, `Represented agent: ${String(action.representedAgentId)}`,
+      `Reason: ${String(action.reason)}`, `Statement: ${terminalSafeValue(normalizeDisputeText(String(action.statement)))}`,
+      `Evidence URLs: ${(normalizeEvidenceUrls(action.evidenceUrls) ?? []).map(terminalSafeValue).join(', ') || '(none)'}`,
+      `Audit reason: ${terminalSafeValue(normalizeDisputeText(String(action.auditReason)))}`);
+  } else if (action.kind === 'adminDisputeResolution') {
+    fields.push('Action: administrator resolves dispute', `Dispute: ${String(action.disputeId)}`,
+      `Dispute version: ${String(action.expectedDisputeVersion)}`, `Outcome: ${String(action.outcome)}`,
+      `Rationale: ${terminalSafeValue(normalizeDisputeText(String(action.rationale)))}`);
   } else if (action.kind === 'login') {
     fields.push(`Action: create a controller session for ${String(action.address)}`);
   }
   return `Review this server-authored Market wallet proof before signing:\n${fields.map(field => `  ${field}`).join('\n')}`;
+}
+
+function terminalSafeValue(value: string): string {
+  const escaped = [...value].map(character => {
+    const point = character.codePointAt(0)!;
+    if (point <= 0x1f || (point >= 0x7f && point <= 0x9f)
+      || point === 0x2028 || point === 0x2029 || /\p{Cf}/u.test(character)) {
+      return `\\u{${point.toString(16).toUpperCase()}}`;
+    }
+    return character;
+  }).join('');
+  return JSON.stringify(escaped);
 }
 
 function addressOptions(command: Command): Command {
@@ -305,10 +342,13 @@ export async function runCli(argv = process.argv): Promise<void> {
   market.command('connect').description('Connect this wallet to Market in a local terminal')
     .requiredOption('--api-url <url>', 'Market /v1/agent/topups URL')
     .requiredOption('--audience <audience>', 'Exact Market controller-proof audience')
+    .option('--browser-origin <origin>', 'Allow this exact browser origin for typed proof approvals (repeatable)',
+      (origin: string, previous: string[]) => [...previous, origin], [])
     .option('--controller-index <index>', 'Saved wallet controller account index (default: 0)', number, 0)
     .action(async options => {
       requireTerminal();
-      const result = await app().connectMarket({ apiUrl: options.apiUrl, audience: options.audience, controllerIndex: options.controllerIndex });
+      const result = await app().connectMarket({ apiUrl: options.apiUrl, audience: options.audience,
+        controllerIndex: options.controllerIndex, ...(options.browserOrigin?.length ? { browserOrigins: options.browserOrigin } : {}) });
       output(result, 'market_connect');
     });
   market.command('topup <amount>').description('Fund the configured Market ATTO account under wallet spending limits')
@@ -474,8 +514,8 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto labels set': 'atto labels set 1 \"Savings\"', 'atto labels remove': 'atto labels remove 1',
     'atto labels show': 'atto labels show 1', 'atto labels list': 'atto labels list --all --search treasury',
     'atto send': 'atto send <address> 1\n  atto send --to-index 1 --amount 1\n  atto send --to-label "Savings" --amount 1\n  atto send <address> --usd 1',
-    'atto market': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0\n  atto market topup 1 --request-id marketplace-funding-001\n  atto market status marketplace-funding-001',
-    'atto market connect': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0',
+    'atto market': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto market topup 1 --request-id marketplace-funding-001\n  atto market status marketplace-funding-001',
+    'atto market connect': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example',
     'atto market topup': 'atto market topup 1 --request-id marketplace-funding-001',
     'atto market status': 'atto market status marketplace-funding-001',
     'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1',

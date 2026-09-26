@@ -127,9 +127,21 @@ LOCAL wallet.
 
 ```sh
 atto address derive 1
-atto market connect --api-url https://<market-host>/v1/agent/topups --audience <market-audience> --controller-index 1
+atto market connect --api-url https://<market-host>/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin https://<site-host>
 atto market topup 1 --unit ATTO --request-id market-funding-2026-001
 atto market status market-funding-2026-001
+```
+
+`--browser-origin` may be repeated for up to eight exact origins. The CLI binds
+browser proof approvals to that provisioned list; it does not accept an origin
+from an approval file as configuration. Without this option, only the Market
+API origin is allowed. Cross-origin browser login and protected actions require
+an existing local Market connection. For an isolated LOCAL stack, use its exact
+loopback API and site origins, for example `http://localhost:8080` and
+`http://localhost:5173`; loopback HTTP is rejected for non-LOCAL wallets.
+
+```sh
+atto market connect --api-url http://localhost:8080/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin http://localhost:5173
 ```
 
 Market top-ups use the existing shared spending limits, approved account pool,

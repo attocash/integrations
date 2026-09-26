@@ -4,8 +4,10 @@ import type { MarketConnection } from './topups.js';
 
 const PURPOSES = new Set([
   'login', 'API-key creation', 'API-key rotation', 'API-key revocation',
+  'link authorizer', 'link new identity', 'unlink',
   'payout address enrollment', 'payout address selection', 'payout address disablement',
-  'withdrawal creation',
+  'withdrawal creation', 'administrator public moderation', 'administrator job cancellation or expiry',
+  'administrator dispute opening', 'administrator dispute resolution',
 ]);
 const SCOPES = new Set([
   'jobs:read', 'applications:read', 'applications:apply', 'applications:withdraw',
@@ -64,7 +66,9 @@ export function inspectMarketProofApproval(input: unknown, connection: MarketCon
   knownAddress: (index: number) => string | undefined): { request: MarketProofApprovalRequest; preview: MarketProofApprovalPreview } {
   const request = parseRequest(input);
   const origin = parseOrigin(request.marketOrigin);
+  if (origin !== request.marketOrigin) throw protocolFailure();
   const login = request.purpose === 'login';
+  const newIdentityApproval = request.action.kind === 'identity-link' && request.action.operation === 'NEW_IDENTITY';
   if (!PURPOSES.has(request.purpose) || request.controller.network !== 'ATTO'
     || !Number.isSafeInteger(request.controller.index) || request.controller.index < 0 || request.controller.index > 0x7fff_ffff
     || !/^atto:\/\/[a-z2-7]{61}$/.test(request.controller.address)
@@ -74,7 +78,13 @@ export function inspectMarketProofApproval(input: unknown, connection: MarketCon
 
   if (request.transport === 'BROWSER') {
     if (!request.proofOrigin || request.proofOrigin !== request.audience || parseOrigin(request.proofOrigin) !== request.proofOrigin) throw protocolFailure();
-    if (request.proofOrigin !== origin) throw new AttoError('MARKET_APPROVAL_MISMATCH', 'This browser approval is for a different Market origin.');
+    if (connection) {
+      if (!browserOriginAllowed(connection, request.proofOrigin)) {
+        throw new AttoError('MARKET_APPROVAL_MISMATCH', 'This browser origin is not provisioned on the connected Market account.');
+      }
+    } else if (request.proofOrigin !== origin) {
+      throw new AttoError('MARKET_APPROVAL_MISMATCH', 'Cross-origin browser approvals require a locally provisioned Market connection.');
+    }
   } else if (request.proofOrigin !== null || !/^[^\r\n\0]{1,255}$/.test(request.audience) || request.audience.trim() !== request.audience) {
     throw protocolFailure();
   }
@@ -82,8 +92,13 @@ export function inspectMarketProofApproval(input: unknown, connection: MarketCon
   if (!login) {
     if (!connection || !uuid(request.accountId) || !uuid(request.identityId)
       || request.accountId !== connection.accountId || request.identityId !== connection.identityId
-      || origin !== new URL(connection.apiUrl).origin || request.controller.address !== connection.controllerAddress
-      || request.controller.index !== connection.controllerIndex) throw new AttoError('MARKET_APPROVAL_MISMATCH', 'This approval is for a different connected Market account or controller.');
+      || origin !== new URL(connection.apiUrl).origin
+      || (!newIdentityApproval && (request.controller.address !== connection.controllerAddress
+        || request.controller.index !== connection.controllerIndex))) throw new AttoError('MARKET_APPROVAL_MISMATCH', 'This approval is for a different connected Market account or controller.');
+    if (newIdentityApproval && (request.action.authorizingIdentityId !== connection.identityId
+      || request.action.authorizingAddress !== connection.controllerAddress)) {
+      throw new AttoError('MARKET_APPROVAL_MISMATCH', 'A new-controller proof must be paired with the connected account authorizer.');
+    }
     if (request.transport === 'AGENT_API' && request.audience !== connection.audience) throw new AttoError('MARKET_APPROVAL_MISMATCH', 'This approval uses a different Agent API audience.');
   } else if (request.accountId !== undefined || request.identityId !== undefined) {
     throw protocolFailure();
@@ -184,15 +199,26 @@ function parseProofMessage(request: MarketProofApprovalRequest): { audience: str
 function expectedPurpose(action: Record<string, unknown>): string {
   switch (action.kind) {
     case 'login': return 'login';
+    case 'identity-link': return action.operation === 'AUTHORIZE' ? 'link authorizer'
+      : action.operation === 'NEW_IDENTITY' ? 'link new identity' : '';
+    case 'identity-unlink': return 'unlink';
     case 'credential': return ({ CREATE: 'API-key creation', ROTATE: 'API-key rotation', REVOKE: 'API-key revocation' } as Record<string, string>)[String(action.operation)] ?? '';
     case 'payout-address': return ({ ENROLL: 'payout address enrollment', SELECT: 'payout address selection', DISABLE: 'payout address disablement' } as Record<string, string>)[String(record(action.command).action)] ?? '';
     case 'withdrawal': return 'withdrawal creation';
+    case 'adminModeration': return 'administrator public moderation';
+    case 'adminJobClose': return 'administrator job cancellation or expiry';
+    case 'adminDisputeOpen': return 'administrator dispute opening';
+    case 'adminDisputeResolution': return 'administrator dispute resolution';
     default: return '';
   }
 }
 
 function validActionKeys(action: Record<string, unknown>): boolean {
   if (action.kind === 'login') return onlyKeys(action, ['kind','network','address']);
+  if (action.kind === 'identity-link') return onlyKeys(action,
+    ['kind','operation','linkId','authorizingIdentityId','authorizingAddress','newIdentityAddress']);
+  if (action.kind === 'identity-unlink') return onlyKeys(action,
+    ['kind','targetIdentityId','authorizingIdentityId']);
   if (action.kind === 'credential') {
     if (!onlyKeys(action, ['kind','operation','command'])) return false;
     const command = record(action.command);
@@ -208,6 +234,14 @@ function validActionKeys(action: Record<string, unknown>): boolean {
     return onlyKeys(action, ['kind','command','network','destinationAddress'])
       && onlyKeys(record(action.command), ['asset','atomicAmount','destinationId','expectedSelectionVersion','idempotencyKey']);
   }
+  if (action.kind === 'adminModeration') return onlyKeys(action,
+    ['kind','targetKind','action','targetId','expectedTargetVersion','expectedModerationVersion','reason','idempotencyKey']);
+  if (action.kind === 'adminJobClose') return onlyKeys(action,
+    ['kind','jobId','action','expectedVersion','reason','idempotencyKey']);
+  if (action.kind === 'adminDisputeOpen') return onlyKeys(action,
+    ['kind','jobId','expectedEngagementVersion','representedAgentId','reason','statement','evidenceUrls','auditReason','idempotencyKey']);
+  if (action.kind === 'adminDisputeResolution') return onlyKeys(action,
+    ['kind','disputeId','expectedDisputeVersion','outcome','rationale','idempotencyKey']);
   return false;
 }
 
@@ -218,6 +252,29 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
     return undefined;
   }
   if (!request.accountId || !request.identityId) throw protocolFailure();
+  if (action.kind === 'identity-link') {
+    const operation = action.operation;
+    const linkId = uuid(action.linkId);
+    const authorizingIdentityId = uuid(action.authorizingIdentityId);
+    const authorizingAddress = action.authorizingAddress;
+    const newIdentityAddress = action.newIdentityAddress;
+    if (!['AUTHORIZE','NEW_IDENTITY'].includes(String(operation)) || !linkId
+      || !authorizingIdentityId || authorizingIdentityId !== request.identityId
+      || typeof authorizingAddress !== 'string' || !/^atto:\/\/[a-z2-7]{61}$/.test(authorizingAddress)
+      || typeof newIdentityAddress !== 'string' || !/^atto:\/\/[a-z2-7]{61}$/.test(newIdentityAddress)
+      || authorizingAddress === newIdentityAddress
+      || (operation === 'AUTHORIZE' && request.controller.address !== authorizingAddress)
+      || (operation === 'NEW_IDENTITY' && request.controller.address !== newIdentityAddress)) throw protocolFailure();
+    return sha256([request.accountId, linkId, `atto:live:${authorizingAddress}`,
+      `atto:live:${newIdentityAddress}`].join('\n'));
+  }
+  if (action.kind === 'identity-unlink') {
+    const targetIdentityId = uuid(action.targetIdentityId);
+    const authorizingIdentityId = uuid(action.authorizingIdentityId);
+    if (!targetIdentityId || !authorizingIdentityId || authorizingIdentityId !== request.identityId
+      || targetIdentityId === authorizingIdentityId) throw protocolFailure();
+    return sha256(`unlink\n${request.accountId}\n${targetIdentityId}\n${authorizingIdentityId}`);
+  }
   if (action.kind === 'credential') {
     const command = record(action.command);
     const operation = String(command.operation);
@@ -277,7 +334,203 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
     return sha256(['withdrawal-create-v1', request.accountId, request.identityId, asset, amount,
       network, destinationId, address, String(version), key].join('\n'));
   }
+  if (action.kind === 'adminModeration') {
+    const targetKind = action.targetKind;
+    const operation = action.action;
+    const targetId = uuid(action.targetId);
+    const targetVersion = safeVersion(action.expectedTargetVersion);
+    const moderationVersion = safeVersion(action.expectedModerationVersion);
+    const reason = boundedAsciiSpaceReason(action.reason, 1_000);
+    const key = uuid(action.idempotencyKey);
+    if ((targetKind !== 'JOB' && targetKind !== 'PROFILE')
+      || !['HIDE','RESTORE','SUSPEND'].includes(String(operation))
+      || (targetKind === 'JOB' && operation === 'SUSPEND')
+      || !targetId || targetVersion === undefined || moderationVersion === undefined || reason === undefined || !key) {
+      throw protocolFailure();
+    }
+    return lengthPrefixedSha256(['market-admin-public-moderation-v1', request.accountId,
+      request.identityId, targetKind, targetId, String(operation), String(targetVersion),
+      String(moderationVersion), reason, key]);
+  }
+  if (action.kind === 'adminJobClose') {
+    const jobId = uuid(action.jobId);
+    const operation = action.action;
+    const version = safeVersion(action.expectedVersion);
+    const reason = boundedAsciiSpaceReason(action.reason, 1_000);
+    const key = uuid(action.idempotencyKey);
+    if (!jobId || (operation !== 'CANCEL' && operation !== 'EXPIRE')
+      || version === undefined || reason === undefined || !key) throw protocolFailure();
+    return lengthPrefixedSha256(['market-admin-job-close-v1', request.accountId, request.identityId,
+      jobId, operation, String(version), reason, key]);
+  }
+  if (action.kind === 'adminDisputeOpen') {
+    const jobId = uuid(action.jobId);
+    const engagementVersion = safeVersion(action.expectedEngagementVersion);
+    const representedAgentId = uuid(action.representedAgentId);
+    const reason = action.reason;
+    const key = uuid(action.idempotencyKey);
+    const statement = boundedDisputeText(action.statement);
+    const auditReason = boundedDisputeText(action.auditReason);
+    const evidence = canonicalEvidenceUrls(action.evidenceUrls);
+    if (!jobId || engagementVersion === undefined || !representedAgentId
+      || (reason !== 'NON_DELIVERY' && reason !== 'DELIVERABLE_MISMATCH' && reason !== 'OTHER')
+      || !key || statement === undefined || auditReason === undefined || evidence === undefined) throw protocolFailure();
+    return lengthPrefixedSha256(['dispute-admin-open-v1', request.accountId, request.identityId, jobId,
+      String(engagementVersion), representedAgentId, reason, key, statement, auditReason, ...evidence]);
+  }
+  if (action.kind === 'adminDisputeResolution') {
+    const disputeId = uuid(action.disputeId);
+    const version = safeVersion(action.expectedDisputeVersion);
+    const outcome = action.outcome;
+    const rationale = boundedDisputeText(action.rationale);
+    const key = uuid(action.idempotencyKey);
+    if (!disputeId || version === undefined || (outcome !== 'WORKER_AWARD' && outcome !== 'BUYER_REFUND')
+      || rationale === undefined || !key) throw protocolFailure();
+    return lengthPrefixedSha256(['dispute-admin-resolve-v1', request.accountId, request.identityId,
+      disputeId, String(version), outcome, rationale, key]);
+  }
   throw protocolFailure();
+}
+
+function browserOriginAllowed(connection: MarketConnection, proofOrigin: string): boolean {
+  const apiOrigin = new URL(connection.apiUrl).origin;
+  const allowed = connection.browserOrigins ?? [apiOrigin];
+  return allowed.includes(proofOrigin);
+}
+
+function safeVersion(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function boundedAsciiSpaceReason(value: unknown, maximumCodePoints: number): string | undefined {
+  if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
+  const normalized = value.replace(/^ +| +$/g, '');
+  return [...normalized].length >= 1 && [...normalized].length <= maximumCodePoints ? normalized : undefined;
+}
+
+function boundedDisputeText(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.includes('\0')) return undefined;
+  const normalized = normalizeDisputeText(value);
+  return [...normalized].length >= 1 && [...normalized].length <= 2_000 ? normalized : undefined;
+}
+
+export function normalizeDisputeText(value: string): string {
+  const characters = [...value];
+  let first = 0;
+  let last = characters.length;
+  while (first < last && isKotlinWhitespace(characters[first]!)) first++;
+  while (last > first && isKotlinWhitespace(characters[last - 1]!)) last--;
+  return characters.slice(first, last).join('');
+}
+
+function isKotlinWhitespace(character: string): boolean {
+  const point = character.codePointAt(0)!;
+  return (point >= 0x0009 && point <= 0x000d) || (point >= 0x001c && point <= 0x0020)
+    || point === 0x00a0 || point === 0x1680 || (point >= 0x2000 && point <= 0x200a)
+    || point === 0x2028 || point === 0x2029 || point === 0x202f || point === 0x205f || point === 0x3000;
+}
+
+function canonicalEvidenceUrls(value: unknown): string[] | undefined {
+  if (!Array.isArray(value) || value.length > 5 || value.some(item => typeof item !== 'string')) return undefined;
+  const urls: string[] = [];
+  for (const item of value as string[]) {
+    if (item.length < 1 || item.length > 2_048) return undefined;
+    const canonical = backendEvidenceUrl(item);
+    if (!canonical) return undefined;
+    urls.push(canonical);
+  }
+  return new Set(urls).size === urls.length ? urls : undefined;
+}
+
+export function normalizeEvidenceUrls(value: unknown): string[] | undefined {
+  return canonicalEvidenceUrls(value);
+}
+
+function backendEvidenceUrl(raw: string): string | undefined {
+  // java.net.URI.toASCIIString emits non-ASCII URI text in NFC form before
+  // escaping its UTF-8 bytes. Keep the same spelling behavior for the
+  // backend's length-prefixed approval binding.
+  const normalized = raw.normalize('NFC');
+  const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)(.*)$/su.exec(normalized);
+  if (!match || match[1]!.toLowerCase() !== 'https') return undefined;
+  const authority = match[2]!;
+  if (!authority || authority.includes('@') || !validUriCharacters(normalized)) return undefined;
+  const serverAuthority = /^([^:\[\]@/?#]+)(?::([0-9]*))?$/u.exec(authority);
+  if (!serverAuthority) return undefined;
+  const rawHost = serverAuthority[1]!;
+  const portText = serverAuthority[2];
+  if (portText !== undefined && portText !== '') {
+    const port = Number(portText);
+    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return undefined;
+  }
+  const host = rawHost.toLowerCase();
+  const labels = host.split('.');
+  if (labels.length < 2 || labels.some(label => !label || label.length > 63
+    || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
+    || labels.at(-1)!.length < 2 || /^\d+$/.test(labels.at(-1)!)
+    || ['localhost','local','internal','test','invalid'].includes(labels.at(-1)!)
+    || /^[0-9.]+$/.test(host) || host.includes(':')) return undefined;
+  return toAsciiUri(normalized);
+}
+
+function validUriCharacters(value: string): boolean {
+  const match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)(.*)$/su.exec(value);
+  if (!match) return false;
+  const suffix = match[2]!;
+  const fragmentAt = suffix.indexOf('#');
+  if (fragmentAt >= 0 && suffix.indexOf('#', fragmentAt + 1) >= 0) return false;
+  const queryAt = suffix.indexOf('?');
+  const pathEnd = Math.min(queryAt < 0 ? suffix.length : queryAt,
+    fragmentAt < 0 ? suffix.length : fragmentAt);
+  const path = suffix.slice(0, pathEnd);
+  if (path !== '' && !path.startsWith('/')) return false;
+  const query = queryAt >= 0 && (fragmentAt < 0 || queryAt < fragmentAt)
+    ? suffix.slice(queryAt + 1, fragmentAt < 0 ? suffix.length : fragmentAt) : undefined;
+  const fragment = fragmentAt >= 0 ? suffix.slice(fragmentAt + 1) : undefined;
+  const authority = match[1]!;
+  return validUriPart(authority, 'authority')
+    && validUriPart(path, 'path')
+    && (query === undefined || validUriPart(query, 'query'))
+    && (fragment === undefined || validUriPart(fragment, 'fragment'));
+}
+
+function validUriPart(value: string, part: 'authority' | 'path' | 'query' | 'fragment'): boolean {
+  for (let index = 0; index < value.length;) {
+    const point = value.codePointAt(index)!;
+    const character = String.fromCodePoint(point);
+    if (point <= 0x20 || (point >= 0x7f && point <= 0x9f) || (point >= 0xd800 && point <= 0xdfff)) return false;
+    if (point <= 0x7f) {
+      const allowed = part === 'authority'
+        ? /^[A-Za-z0-9.:-]$/
+        : part === 'path'
+          ? /^[A-Za-z0-9\-._~!$&'()*+,;=:@/%]$/
+          : /^[A-Za-z0-9\-._~!$&'()*+,;=:@/?%\[\]]$/;
+      if (!allowed.test(character)) return false;
+    }
+    if (character === '%' && !/^[0-9A-Fa-f]{2}$/.test(value.slice(index + 1, index + 3))) return false;
+    index += character.length;
+  }
+  return true;
+}
+
+function toAsciiUri(value: string): string {
+  return [...value].map(character => {
+    const point = character.codePointAt(0)!;
+    if (point <= 0x7f) return character;
+    return [...Buffer.from(character, 'utf8')].map(byte => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join('');
+  }).join('');
+}
+
+function lengthPrefixedSha256(fields: string[]): string {
+  const digest = createHash('sha256');
+  for (const field of fields) {
+    const bytes = Buffer.from(field, 'utf8');
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    digest.update(length);
+    digest.update(bytes);
+  }
+  return digest.digest('hex');
 }
 
 function parseOrigin(value: string): string {
