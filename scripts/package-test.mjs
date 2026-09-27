@@ -67,7 +67,9 @@ async function verifyCli(directory, prefix, noMcp) {
   const source = `
     import assert from 'node:assert/strict';
     const core = await import('@attocash/cli/core');
-    assert.equal(core.operations.length, 36);
+    assert.equal(core.operations.length, 38);
+    assert.equal(core.operations.find(operation => operation.name === 'market_topup')?.readOnly, false);
+    assert.equal(core.operations.find(operation => operation.name === 'market_topup_status')?.readOnly, true);
     assert.equal(typeof core.errorResult, 'function');
     const app = core.createApplication({ directory: process.argv[1] });
     assert.deepEqual(Object.keys(app).sort(), ['call', 'close', 'start']);
