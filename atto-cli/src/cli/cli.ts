@@ -518,6 +518,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto market connect': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example',
     'atto market topup': 'atto market topup 1 --request-id marketplace-funding-001',
     'atto market status': 'atto market status marketplace-funding-001',
+    'atto market approve': 'atto market approve ./market-approval-request.json',
     'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1',
     'atto terms': 'atto terms show', 'atto terms show': 'atto terms show',
     'atto terms accept': 'atto terms accept --version <version-shown-by-terms-show> --accepted',

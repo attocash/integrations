@@ -105,7 +105,7 @@ try {
   assert.equal(Object.keys(mcp.dependencies).some(name => name.startsWith('@attocash/commons-')), false);
   assert.equal(Object.values(mcp.dependencies).some(value => /^(?:file:|workspace:|link:)/.test(value)), false);
   await assert.rejects(stat(join(mcpDirectory, 'dist', 'application')), { code: 'ENOENT' });
-  const tests = await execute(process.execPath, ['--test',
+  const tests = await execute(process.execPath, ['--test', '--test-concurrency=1',
     join(root, 'atto-cli/test/cli.test.mjs'), join(root, 'atto-cli/test/core.test.mjs'), join(root, 'atto-cli/test/send-failure.test.mjs'),
     join(root, 'atto-cli/test/cli-help.test.mjs'), join(root, 'atto-cli/test/cli-output.test.mjs'), join(root, 'atto-cli/test/wallet-lifecycle.test.mjs'), join(root, 'atto-cli/test/wallet-reset.test.mjs'),
     join(root, 'atto-cli/test/usability.test.mjs'), join(root, 'atto-cli/test/labels.test.mjs'), join(root, 'atto-cli/test/approvals.test.mjs'),
@@ -118,7 +118,7 @@ try {
     join(root, 'atto-mcp/test/stream-failure.test.mjs'), join(root, 'atto-mcp/test/configuration.test.mjs'),
     join(root, 'atto-mcp/test/representative.test.mjs'),
   ], {
-    cwd: temporary, timeout: 240_000, maxBuffer: 8 * 1024 * 1024,
+    cwd: temporary, timeout: 600_000, maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, ATTO_TEST_CLI_PACKAGE_DIR: cliDirectory, ATTO_TEST_MCP_PACKAGE_DIR: mcpDirectory },
   });
   process.stdout.write(tests.stdout);
