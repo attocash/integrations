@@ -14,7 +14,7 @@ import type { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import type { StateStore } from '../storage/state.js';
 import { derivedSigner, signingWallet } from '../wallet/signing.js';
-import type { SendRequest, WalletAddress, WalletSettings } from '../wallet/types.js';
+import type { SendRequest, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
 import type { WalletWork } from '../wallet/work.js';
 import { SpendLedger, type ConsolidationStep, type ExternalPaymentRecord, type ExternalPaymentSecrets, type SendRecord } from './ledger.js';
 import { planPayment, type PoolAccount } from './pool.js';
@@ -37,6 +37,9 @@ export interface MarketTopUpRequest {
   requestId: string;
   index?: number;
 }
+
+const MARKET_INTENT_SWEEP_TIMEOUT_MS = 1_000;
+const MARKET_INTENT_SWEEP_CONCURRENCY = 16;
 
 /** Owns payment selection, reservations, publication and recovery as one workflow. */
 export class Payments {
@@ -75,7 +78,7 @@ export class Payments {
     if (requireReservation) this.ledger.assertReservationAllowed(record.id);
     if (record.network && record.network !== this.wallet.settings().network) throw new AttoError('NETWORK_MISMATCH', 'The payment belongs to a different network.');
     const pool = this.ledger.pool();
-    if ((this.wallet.mcp || record.external?.kind === 'market-topup' || record.selection === 'automatic' || record.plan?.steps.length)
+    if ((this.wallet.mcp || record.external?.kind === 'market-topup' || record.external?.kind === 'market-intent' || record.selection === 'automatic' || record.plan?.steps.length)
       && this.indexes(record).some(index => !pool.indexes.includes(index))) {
       throw new AttoError('POOL_APPROVAL_REQUIRED', 'The payment uses an account outside the approved pool. Review the pool in a local terminal.');
     }
@@ -101,6 +104,7 @@ export class Payments {
     const settings = this.wallet.settings();
     const network = this.topUpNetwork(settings);
     const paymentIdentifier = marketPaymentIdentifier(connection, request.requestId);
+    await this.reconcileMarketIntents();
     const existing = this.ledger.get(request.requestId);
     if (existing) {
       this.checkMarketTopUpRequest(existing, request, raw, network, paymentIdentifier);
@@ -123,7 +127,7 @@ export class Payments {
     if (!this.topUps) throw new AttoError('MARKET_NOT_CONNECTED', 'Connect this wallet to Market from a local terminal before reading top-up status.');
     const record = this.ledger.get(requestId);
     if (!record) throw new AttoError('JOURNAL_NOT_FOUND', 'This payment request is not in the local journal.');
-    if (!record.external) throw new AttoError('REQUEST_CONFLICT', 'This request ID does not belong to a Market top-up.');
+    if (record.external?.kind !== 'market-topup') throw new AttoError('REQUEST_CONFLICT', 'This request ID does not belong to a Market top-up.');
     const connection = this.topUps.connection();
     this.checkMarketOwner(record, connection);
     return this.store.withAccountLocks([record.index], async () => {
@@ -374,9 +378,9 @@ export class Payments {
     }));
   }
 
-  private async reconcileMarketSend(record: SendRecord): Promise<void> {
+  private async reconcileMarketSend(record: SendRecord, timeoutMs = 10_000): Promise<void> {
     if (!record.external || !record.hash || ['published', 'failed'].includes(record.status)) return;
-    const outcome = await reconcileSend(this.reader(), record);
+    const outcome = await reconcileSend(this.reader(), record, timeoutMs);
     if (outcome.status === 'unresolved') return;
     await this.store.withWalletLock(async () => {
       const current = this.ledger.get(record.id)!;
@@ -389,6 +393,27 @@ export class Payments {
       }
     });
     if (outcome.status === 'published') this.work.prepareConfirmed(outcome.transaction.block);
+  }
+
+  private async reconcileMarketIntents(candidateIndexes = this.ledger.pool().indexes): Promise<void> {
+    const candidates = new Set(candidateIndexes);
+    const records = this.ledger.pending().filter(record => record.external?.kind === 'market-intent'
+      && record.hash !== undefined && candidates.has(record.index));
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < records.length) {
+        const record = records[cursor++]!;
+        const release = this.store.tryAccountLocks([record.index]);
+        if (!release) continue;
+        try {
+          const current = this.ledger.get(record.id);
+          if (current?.external?.kind === 'market-intent') {
+            await this.reconcileMarketSend(current, MARKET_INTENT_SWEEP_TIMEOUT_MS);
+          }
+        } finally { release(); }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(MARKET_INTENT_SWEEP_CONCURRENCY, records.length) }, worker));
   }
 
   private hasUnconfirmedMarketPayment(record: SendRecord): boolean {
@@ -424,7 +449,7 @@ export class Payments {
 
   private checkMarketTopUpRequest(record: SendRecord, request: MarketTopUpRequest, raw: string,
     network: 'atto:live' | 'atto:local', paymentIdentifier: string): void {
-    if (!record.external || record.raw !== raw || record.external.paymentIdentifier !== paymentIdentifier
+    if (!record.external || record.external.kind !== 'market-topup' || record.raw !== raw || record.external.paymentIdentifier !== paymentIdentifier
       || record.external.network !== network || record.network !== this.wallet.settings().network
       || (request.index !== undefined && record.index !== request.index)) {
       throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to a different Market top-up. Keep its original amount, network, and source account.');
@@ -678,7 +703,8 @@ export class Payments {
     return found;
   }
 
-  async reconcile(): Promise<void> {
+  async reconcile(candidateIndexes?: number[]): Promise<void> {
+    await this.reconcileMarketIntents(candidateIndexes);
     for (const record of this.ledger.pending()) {
       if (record.external) continue;
       const release = this.store.tryAccountLocks(this.indexes(record));

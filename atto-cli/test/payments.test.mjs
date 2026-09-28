@@ -4,7 +4,8 @@ import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
 import { join } from 'node:path';
-import { unlink, writeFile } from 'node:fs/promises';
+import { mkdtemp, rm, unlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
 import { promisify } from 'node:util';
 import { fixture, gate, until } from './support/payments.mjs';
 import { cli, credentialEnvironment } from './support/detached.mjs';
@@ -12,6 +13,7 @@ const applicationUrl = process.env.ATTO_TEST_CLI_PACKAGE_DIR
   ? pathToFileURL(join(process.env.ATTO_TEST_CLI_PACKAGE_DIR, 'dist/application/app.js'))
   : new URL('../dist/application/app.js', import.meta.url);
 const { MarketData } = await import(new URL('../pricing/market.js', applicationUrl).href);
+
 
 for (const mode of ['transient', 'persistent', 'unexpected']) {
   test(`payment fixture cleanup handles ${mode} file-removal errors`, { timeout: 30_000 }, async () => {

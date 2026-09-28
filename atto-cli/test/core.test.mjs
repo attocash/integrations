@@ -32,7 +32,7 @@ test('public session owns its lifecycle and exposes no recovery or storage acces
   assert.deepEqual(Object.keys(session).sort(), ['call', 'close', 'start']);
   for (const name of ['createWallet', 'backupMnemonic', 'store', 'ledger', 'secrets']) assert.equal(name in session, false);
   assert.equal(status.initialized, false);
-  assert.equal(operations.length, 38);
+  assert.equal(operations.length, 40);
   await assert.rejects(session.call('wallet_status'), { code: 'SESSION_CLOSED' });
   assert.deepEqual(errorResult(new Error('private dependency details')), {
     code: 'OPERATION_FAILED', message: 'The operation failed. Check wallet status and endpoint availability.',

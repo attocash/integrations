@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, stat } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 
 const execute = promisify(execFile);
@@ -57,17 +57,54 @@ async function verifyCli(directory, prefix, noMcp) {
   assert.equal(published.scripts, undefined);
   assert.equal(published.devDependencies, undefined);
   const require = createRequire(join(directory, 'package.json'));
+  const expectedCommonsVersion = process.env.ATTO_COMMONS_LOCAL_VERSION ?? cliManifest.dependencies['@attocash/commons-core'];
+  assert.equal(published.dependencies['@attocash/commons-core'], expectedCommonsVersion,
+    'The packed CLI dependency must match its bundled Commons package version.');
+  async function commonsManifests(nodeModules, copies = []) {
+    let entries;
+    try { entries = await readdir(nodeModules, { withFileTypes: true }); }
+    catch (error) { if (error.code === 'ENOENT') return copies; throw error; }
+    for (const entry of entries) {
+      const packageDirectory = entry.name.startsWith('@')
+        ? join(nodeModules, entry.name)
+        : join(nodeModules, entry.name);
+      if (entry.name === '@attocash') {
+        let scoped = [];
+        try { scoped = await readdir(packageDirectory, { withFileTypes: true }); }
+        catch {}
+        for (const child of scoped) if (child.isDirectory()) {
+          if (child.name.startsWith('commons-')) copies.push(await manifest(join(packageDirectory, child.name)));
+          await commonsManifests(join(packageDirectory, child.name, 'node_modules'), copies);
+        }
+      } else if (entry.isDirectory()) {
+        await commonsManifests(join(packageDirectory, 'node_modules'), copies);
+      }
+    }
+    return copies;
+  }
+  const commons = await commonsManifests(join(directory, 'node_modules'));
+  const commonsNames = commons.map(value => value.name).sort();
+  assert.deepEqual(commonsNames, ['@attocash/commons-core', '@attocash/commons-node',
+    '@attocash/commons-node-remote', '@attocash/commons-transport',
+    '@attocash/commons-worker', '@attocash/commons-worker-remote'].sort(),
+  'The installed CLI must retain one complete production Commons closure, with no nested 8.0.0 copy.');
+  assert.ok(commons.every(value => value.version === expectedCommonsVersion), 'Every bundled Commons package must use the same exact version.');
+  const coreModule = await import(pathToFileURL(require.resolve('@attocash/commons-core')).href);
+  const zeroKey = coreModule.AttoPublicKey.Companion.parse('00'.repeat(32));
+  const invalidSignature = coreModule.AttoSignature.Companion.parse('ff'.repeat(64));
+  assert.equal(typeof invalidSignature.isValidMessage, 'function', 'The installed package must expose the JS verifier.');
+  assert.equal(await invalidSignature.isValidMessage(zeroKey, new Int8Array(0)), false);
   if (noMcp) {
     assert.throws(() => require.resolve('@modelcontextprotocol/server'), { code: 'MODULE_NOT_FOUND' });
     await assert.rejects(stat(join(directory, 'dist', 'mcp')), { code: 'ENOENT' });
   }
-  const commons = createRequire(require.resolve('@attocash/commons-node-remote'));
-  const ws = JSON.parse(await readFile(commons.resolve('ws/package.json'), 'utf8'));
+  const commonsRequire = createRequire(require.resolve('@attocash/commons-node-remote'));
+  const ws = JSON.parse(await readFile(commonsRequire.resolve('ws/package.json'), 'utf8'));
   assert.equal(ws.version, rootManifest.overrides.ws, 'Installed Commons must retain patched bundled ws.');
   const source = `
     import assert from 'node:assert/strict';
     const core = await import('@attocash/cli/core');
-    assert.equal(core.operations.length, 38);
+    assert.equal(core.operations.length, 40);
     assert.equal(core.operations.find(operation => operation.name === 'market_topup')?.readOnly, false);
     assert.equal(core.operations.find(operation => operation.name === 'market_topup_status')?.readOnly, true);
     assert.equal(typeof core.errorResult, 'function');
@@ -110,6 +147,7 @@ try {
     join(root, 'atto-cli/test/cli-help.test.mjs'), join(root, 'atto-cli/test/cli-output.test.mjs'), join(root, 'atto-cli/test/wallet-lifecycle.test.mjs'), join(root, 'atto-cli/test/wallet-reset.test.mjs'),
     join(root, 'atto-cli/test/usability.test.mjs'), join(root, 'atto-cli/test/labels.test.mjs'), join(root, 'atto-cli/test/approvals.test.mjs'),
     join(root, 'atto-cli/test/doctor.test.mjs'), join(root, 'atto-mcp/test/doctor.test.mjs'),
+    join(root, 'atto-cli/test/message-signing.test.mjs'),
     join(root, 'atto-cli/test/auto-receive.test.mjs'), join(root, 'atto-cli/test/receive-lookup.test.mjs'), join(root, 'atto-cli/test/receive-progress.test.mjs'),
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'),
     join(root, 'atto-cli/test/network.test.mjs'), join(root, 'atto-cli/test/stream-idle.test.mjs'),

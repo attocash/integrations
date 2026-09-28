@@ -4,6 +4,7 @@ import { AttoError } from '../domain/errors.js';
 import { paymentMetadataSchema } from '../spending/journal.js';
 
 const index = z.number().int().min(0).max(2_147_483_647);
+const signingIndexes = z.array(index).max(100).refine(indexes => new Set(indexes).size === indexes.length, 'Message-signing indexes must be unique.');
 const address = z.string().min(1).max(128).describe('Atto address.');
 const addresses = z.array(address).min(1).max(100);
 const hash = z.string().regex(/^[a-fA-F0-9]{64}$/).describe('64-character hexadecimal transaction hash.');
@@ -18,6 +19,16 @@ const endpoint = z.url().max(2048).refine(value => {
   return ['http:', 'https:'].includes(url.protocol) && !url.username && !url.password && !url.search && !url.hash;
 }, 'Use an HTTP(S) endpoint without credentials, query parameters, or fragments.');
 const amount = z.strictObject({ amount: decimal, unit });
+const signedMessageInput = z.object({
+  message: z.string().refine(value => Buffer.byteLength(value, 'utf8') <= 65_536, 'Message UTF-8 bytes must not exceed 65536.').optional(),
+  messageHex: z.string().max(131_072).regex(/^(?:[a-fA-F0-9]{2})*$/, 'Message hex must contain complete bytes.').optional(),
+}).strict().refine(value => (value.message !== undefined) !== (value.messageHex !== undefined), 'Supply exactly one of message or messageHex.');
+const signingMessage = signedMessageInput.extend({ index });
+const verificationMessage = signedMessageInput.extend({
+  address: address.optional(),
+  publicKey: z.string().regex(/^[a-fA-F0-9]{64}$/).optional(),
+  signature: z.string().regex(/^[a-fA-F0-9]{128}$/),
+}).refine(value => (value.address !== undefined) !== (value.publicKey !== undefined), 'Supply exactly one of address or publicKey.');
 const policy = z.strictObject({
   perRequest: amount.nullable(),
   rolling: z.array(amount.extend({ days: z.number().int().positive().max(36_500) })).max(100),
@@ -51,6 +62,8 @@ export interface Operation {
 export const operations: readonly Operation[] = [
   { name: 'doctor', description: 'Diagnose this process environment, profile, keyring credential access, node APIs and streaming, worker proof of work, and wallet readiness. Full checks can take up to 60 seconds and may trigger an OS keyring prompt. Returns structured checks and actionable remediation, never recovery material. Does not repair settings, grant access, sign, publish, receive, or modify wallet state. Available in read-only sessions. Rerun after an authorized repair; client environment changes require restarting the MCP connection.', schema: z.strictObject({ globalDirectory: z.boolean().optional() }), readOnly: true },
   { name: 'wallet_status', description: 'Read public wallet configuration, readiness, network, and auto-receive status. Never returns recovery material.', schema: z.strictObject({}), readOnly: true },
+  { name: 'message_sign', description: 'Sign exact message bytes using the ATTO Signed Message v1 framing. Requires an existing address index granted by a locally approved messageSigningIndexes setting and normal MCP spend access. Handles any challenge like a credential: do not sign untrusted requests. Input is exact UTF-8 text or even-length hex (including empty bytes), capped at 64 KiB.', schema: signingMessage, readOnly: false },
+  { name: 'message_verify', description: 'Verify an ATTO Signed Message v1 signature over exact UTF-8 text or hex bytes using an ATTO address or public key. Public data only; never reads wallet credentials. Input is capped at 64 KiB.', schema: verificationMessage, readOnly: true },
   { name: 'wallet_configure', description: 'Update the supplied wallet settings, preserving omitted settings. Representative is the default for opening accounts; use representative_change for an existing account. Changes apply to this shared wallet.', schema: z.strictObject({ network: z.enum(['LIVE', 'BETA', 'DEV', 'LOCAL']).optional(), nodeUrl: endpoint.optional(), workerUrl: endpoint.optional(), representative: address.optional(), autoReceive: z.boolean().optional(), minReceiveRaw: integer.optional() }).refine(value => Object.values(value).some(value => value !== undefined), 'Supply at least one setting.'), readOnly: false },
   { name: 'address_add', description: 'Add and activate the next wallet address after the highest saved index. Includes it in default balances and automatic receiving. Does not open an account on the network. Each call adds a different address.', schema: z.strictObject({}), readOnly: false },
   { name: 'address_derive', description: 'Derive an address at a mnemonic key index and save its public metadata. Does not open an account on the network.', schema: z.strictObject({ index: index.default(0) }), readOnly: false },
@@ -81,16 +94,20 @@ export const operations: readonly Operation[] = [
   { name: 'receive', description: 'Receive one pending payment by hash, opening the account if needed.', schema: z.strictObject({ index: index.default(0), hash, representative: address.optional() }), readOnly: false },
   { name: 'receive_all', description: 'Receive a bounded set of pending payments for a key index, opening the account if needed.', schema: z.strictObject({ index: index.default(0), limit: limit.default(100), timeoutMs: timeoutMs.default(2000), representative: address.optional() }), readOnly: false },
   { name: 'representative_change', description: 'Publish a representative change for an existing account. Selecting its current representative returns REPRESENTATIVE_UNCHANGED without publishing.', schema: z.strictObject({ index: index.default(0), representative: address }), readOnly: false },
-  { name: 'limits_get', description: 'Read spending policy, approved send pool, MCP access, proposal status, historical usage, reservations, and remaining allowances.', schema: z.strictObject({}), readOnly: true },
-  { name: 'limits_propose', description: 'Propose spending limits, MCP access, and optional send-pool settings for local terminal approval. Omitted pool preserves the approved pool. Does not change active settings or grant access. A new proposal replaces the previous proposal and expires after 24 hours. Read limits_get for active settings and proposal status. Returns proposal plus approval.changes (changed access, policy, and pool with from/to values), approval.shell, and profile-specific approval.commands.atto/npx for the user to run in a local terminal. Preserve the returned directory and proposal ID; never run approval commands on the user\'s behalf. Spending access, amount limits, and source-pool approval are separate. Amounts are ATTO or RAW; null perRequest with empty rolling means unlimited spending, not missing authorization.', schema: z.strictObject({ policy, access: z.enum(['read-only', 'spend']).default('spend'), pool: pool.optional() }), readOnly: false },
+  { name: 'limits_get', description: 'Read spending policy, approved send pool, MCP access, message-signing indexes, proposal status, historical usage, reservations, and remaining allowances.', schema: z.strictObject({}), readOnly: true },
+  { name: 'limits_propose', description: 'Propose spending limits, MCP access, send-pool settings, and message-signing indexes for local terminal approval. Omitted pool and messageSigningIndexes preserve their current settings. Does not change active settings or grant access. A new proposal replaces the previous proposal and expires after 24 hours. Read limits_get for active settings and proposal status. Returns proposal plus approval.changes (changed access, policy, pool, and messageSigningIndexes with from/to values), approval.shell, and profile-specific approval.commands.atto/npx for the user to run in a local terminal. Preserve the returned directory and proposal ID; never run approval commands on the user\'s behalf. Spending access, amount limits, source-pool approval, and message-signing grants are separate. Amounts are ATTO or RAW; null perRequest with empty rolling means unlimited spending, not missing authorization.', schema: z.strictObject({ policy, access: z.enum(['read-only', 'spend']).default('spend'), pool: pool.optional(), messageSigningIndexes: signingIndexes.optional() }), readOnly: false },
   { name: 'watch_start', description: 'Start an observational, reconnecting watch for this session, defaulting to active wallet addresses. Choose one saved index, explicit addresses (including foreign accounts), a transaction/entry hash, or networkWide=true. Network-wide receivables are unsupported. Read buffered events and connection status with watch_read. Does not enable automatic receiving.', schema: z.strictObject({ event: z.enum(['account', 'transaction', 'entry', 'receivable']), ...streamFields, index: index.optional(), networkWide: z.boolean().optional() }).refine(singleSelection, 'Choose one watch selection.').refine(value => !(value.networkWide && value.event === 'receivable'), 'Receivable watches require addresses.'), readOnly: false },
   { name: 'watch_list', description: 'List watches owned by this process.', schema: z.strictObject({}), readOnly: true },
   { name: 'watch_read', description: 'Read buffered events after an optional numeric cursor. Gaps are reported if bounded event retention was exceeded.', schema: z.strictObject({ id: z.string().min(1).max(128), cursor: z.number().int().nonnegative().optional(), limit: limit.optional() }), readOnly: true },
   { name: 'watch_stop', description: 'Stop a watch owned by this process and cancel its network subscription.', schema: z.strictObject({ id: z.string().min(1).max(128) }), readOnly: false },
 ];
 
+export function operationFor(name: string): Operation | undefined {
+  return operations.find(operation => operation.name === name);
+}
+
 export function parseOperation(name: string, input: unknown = {}): Record<string, unknown> {
-  const operation = operations.find(operation => operation.name === name);
+  const operation = operationFor(name);
   if (!operation) throw new AttoError('UNKNOWN_OPERATION', 'Unknown Atto operation.');
   const parsed = operation.schema.safeParse(input);
   if (!parsed.success) {

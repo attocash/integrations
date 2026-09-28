@@ -404,13 +404,39 @@ export async function runCli(argv = process.argv): Promise<void> {
   representative.command('change <address>').description('Publish a representative change for an existing account')
     .option('--index <index>', 'Wallet account index (default: 0)', number)
     .action((representative, options) => call('representative_change', { representative, ...options }));
+  const message = program.command('message').description('Sign or verify exact ATTO message bytes');
+  const messageSource = (options: { text?: string; hex?: string }) => {
+    if ((options.text !== undefined) === (options.hex !== undefined)) {
+      throw new AttoError('INVALID_INPUT', 'Supply exactly one of --text or --hex.');
+    }
+    return options.text !== undefined ? { message: options.text } : { messageHex: options.hex };
+  };
+  message.command('sign').description('Sign a UTF-8 message or exact bytes using a locally approved account index')
+    .requiredOption('--index <index>', 'Saved wallet account index', number)
+    .option('--text <message>', 'Exact UTF-8 message; whitespace is preserved')
+    .option('--hex <bytes>', 'Exact message bytes as even-length hexadecimal; empty bytes are allowed')
+    .action(options => call('message_sign', { index: options.index, ...messageSource(options) }));
+  message.command('verify').description('Verify exact UTF-8 message or byte hex without wallet credentials')
+    .option('--address <address>', 'ATTO address corresponding to the signing public key')
+    .option('--public-key <hex>', '64-character public key in hexadecimal')
+    .requiredOption('--signature <hex>', '128-character signature in hexadecimal')
+    .option('--text <message>', 'Exact UTF-8 message; whitespace is preserved')
+    .option('--hex <bytes>', 'Exact message bytes as even-length hexadecimal; empty bytes are allowed')
+    .action(options => {
+      if ((options.address !== undefined) === (options.publicKey !== undefined)) {
+        throw new AttoError('INVALID_INPUT', 'Supply exactly one of --address or --public-key.');
+      }
+      return call('message_verify', { ...(options.address !== undefined ? { address: options.address } : { publicKey: options.publicKey }),
+        signature: options.signature, ...messageSource(options) });
+    });
   const limits = program.command('limits').description('Shared spending budgets and usage');
   limits.command('status').description('Read active limits, spending usage, and pending proposals').action(() => call('limits_get'));
-  const proposeAndApprove = async (update: (current: { mcpAccess: string; policy: SpendingPolicy; pool: AccountPool }) => { policy?: Record<string, unknown>; access?: string; pool?: AccountPool }) => {
+  const proposeAndApprove = async (update: (current: { mcpAccess: string; policy: SpendingPolicy; pool: AccountPool; messageSigningIndexes: number[] }) => { policy?: Record<string, unknown>; access?: string; pool?: AccountPool; messageSigningIndexes?: number[] }) => {
     requireTerminal();
-    const current = await app().call('limits_get') as { mcpAccess: string; policy: SpendingPolicy; pool: AccountPool };
+    const current = await app().call('limits_get') as { mcpAccess: string; policy: SpendingPolicy; pool: AccountPool; messageSigningIndexes: number[] };
     const changes = update(current);
-    const { proposal } = await app().call('limits_propose', compact({ policy: changes.policy ?? current.policy, access: changes.access ?? current.mcpAccess, pool: changes.pool })) as { proposal: { id: string } };
+    const { proposal } = await app().call('limits_propose', compact({ policy: changes.policy ?? current.policy, access: changes.access ?? current.mcpAccess,
+      pool: changes.pool, messageSigningIndexes: changes.messageSigningIndexes })) as { proposal: { id: string } };
     output(await approveLimitsProposal({ id: proposal.id, directory: app().store.directory }));
   };
   limits.command('set').description('Review and confirm limit changes; omitted rules are preserved')
@@ -419,15 +445,21 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option('--unit <unit>', 'ATTO (default) or RAW for the supplied amount flags')
     .option('--input <json>', 'Replace the entire policy using JSON: {"perRequest":null,"rolling":[]}')
     .option('--access <mode>', 'MCP access: read-only or spend; defaults to current access')
+    .option('--message-signing-indexes <indexes>', 'Grant message signing for comma-separated indexes, or use none to clear', value => {
+      const trimmed = value.trim();
+      if (trimmed.toLowerCase() === 'none') return [];
+      if (!trimmed) throw new InvalidArgumentError('Use comma-separated indexes or none.');
+      return trimmed.split(',').map(entry => number(entry.trim()));
+    })
     .action(async options => {
       if (options.input !== undefined && [options.perPayment, options.daily, options.unit].some(value => value !== undefined)) throw new AttoError('INVALID_INPUT', 'Choose policy JSON or amount flags, not both.');
-      if ([options.input, options.perPayment, options.daily, options.access].every(value => value === undefined)) throw new AttoError('INVALID_INPUT', 'Supply --per-payment, --daily, --input, or --access.');
+      if ([options.input, options.perPayment, options.daily, options.access, options.messageSigningIndexes].every(value => value === undefined)) throw new AttoError('INVALID_INPUT', 'Supply --per-payment, --daily, --input, --access, or --message-signing-indexes.');
       if (options.unit !== undefined && options.perPayment === undefined && options.daily === undefined) throw new AttoError('INVALID_INPUT', '--unit requires --per-payment or --daily.');
       return proposeAndApprove(current => ({
         policy: options.input !== undefined ? json(options.input) : {
           perRequest: options.perPayment === undefined ? current.policy.perRequest : { amount: options.perPayment, unit: options.unit ?? 'ATTO' },
           rolling: options.daily === undefined ? current.policy.rolling : [...current.policy.rolling.filter(rule => rule.days !== 1), { days: 1, amount: options.daily, unit: options.unit ?? 'ATTO' }],
-        }, access: options.access,
+        }, access: options.access, messageSigningIndexes: options.messageSigningIndexes,
       }));
     });
   limits.command('clear').description('Remove all spending limits, preserving historical usage')
@@ -483,8 +515,9 @@ export async function runCli(argv = process.argv): Promise<void> {
 
   program.command('operations [name]').description('List shared operations or inspect one input schema')
     .action(name => {
-      if (name === undefined) return output(operations.map(({ name, description, readOnly }) => ({ name, description, readOnly })), 'operations');
-      const operation = operations.find(operation => operation.name === name);
+      const visible = operations;
+      if (name === undefined) return output(visible.map(({ name, description, readOnly }) => ({ name, description, readOnly })), 'operations');
+      const operation = visible.find(operation => operation.name === name);
       if (!operation) throw new AttoError('UNKNOWN_OPERATION', 'Unknown Atto operation. Run atto operations to list available names.');
       output({ name: operation.name, description: operation.description, readOnly: operation.readOnly, inputSchema: z.toJSONSchema(operation.schema, { io: 'input' }) });
     });
@@ -513,6 +546,9 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto labels': 'atto labels set 1 \"Savings\"\n  atto labels list --all',
     'atto labels set': 'atto labels set 1 \"Savings\"', 'atto labels remove': 'atto labels remove 1',
     'atto labels show': 'atto labels show 1', 'atto labels list': 'atto labels list --all --search treasury',
+    'atto message': 'atto message sign --index 0 --text "exact challenge"\n  atto message verify --public-key <hex> --signature <hex> --hex <bytes>',
+    'atto message sign': 'atto message sign --index 0 --text "exact challenge"',
+    'atto message verify': 'atto message verify --public-key <hex> --signature <hex> --text "exact challenge"',
     'atto send': 'atto send <address> 1\n  atto send --to-index 1 --amount 1\n  atto send --to-label "Savings" --amount 1\n  atto send <address> --usd 1',
     'atto market': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto market topup 1 --request-id marketplace-funding-001\n  atto market status marketplace-funding-001',
     'atto market connect': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example',
@@ -527,7 +563,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto representative weight': 'atto representative weight <address>',
     'atto representative change': 'atto representative change <address> --index 0',
     'atto limits': 'atto limits status', 'atto limits status': 'atto limits status',
-    'atto limits set': 'atto limits set --per-payment 10 --daily 25', 'atto limits clear': 'atto limits clear',
+    'atto limits set': 'atto limits set --per-payment 10 --daily 25\n  atto limits set --message-signing-indexes 0,1\n  atto limits set --message-signing-indexes none', 'atto limits clear': 'atto limits clear',
     'atto limits approve': 'atto limits approve <proposal-id>', 'atto limits reject': 'atto limits reject <proposal-id>',
     'atto pool': 'atto pool status', 'atto pool status': 'atto pool status',
     'atto pool configure': 'atto pool configure --indexes 0,1 --consolidate\n  atto pool configure --no-consolidate',

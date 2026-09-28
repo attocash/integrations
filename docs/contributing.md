@@ -18,6 +18,14 @@ ATTO_TEST_KEYCHAIN=1 npm run test:keychain
 npm run test:package
 ```
 
+Until the Commons JS verifier is published, plain `npm ci` installs Commons
+8.0.0 and the CLI `prebuild`/`precheck` guards intentionally fail because that
+package has no JavaScript `AttoSignature.isValidMessage` export. Source builds
+and package tests need the local Commons JS package set installed into the
+workspace first; use the exact `ATTO_COMMONS_LOCAL_VERSION` for that set (the
+current local build is `8.1.0-local.0`). Do not update the signed integrations
+package manifests or treat the local packages as a published release.
+
 Individual workspaces support `build`, `check`, and `test` scripts. Build before
 running a workspace test directly; build CLI before building or checking MCP.
 The executables in a checkout are:
@@ -55,7 +63,10 @@ The CLI artifact bundles its direct Commons packages and their JavaScript
 dependencies to preserve patched `ws` resolution despite Commons' exact older
 pins. Native password-store bindings remain normal npm dependencies so npm
 selects the correct platform binaries. MCP stays a separate package with a
-normal, exact dependency on `@attocash/cli`; its SDK is not bundled.
+normal, exact dependency on `@attocash/cli`; its SDK is not bundled. For local
+Commons packages, `ATTO_COMMONS_LOCAL_VERSION` makes staging verify the one
+installed Commons closure and rewrites only the staged CLI dependency versions;
+the source manifests remain registry-pinned.
 
 Verify installed tarballs when updating dependencies. Overrides and shrinkwrap
 alone did not preserve the replacement outside Commons' exact dependency pins.

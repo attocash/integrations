@@ -12,6 +12,7 @@ const bundled = [
   '@attocash/commons-core', '@attocash/commons-node', '@attocash/commons-node-remote',
   '@attocash/commons-worker-remote',
 ];
+const localCommonsVersion = process.env.ATTO_COMMONS_LOCAL_VERSION;
 
 async function packageDirectory(name, parent) {
   const require = createRequire(join(parent, 'package.json'));
@@ -68,6 +69,17 @@ async function pack() {
   }
   const ws = JSON.parse(await readFile(join(packages.get('ws'), 'package.json'), 'utf8'));
   if (ws.version !== rootManifest.overrides.ws) throw new Error('Installed ws does not match the patched override; run npm ci before packaging.');
+  if (localCommonsVersion) {
+    if (!/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(localCommonsVersion)) {
+      throw new Error('ATTO_COMMONS_LOCAL_VERSION must be an exact semantic version, such as 8.1.0.');
+    }
+    const commonsPackages = [...packages.entries()].filter(([name]) => name.startsWith('@attocash/commons-'));
+    const commonsVersions = await Promise.all(commonsPackages.map(async ([, directory]) =>
+      JSON.parse(await readFile(join(directory, 'package.json'), 'utf8')).version));
+    if (!commonsPackages.length || commonsVersions.some(version => version !== localCommonsVersion)) {
+      throw new Error(`The installed Commons dependency closure must contain one version (${localCommonsVersion}); install the complete local Commons package set before packaging.`);
+    }
+  }
 
   const stage = await mkdtemp(join(tmpdir(), 'atto-package-'));
   try {
@@ -87,7 +99,18 @@ async function pack() {
     await mkdir(destination, { recursive: true });
     for (const [manifest, directory] of [[cli, cliStage], [mcp, mcpStage]]) {
       const { scripts, devDependencies, overrides, bundleDependencies, bundledDependencies, ...published } = manifest;
-      if (manifest === cli) published.bundleDependencies = bundled;
+      if (manifest === cli) {
+        published.bundleDependencies = bundled;
+        if (localCommonsVersion) {
+          for (const name of bundled.filter(name => name.startsWith('@attocash/commons-'))) {
+            if (!published.dependencies?.[name]) throw new Error(`The CLI source manifest does not declare bundled dependency ${name}.`);
+            // The local 8.1.0 package is private and unpublished. Keep source
+            // manifests pinned to registry versions, but align this artifact's
+            // dependencies with the exact Commons packages copied into it.
+            published.dependencies[name] = localCommonsVersion;
+          }
+        }
+      }
       await writeFile(join(directory, 'package.json'), `${JSON.stringify(published, null, 2)}\n`);
       await execute(process.execPath, [npm, 'pack', '--ignore-scripts', '--quiet', '--pack-destination', destination], {
         cwd: directory, timeout: 60_000, maxBuffer: 1024 * 1024,

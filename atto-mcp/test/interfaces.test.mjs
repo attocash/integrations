@@ -34,8 +34,9 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   // When
   const result = await client.listTools();
   // Then
-  assert.deepEqual(result.tools.map(tool => tool.name).sort(), operations.map(operation => operation.name).sort());
-  assert.equal(result.tools.length, 38);
+  const publicOperations = operations;
+  assert.deepEqual(result.tools.map(tool => tool.name).sort(), publicOperations.map(operation => operation.name).sort());
+  assert.equal(result.tools.length, 40);
   assert.equal(result.tools.some(tool => /mnemonic|backup|import|create_wallet/.test(tool.name)), false);
   assert.equal(result.tools.some(tool => /approv|reject/.test(tool.name)), false);
   assert.equal(result.tools.find(tool => tool.name === 'send').annotations.destructiveHint, true);
@@ -46,6 +47,9 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.doesNotMatch(client.getInstructions(), /review it with atto-mcp limits approve/);
   assert.match(result.tools.find(tool => tool.name === 'limits_propose').description, /profile-specific approval\.commands/);
   assert.equal(result.tools.find(tool => tool.name === 'balances_get').annotations.readOnlyHint, true);
+  assert.equal(result.tools.find(tool => tool.name === 'message_sign').annotations.readOnlyHint, false);
+  assert.equal(result.tools.find(tool => tool.name === 'message_verify').annotations.readOnlyHint, true);
+  assert.match(result.tools.find(tool => tool.name === 'message_sign').description, /locally approved messageSigningIndexes/);
   assert.equal(result.tools.find(tool => tool.name === 'watch_start').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'price_quote').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'market_topup').annotations.readOnlyHint, false);

@@ -6,10 +6,12 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import test from 'node:test';
+import { AttoAddress, AttoAlgorithm, AttoPublicKey } from '@attocash/commons-core';
 
 const execute = promisify(execFile);
 const cliDirectory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? fileURLToPath(new URL('../', import.meta.url));
 const { parseOperation } = await import(pathToFileURL(join(cliDirectory, 'dist/application/operations.js')).href);
+const verificationAddress = new AttoAddress(AttoAlgorithm.V1, new AttoPublicKey(new Int8Array(32).fill(42))).value;
 
 async function updateNoticeFixture(t) {
   const directory = await mkdtemp(join(tmpdir(), 'atto-cli-updates-'));
@@ -72,6 +74,22 @@ test('shared validation rejects numeric amounts, secrets, invalid indexes, and a
     return true;
   });
   assert.throws(() => parseOperation('address_derive', { index: 2147483648 }), { code: 'INVALID_INPUT' });
+  assert.deepEqual(parseOperation('message_sign', { index: 0, message: '' }), { index: 0, message: '' });
+  assert.deepEqual(parseOperation('message_sign', { index: 1, messageHex: '00ff' }), { index: 1, messageHex: '00ff' });
+  assert.deepEqual(parseOperation('message_verify', { publicKey: 'aa'.repeat(32), signature: 'bb'.repeat(64), messageHex: '' }), {
+    publicKey: 'aa'.repeat(32), signature: 'bb'.repeat(64), messageHex: '',
+  });
+  assert.deepEqual(parseOperation('message_verify', { address: verificationAddress, signature: 'bb'.repeat(64), message: '' }), {
+    address: verificationAddress, signature: 'bb'.repeat(64), message: '',
+  });
+  assert.throws(() => parseOperation('message_verify', { signature: 'bb'.repeat(64), message: '' }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('message_verify', { address: verificationAddress, publicKey: 'aa'.repeat(32), signature: 'bb'.repeat(64), message: '' }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('message_sign', { index: 0 }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('message_sign', { index: 0, message: '', messageHex: '' }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('message_sign', { index: 0, messageHex: 'f' }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('message_sign', { index: 0, message: 'é'.repeat(32_769) }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('limits_propose', { policy: { perRequest: null, rolling: [] }, messageSigningIndexes: [1, 1] }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('limits_propose', { policy: { perRequest: null, rolling: [] }, messageSigningIndexes: [2147483648] }), { code: 'INVALID_INPUT' });
   assert.throws(() => parseOperation('account_get', { address: 'atto_test', index: 0 }), { code: 'INVALID_INPUT' });
   assert.throws(() => parseOperation('wallet_configure', { nodeUrl: 'https://name:password@example.com' }), { code: 'INVALID_INPUT' });
   assert.throws(() => parseOperation('limits_propose', { policy: { perRequest: null, rolling: [{ days: 0.5, amount: '1', unit: 'ATTO' }] } }), { code: 'INVALID_INPUT' });
@@ -147,6 +165,7 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   const topupStatus = JSON.parse((await run(['market', 'status', 'market-funding-1'])).stdout).result;
   const generatedTopupRun = await run(['market', 'topup', '1']);
   const generatedTopup = JSON.parse(generatedTopupRun.stdout).result.input.requestId;
+  const verifiedByAddress = JSON.parse((await run(['message', 'verify', '--address', verificationAddress, '--signature', 'bb'.repeat(64), '--hex', ''])).stdout).result;
 
   // Then
   assert.deepEqual(defaultSource, { name: 'send', input: { destination: 'atto_test', amount: '1.25', unit: 'ATTO', index: 0, requestId: 'invoice-1', metadata: { orderId: '42', reason: 'Invoice 42' } } });
@@ -171,6 +190,7 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   assert.deepEqual(topupStatus, { name: 'market_topup_status', input: { requestId: 'market-funding-1' } });
   assert.match(generatedTopup, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.ok(generatedTopupRun.stderr.includes(JSON.stringify({ progress: { requestId: generatedTopup } })));
+  assert.deepEqual(verifiedByAddress, { name: 'message_verify', input: { address: verificationAddress, signature: 'bb'.repeat(64), messageHex: '' } });
   for (const flags of [['--pool', '--index', '0'], ['--index', '2', '--pool']]) {
     await assert.rejects(run(['send', 'atto_test', '1', '--request-id', 'ambiguous-source', ...flags]), error => {
       assert.equal(JSON.parse(error.stdout).error.code, 'INVALID_INPUT');

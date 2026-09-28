@@ -32,7 +32,7 @@ export interface SendRecord {
 }
 
 export interface ExternalPaymentRecord {
-  kind: 'market-topup';
+  kind: 'market-topup' | 'market-intent';
   version: 1;
   paymentIdentifier: string;
   network: 'atto:live' | 'atto:local';
@@ -49,14 +49,15 @@ export interface ExternalPaymentRecord {
 
 export interface ExternalPaymentSecrets {
   version: 1;
+  paymentKind?: 'market-topup' | 'market-intent';
   apiUrl: string;
   audience: string;
-  accountId: string;
-  agentId: string;
-  identityId: string;
+  accountId?: string;
+  agentId?: string;
+  identityId?: string;
   walletFingerprint: string;
-  controllerIndex: number;
-  controllerAddress: string;
+  controllerIndex?: number;
+  controllerAddress?: string;
   requirementJson: string;
   transactionJson?: string;
   paymentJson?: string;
@@ -74,6 +75,7 @@ const REVISION_KEY = 'spending.policyRevision';
 const ACCESS_KEY = 'spending.mcpAccess';
 const PROPOSAL_KEY = 'spending.proposal';
 const POOL_KEY = 'spending.pool';
+const MESSAGE_SIGNING_INDEXES_KEY = 'signing.messageIndexes';
 
 export type McpAccess = 'read-only' | 'spend';
 
@@ -93,6 +95,7 @@ export interface LimitsProposal extends ProposalWallet {
   status: 'pending' | 'approved' | 'rejected';
   decidedAt?: number;
   pool?: AccountPool;
+  messageSigningIndexes?: number[];
 }
 
 export class SpendLedger {
@@ -121,13 +124,21 @@ export class SpendLedger {
     return pool;
   }
 
-  proposePolicy(policy: SpendingPolicy, access: McpAccess, wallet: ProposalWallet, pool = this.pool()): LimitsProposal {
+  messageSigningIndexes(): number[] {
+    const indexes = this.store.get<number[]>(MESSAGE_SIGNING_INDEXES_KEY) ?? [];
+    this.validateMessageSigningIndexes(indexes);
+    return indexes;
+  }
+
+  proposePolicy(policy: SpendingPolicy, access: McpAccess, wallet: ProposalWallet, pool = this.pool(),
+    messageSigningIndexes = this.messageSigningIndexes()): LimitsProposal {
     this.validatePolicy(policy);
     this.validatePool(pool);
+    this.validateMessageSigningIndexes(messageSigningIndexes);
     if (access !== 'read-only' && access !== 'spend') throw new AttoError('INVALID_POLICY', 'Choose read-only or spend access for MCP.');
     const createdAt = Date.now();
     const proposal: LimitsProposal = {
-      ...wallet, id: randomUUID(), policy, access, pool, createdAt, expiresAt: createdAt + DAY_MS,
+      ...wallet, id: randomUUID(), policy, access, pool, messageSigningIndexes: [...messageSigningIndexes], createdAt, expiresAt: createdAt + DAY_MS,
       baseRevision: this.revision(), status: 'pending',
     };
     // One immutable proposal is current per profile. A new request gets a new
@@ -150,7 +161,9 @@ export class SpendLedger {
         || (proposal.walletFingerprint !== null && typeof proposal.walletFingerprint !== 'string')) throw new Error();
       this.validatePolicy(proposal.policy);
       if (proposal.pool !== undefined) this.validatePool(proposal.pool);
-      return proposal;
+      const messageSigningIndexes = proposal.messageSigningIndexes ?? [];
+      this.validateMessageSigningIndexes(messageSigningIndexes);
+      return { ...proposal, messageSigningIndexes };
     } catch {
       throw new AttoError('INVALID_STATE', 'The saved limit proposal is invalid.');
     }
@@ -177,6 +190,7 @@ export class SpendLedger {
       this.replacePolicy(proposal.policy);
       this.store.set(ACCESS_KEY, proposal.access);
       if (proposal.pool !== undefined) this.store.set(POOL_KEY, proposal.pool);
+      this.store.set(MESSAGE_SIGNING_INDEXES_KEY, proposal.messageSigningIndexes ?? []);
       this.store.set(PROPOSAL_KEY, { ...proposal, status: 'approved', decidedAt: Date.now() });
     });
   }
@@ -200,6 +214,14 @@ export class SpendLedger {
     const revision = this.revision();
     this.store.set(POLICY_KEY, policy);
     this.store.set(REVISION_KEY, revision + 1);
+  }
+
+  private validateMessageSigningIndexes(indexes: number[]): void {
+    if (!Array.isArray(indexes) || indexes.length > 100
+      || indexes.some(index => !Number.isSafeInteger(index) || index < 0 || index > 0x7fff_ffff)
+      || new Set(indexes).size !== indexes.length) {
+      throw new AttoError('INVALID_POLICY', 'Message-signing indexes must be unique account indexes, up to 100.');
+    }
   }
 
   assertCanReserve(raw: string, now = Date.now()): void {
@@ -308,7 +330,7 @@ export class SpendLedger {
 
   /** Persist the exact offered requirement before any external SEND is signed. */
   externalChallenge(id: string, requirementJson: string,
-    owner: Omit<ExternalPaymentSecrets, 'requirementJson' | 'transactionJson' | 'paymentJson' | 'paymentSignature'>): void {
+    owner: Omit<ExternalPaymentSecrets, 'requirementJson' | 'transactionJson' | 'paymentJson' | 'paymentSignature' | 'paymentKind'>): void {
     if (typeof requirementJson !== 'string' || Buffer.byteLength(requirementJson, 'utf8') < 1
       || Buffer.byteLength(requirementJson, 'utf8') > 65_536) throw new AttoError('SEND_STATE', 'The x402 requirement is invalid.');
     this.store.transaction(() => {
@@ -318,11 +340,12 @@ export class SpendLedger {
       if (createHashHex(requirementJson) !== record.external.requirementHash) throw new AttoError('SEND_STATE', 'The x402 requirement fingerprint does not match.');
       const secrets = this.externalSecrets();
       const current = secrets[id];
-      if (current && (current.requirementJson !== requirementJson || !isDeepStrictEqual(this.ownerDefinition(current), owner))) {
+      const boundOwner = { ...owner, paymentKind: record.external.kind };
+      if (current && (current.requirementJson !== requirementJson || !isDeepStrictEqual(this.ownerDefinition(current), boundOwner))) {
         throw new AttoError('REQUEST_CONFLICT', 'This payment ID received a different x402 requirement or controller binding.');
       }
       if (!current) {
-        secrets[id] = { ...owner, requirementJson };
+        secrets[id] = { ...boundOwner, requirementJson };
         this.store.set(EXTERNAL_SECRETS_KEY, secrets);
       }
     });
@@ -368,7 +391,8 @@ export class SpendLedger {
         paymentJson: input.paymentJson, paymentSignature: input.paymentSignature };
       secrets[id] = nextSecrets;
       records[position] = { ...record, hash: input.hash, blockJson: input.blockJson, status: 'signed',
-        external: { ...record.external, nativeState: 'unknown', attemptedAt: input.attemptedAt } };
+        external: { ...record.external, nativeState: 'unknown',
+          ...(record.external.kind === 'market-intent' ? { paymentState: 'PREPARED' as const } : {}), attemptedAt: input.attemptedAt } };
       this.validateDetails(records[position]!);
       this.store.set(EXTERNAL_SECRETS_KEY, secrets);
       this.store.set(RECORDS_KEY, records);
@@ -403,7 +427,8 @@ export class SpendLedger {
     this.update(id, record => {
       if (!record.external || !record.hash || record.status === 'published') throw new AttoError('SEND_STATE', 'Only an unresolved Market SEND can be rejected.');
       return { ...record, status: 'failed', result,
-        external: { ...record.external, nativeState: 'rejected' } };
+        external: { ...record.external, nativeState: 'rejected',
+          ...(record.external.kind === 'market-intent' ? { paymentState: 'FAILED' as const } : {}) } };
     });
   }
 
@@ -498,6 +523,7 @@ export class SpendLedger {
       policy,
       mcpAccess: this.mcpAccess(),
       pool: this.pool(),
+      messageSigningIndexes: this.messageSigningIndexes(),
       proposal: this.proposal(),
       pendingRaw: this.pendingTotal(records).toString(),
       perRequest: policy.perRequest ? { ...policy.perRequest, limitRaw: amountRaw(policy.perRequest.amount, policy.perRequest.unit, true) } : null,
@@ -605,7 +631,7 @@ export class SpendLedger {
   }
 
   private validateExternal(external: ExternalPaymentRecord): void {
-    if (!external || external.kind !== 'market-topup' || external.version !== 1
+    if (!external || !['market-topup', 'market-intent'].includes(external.kind) || external.version !== 1
       || !/^[A-Za-z0-9_-]{16,128}$/.test(external.paymentIdentifier)
       || !['atto:live', 'atto:local'].includes(external.network)
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(external.intentId)
@@ -628,13 +654,20 @@ export class SpendLedger {
     try {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
       for (const [id, secret] of Object.entries(value)) {
-        if (!id || !secret || secret.version !== 1 || typeof secret.apiUrl !== 'string' || secret.apiUrl.length > 2048
+        const paymentKind = secret?.paymentKind ?? 'market-topup';
+        const topUpOwnerInvalid = paymentKind === 'market-topup' &&
+          (typeof secret?.accountId !== 'string' || typeof secret?.agentId !== 'string'
+            || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(secret.agentId)
+            || typeof secret?.identityId !== 'string' || !Number.isSafeInteger(secret?.controllerIndex)
+            || typeof secret?.controllerAddress !== 'string');
+        if (!id || !secret || secret.version !== 1 || !['market-topup', 'market-intent'].includes(paymentKind)
+          || (secret.paymentKind !== undefined && secret.paymentKind !== paymentKind)
+          || typeof secret.apiUrl !== 'string' || secret.apiUrl.length > 2048
           || typeof secret.audience !== 'string' || secret.audience.length < 1 || secret.audience.length > 255
-          || typeof secret.accountId !== 'string' || typeof secret.agentId !== 'string'
-          || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(secret.agentId)
-          || typeof secret.identityId !== 'string'
-          || typeof secret.walletFingerprint !== 'string' || !Number.isSafeInteger(secret.controllerIndex)
-          || typeof secret.controllerAddress !== 'string' || typeof secret.requirementJson !== 'string'
+          || topUpOwnerInvalid
+          || typeof secret.walletFingerprint !== 'string'
+          || (secret.controllerIndex !== undefined && (!Number.isSafeInteger(secret.controllerIndex) || secret.controllerIndex < 0 || secret.controllerIndex > 0x7fff_ffff))
+          || (secret.controllerAddress !== undefined && typeof secret.controllerAddress !== 'string') || typeof secret.requirementJson !== 'string'
           || Buffer.byteLength(secret.requirementJson, 'utf8') > 65_536
           || (secret.transactionJson !== undefined && Buffer.byteLength(secret.transactionJson, 'utf8') > 65_536)
           || (secret.paymentJson !== undefined && Buffer.byteLength(secret.paymentJson, 'utf8') > 65_536)
@@ -653,8 +686,8 @@ export class SpendLedger {
   }
 
   private ownerDefinition(owner: ExternalPaymentSecrets): unknown {
-    const { version, apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress } = owner;
-    return { version, apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress };
+    const { version, paymentKind = 'market-topup', apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress } = owner;
+    return { version, paymentKind, apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress };
   }
 
   private planDefinition(plan: PaymentPlan | undefined): unknown {

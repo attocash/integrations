@@ -7,7 +7,7 @@
 Ask about balances, put names on addresses, follow incoming payments, and review
 wallet history in your MCP client. When you are ready, approve spending limits
 in your terminal so the assistant can make payments within those limits.
-Available as an initial beta, with 36 tools over local stdio.
+Available as an initial beta, with 40 public tools over local stdio.
 
 [Connect](#install-and-connect) · [Try it](#try-these-prompts) ·
 [Spending approvals](#approve-access-and-limit-changes) · [Tools](#tools) ·
@@ -148,14 +148,16 @@ it does not change limits or grant access. For example:
 }
 ```
 
-`limits_get` shows the current policy, usage, `mcpAccess`, pool, and proposal status.
-Omitting `pool` from `limits_propose` preserves the current approved pool. Read-only
-MCP can propose pool changes. Approval derives missing indexes without activating
-them for automatic receiving.
+`limits_get` shows the current policy, usage, `mcpAccess`, pool, message-signing
+indexes, and proposal status. Message-signing indexes start empty. Omitting `pool`
+or `messageSigningIndexes` from `limits_propose` preserves those current settings.
+Read-only MCP can propose pool and signing-grant changes. Approval derives any
+newly granted indexes without activating them for automatic receiving.
 
 `limits_propose` returns the immutable `proposal` and public `approval` guidance:
 
-- `approval.changes` contains only changed `access`, `policy`, and `pool` settings,
+- `approval.changes` contains only changed `access`, `policy`, `pool`, and
+  `messageSigningIndexes` settings,
   each with `from` and `to` values. Adding a source account can require approval
   even when spending access and amount limits are already approved. An unlimited
   policy means no amount cap; MCP spending access is a separate setting.
@@ -185,6 +187,17 @@ MCP approval tool or flag that skips this review.
 Proposals expire after 24 hours. A new proposal replaces the previous ID;
 approval fails if the wallet identity, network, directory, or policy revision
 changed since it was proposed.
+
+`message_sign` signs exact UTF-8 text or `messageHex` bytes with the
+`ATTO Signed Message v1` framing. Inputs are limited to 64 KiB, including empty
+bytes; text is not trimmed or normalized. MCP message signing requires both
+`mcpAccess: "spend"` and a locally approved `messageSigningIndexes` entry.
+Approving an index permits generic authentication and controller-approval
+signatures for that key. Grant only keys approved for those purposes, and sign
+only challenges you trust. `message_verify` checks the same exact bytes with
+public data and does not read wallet credentials.
+
+The standard Atto MCP does not expose a tool that returns signed payment headers.
 
 Limits apply to all CLI and MCP sends in that profile, across every derived
 address and including ordinary payments to owned addresses. Internal transfers
@@ -254,6 +267,7 @@ for storage, backup, and reset details.
 | Bounded lists | `history_list`, `receivables_list` |
 | Address labels | `labels_set`, `labels_remove`, `labels_get`, `labels_list` |
 | Payments | `send`, `receive`, `receive_all` |
+| Message signatures | `message_sign`, `message_verify` |
 | Payment pool | `pool_get` |
 | Local payment journal | `journal_list`, `journal_get` |
 | Representatives | `representative_change` |

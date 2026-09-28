@@ -4,7 +4,7 @@ import { AddressLabels } from '../labels/presentation.js';
 import type { DestinationBinding } from '../spending/destination.js';
 import { createHash } from 'node:crypto';
 import {
-  AttoMnemonic, AttoReceivable, AttoTransaction, toAttoIndex,
+  AttoMnemonic, AttoPublicKey, AttoReceivable, AttoSignature, AttoTransaction, toAttoIndex,
 } from '@attocash/commons-core';
 import { amountOutput, amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
@@ -23,7 +23,7 @@ import { AutoReceiver, type ReceiveProgress } from '../wallet/auto-receive.js';
 import { defaultSettings } from '../wallet/defaults.js';
 import { derivedSigner, mnemonicSeed, signingWallet } from '../wallet/signing.js';
 import type { AccountPool, ListRequest, ReceiveRequest, SendRequest, SpendingPolicy, StreamFilter, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
-import { operations, parseOperation } from './operations.js';
+import { operationFor, parseOperation } from './operations.js';
 import { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import { runDoctor } from '../doctor/doctor.js';
@@ -31,6 +31,13 @@ import { MarketTopUpClient } from '../market/topups.js';
 
 interface ReceiveRecord { hash: string; index: number; blockHash: string; result?: unknown }
 const RESET_KEY = 'wallet.reset';
+
+function signedMessageBytes(args: Record<string, unknown>): Int8Array {
+  const bytes = args.messageHex !== undefined
+    ? Buffer.from(args.messageHex as string, 'hex')
+    : Buffer.from(args.message as string, 'utf8');
+  return new Int8Array(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+}
 
 export class AttoApplication {
   readonly store: StateStore;
@@ -139,6 +146,7 @@ export class AttoApplication {
       proposal: this.ledger.reviewProposal(id, this.proposalWallet()), directory: this.store.directory,
       identity: this.identity() ?? null, network: this.settings().network,
       policy: this.ledger.policy(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(),
+      messageSigningIndexes: this.ledger.messageSigningIndexes(),
     }));
   }
 
@@ -470,7 +478,31 @@ export class AttoApplication {
     const reader = this.reader();
     switch (name) {
       case 'doctor': return runDoctor({ directory: this.store.directory, access: this.mcp ? 'mcp' : undefined, signal: this.doctorAbort.signal, globalDirectory: args.globalDirectory as boolean | undefined });
-      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.background.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
+      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.background.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), messageSigningIndexes: this.ledger.messageSigningIndexes(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
+      case 'message_sign': return this.store.withWalletLock(async () => {
+        this.requireMcpWrite();
+        const index = args.index as number;
+        if (!this.ledger.messageSigningIndexes().includes(index)) {
+          throw new AttoError('SIGNING_NOT_APPROVED', 'This profile has not locally approved message signing for that account index.');
+        }
+        const saved = this.address(index);
+        const seed = await this.seed();
+        try {
+          const signer = await derivedSigner(seed, index);
+          if (signer.address.value !== saved.address || signer.publicKey.toString() !== saved.publicKey) {
+            throw new AttoError('WALLET_MISMATCH', 'The signing key does not match the saved account metadata.');
+          }
+          return { index, address: signer.address.value, publicKey: signer.publicKey.toString(),
+            signature: (await signer.signMessage(signedMessageBytes(args))).toString() };
+        } finally { seed.value.fill(0); }
+      });
+      case 'message_verify': {
+        const publicKey = args.address !== undefined
+          ? parseAddress(args.address as string).publicKey
+          : AttoPublicKey.Companion.parse(args.publicKey as string);
+        const signature = AttoSignature.Companion.parse(args.signature as string);
+        return { valid: await signature.isValidMessage(publicKey, signedMessageBytes(args)) };
+      }
       case 'wallet_configure': return this.configure(args as Partial<WalletSettings>);
       case 'address_list': return { addresses: this.addresses() };
       case 'address_add': return this.store.withWalletLock(async () => {
@@ -546,8 +578,10 @@ export class AttoApplication {
         return { record };
       }
       case 'limits_propose': return this.store.withWalletLock(async () => {
-        const current = { access: this.ledger.mcpAccess(), policy: this.ledger.policy(), pool: this.ledger.pool() };
-        const proposal = this.ledger.proposePolicy(args.policy as SpendingPolicy, args.access as McpAccess, this.proposalWallet(), args.pool as AccountPool | undefined);
+        const current = { access: this.ledger.mcpAccess(), policy: this.ledger.policy(), pool: this.ledger.pool(),
+          messageSigningIndexes: this.ledger.messageSigningIndexes() };
+        const proposal = this.ledger.proposePolicy(args.policy as SpendingPolicy, args.access as McpAccess, this.proposalWallet(), args.pool as AccountPool | undefined,
+          args.messageSigningIndexes as number[] | undefined);
         return { proposal, approval: approvalInstructions(proposal, current) };
       });
       case 'metrics_get': return this.market.metrics();
@@ -579,10 +613,10 @@ export class AttoApplication {
     if (name === 'wallet_status' || name === 'doctor') this.requireSession();
     else this.requireReady();
     const args = parseOperation(name, input);
-    if (!operations.find(operation => operation.name === name)!.readOnly && name !== 'limits_propose' && !['labels_set', 'labels_remove'].includes(name) && !name.startsWith('watch_')) this.requireMcpWrite();
+    if (!operationFor(name)!.readOnly && name !== 'limits_propose' && !['labels_set', 'labels_remove'].includes(name) && !name.startsWith('watch_')) this.requireMcpWrite();
     const call = (async () => {
       const result = await this.invoke(name, args);
-      if (name === 'doctor' || ['labels_get', 'labels_list'].includes(name)) return result;
+      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify'].includes(name)) return result;
       if (this.settings().network === 'LIVE' && ['address_list', 'account_get', 'balances_get', 'transaction_get', 'entry_get', 'representative_weight', 'history_list', 'receivables_list'].includes(name)) await this.labels.global.refresh();
       return this.labels.decorate(result, this.settings().network);
     })();

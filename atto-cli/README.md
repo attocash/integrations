@@ -450,6 +450,31 @@ atto limits status
 atto limits clear
 ```
 
+ATTO message signing is a separate profile-specific capability. It starts with no
+approved indexes. Grant only the wallet indexes that need unattended signatures
+from a local terminal; MCP signing also requires the usual `spend` access:
+
+```sh
+atto limits set --message-signing-indexes 0,1
+atto limits status
+atto limits set --message-signing-indexes none
+```
+
+`atto message sign --index 0 --text 'exact challenge'` signs the exact UTF-8
+bytes; use `--hex` for arbitrary bytes, including the empty byte sequence. The
+input is capped at 64 KiB, and no trimming or Unicode normalization is applied.
+Quote whitespace and line breaks as part of the argument when they are part of
+the challenge. Shell command substitution strips trailing newlines, so use
+`--hex` when a trailing newline or other exact byte sequence must be preserved.
+The result includes the selected index, address, public key, and 128-character
+hex signature.
+`atto message verify --address <address> --signature <hex> --text 'exact challenge'`
+checks a signature without reading wallet credentials. Use `--public-key <hex>`
+instead when only the public key is available. Message signatures use the
+Commons `ATTO Signed Message v1` framing. Approving an index permits generic
+authentication and controller-approval signatures for that key. Grant only
+keys approved for those purposes, and sign only challenges you trust.
+
 Amount flags default to ATTO; use `--unit RAW` for raw amounts. Omitted limits
 are preserved, and `--daily` replaces only the rolling 24-hour rule. Advanced
 `--input` replaces the entire policy and cannot be combined with amount flags.

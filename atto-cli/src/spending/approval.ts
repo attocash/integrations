@@ -4,7 +4,7 @@ import type { AccountPool, SpendingPolicy } from '../wallet/types.js';
 
 /** Public guidance only; approval remains a separate human terminal operation. */
 export function approvalInstructions(proposal: LimitsProposal,
-  current: { access: McpAccess; policy: SpendingPolicy; pool: AccountPool }) {
+  current: { access: McpAccess; policy: SpendingPolicy; pool: AccountPool; messageSigningIndexes: number[] }) {
   const shell = process.platform === 'win32' ? 'powershell' : 'posix';
   const quote = (argument: string) => /^[a-z\d_./:@=-]+$/i.test(argument) ? argument
     : `'${argument.replace(/'/g, shell === 'powershell' ? "''" : "'\\''")}'`;
@@ -17,6 +17,8 @@ export function approvalInstructions(proposal: LimitsProposal,
       ...(current.access !== proposal.access ? { access: { from: current.access, to: proposal.access } } : {}),
       ...(!isDeepStrictEqual(current.policy, proposal.policy) ? { policy: { from: current.policy, to: proposal.policy } } : {}),
       ...(!isDeepStrictEqual(current.pool, pool) ? { pool: { from: current.pool, to: pool } } : {}),
+      ...(!isDeepStrictEqual(current.messageSigningIndexes, proposal.messageSigningIndexes ?? [])
+        ? { messageSigningIndexes: { from: current.messageSigningIndexes, to: proposal.messageSigningIndexes ?? [] } } : {}),
     },
     shell,
     commands: {

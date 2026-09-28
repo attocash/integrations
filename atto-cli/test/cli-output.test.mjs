@@ -123,7 +123,7 @@ test('Human wallet status hides internal identifiers while retaining pending wor
     settings: { network: 'LIVE', autoReceive: true, minReceiveRaw: '1', representative: 'atto_representative', nodeUrl: 'https://node.example.test', workerUrl: 'https://worker.example.test' },
     autoReceive: { running: false, lastError: { message: 'Connection lost.' } }, mcpAccess: 'read-only',
     addresses: [{ index: 0, address: 'atto_public_wallet', publicKey: 'internal-public-key', active: true }],
-    pool: { indexes: [0], consolidate: false }, pendingSends: [{ requestId: 'pending-42', hash: 'b'.repeat(64), status: 'unknown' }],
+    pool: { indexes: [0], consolidate: false }, messageSigningIndexes: [], pendingSends: [{ requestId: 'pending-42', hash: 'b'.repeat(64), status: 'unknown' }],
   };
 
   // When requesting normal status instead of full structured state.

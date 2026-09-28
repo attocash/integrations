@@ -46,12 +46,14 @@ function showProposal(review: Awaited<ReturnType<AttoApplication['reviewLimitsPr
     `Requested limits: ${formatPolicy(proposal.policy)}`,
     `Current pool: indexes ${review.pool.indexes.join(', ')}; consolidation ${review.pool.consolidate ? 'enabled' : 'disabled'}`,
     `Requested pool: indexes ${(proposal.pool ?? review.pool).indexes.join(', ')}; consolidation ${(proposal.pool ?? review.pool).consolidate ? 'enabled' : 'disabled'}`,
+    `Current message-signing indexes: ${review.messageSigningIndexes.join(', ') || 'none'}`,
+    `Requested message-signing indexes: ${(proposal.messageSigningIndexes ?? []).join(', ') || 'none'}`,
     '',
   ].join('\n'));
 }
 
 async function approve(application: AttoApplication, id: string): Promise<unknown> {
-  process.stderr.write('\nReview this exact limits proposal. These spending limits are shared with CLI payments in this profile.\n');
+  process.stderr.write('\nReview this exact limits proposal. Spending limits are shared with CLI payments in this profile; message-signing indexes authorize exact-byte ATTO signatures for those keys.\n');
   showProposal(await application.reviewLimitsProposal(id));
   await confirm('Type yes to approve this exact proposal: ');
   return application.approveLimitsProposal(id);

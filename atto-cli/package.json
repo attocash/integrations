@@ -35,7 +35,9 @@
     "directory": "atto-cli"
   },
   "scripts": {
+    "prebuild": "node ../scripts/require-commons-message-verify.mjs",
     "build": "tsc -p tsconfig.json",
+    "precheck": "node ../scripts/require-commons-message-verify.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "test:keychain": "node --test test/keychain-platform.test.mjs",

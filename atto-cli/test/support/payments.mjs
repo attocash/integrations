@@ -74,6 +74,16 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
   }))));
   const state = { accounts, publications: [], publicationAttempts: [], receivables: new Map(), requests: [], works: [],
     failPublication: 0, hideHashLookup: false, holdPublications: undefined, error: undefined };
+  const observeCanonical = transaction => {
+    const block = transaction.block;
+    const prior = accounts.get(block.publicKey.toString());
+    assert.ok(prior, 'Canonical transactions must belong to an opened fixture account.');
+    const next = JSON.parse(prior.toJson());
+    Object.assign(next, { height: Number(block.height.toString()), balance: Number(block.balance.toString()),
+      lastTransactionHash: transaction.hash.toString(), lastTransactionTimestamp: Number(block.timestamp.toEpochMilliseconds()) });
+    saveAccount(AttoAccount.fromJson(JSON.stringify(next)));
+    state.publications.push(transaction);
+  };
   state.streams = new Set();
   const http = createServer((request, response) => {
     const handle = async () => {
@@ -207,6 +217,7 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
   await app.call('wallet_configure', { network: 'LOCAL', nodeUrl: url, workerUrl: url, representative: addresses[0].address, autoReceive: false });
   await approve();
   return { get app() { return app; }, directory, mnemonic: () => phrase, state, addresses, recipient, open, approve,
+    url, observeCanonical,
     request: (id, amount = '1', extra = {}) => ({ destination: recipient.address, amount, unit: 'RAW', requestId: id, ...extra }),
-    async reopen() { await app.close(); applications.delete(app); app = open(); return app; } };
+    async reopen(access) { await app.close(); applications.delete(app); app = open(access); return app; } };
 }

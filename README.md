@@ -123,7 +123,7 @@ MCP tools; other programs running as your OS user retain their normal access.
 | Package | Command | Guide |
 | --- | --- | --- |
 | [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | `atto` | [Wallet setup, payments, labels, and recovery](atto-cli/README.md) |
-| [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | `atto-mcp` | [Client setup, prompts, and all 36 tools](atto-mcp/README.md) |
+| [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | `atto-mcp` | [Client setup, prompts, and all 40 public tools](atto-mcp/README.md) |
 
 Use `atto --help` or `atto-mcp --help` to explore commands. For updates, rerun
 the npm installation command; npx with `@latest` selects the current published

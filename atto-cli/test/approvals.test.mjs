@@ -119,6 +119,25 @@ test('approval guidance reports access and policy changes independently, includi
   assert.deepEqual(f.local.ledger.policy(), unlimited);
 });
 
+test('message signing grants default empty and require the same local limits approval', async t => {
+  const f = await fixture(t);
+  const before = f.local.ledger.usage();
+  assert.deepEqual(before.messageSigningIndexes, []);
+  const request = await f.mcp.call('limits_propose', {
+    policy: unlimited, access: 'read-only', messageSigningIndexes: [0, 1],
+  });
+  assert.deepEqual(request.approval.changes, { messageSigningIndexes: { from: [], to: [0, 1] } });
+  assert.deepEqual(f.local.ledger.messageSigningIndexes(), []);
+  await f.local.approveLimitsProposal(request.proposal.id);
+  assert.deepEqual(f.local.ledger.usage().messageSigningIndexes, [0, 1]);
+  const clear = await f.mcp.call('limits_propose', {
+    policy: unlimited, access: 'read-only', messageSigningIndexes: [],
+  });
+  assert.deepEqual(clear.approval.changes, { messageSigningIndexes: { from: [0, 1], to: [] } });
+  await f.local.approveLimitsProposal(clear.proposal.id);
+  assert.deepEqual(f.local.ledger.messageSigningIndexes(), []);
+});
+
 test('all shared limit requests only propose and the latest proposal survives restart', async t => {
   // Given
   const f = await fixture(t);
