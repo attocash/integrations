@@ -224,7 +224,7 @@ function validActionKeys(action: Record<string, unknown>): boolean {
     const command = record(action.command);
     if (!onlyKeys(command, ['operation','idempotencyKey','targetApiKeyId','credential'])) return false;
     if (command.credential === undefined) return true;
-    return onlyKeys(record(command.credential), ['name','expiresInDays','scopes','publishAttoLimit','publishXnoLimit','applyAttoLimit']);
+    return onlyKeys(record(command.credential), ['name','expiresInDays','scopes','publishAttoLimit','publishXnoLimit','applyAttoLimit','applyXnoLimit']);
   }
   if (action.kind === 'payout-address') {
     return onlyKeys(action, ['kind','command','network','canonicalTargetAddress'])
@@ -295,9 +295,11 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
       const publishAttoLimit = atomicOrEmpty(credential.publishAttoLimit);
       const publishXnoLimit = atomicOrEmpty(credential.publishXnoLimit);
       const applyAttoLimit = atomicOrEmpty(credential.applyAttoLimit);
+      const applyXnoLimit = atomicOrEmpty(credential.applyXnoLimit);
       if ((scopes.includes('jobs:publish')) !== Boolean(publishAttoLimit || publishXnoLimit)
-        || (scopes.includes('applications:apply')) !== Boolean(applyAttoLimit)) throw protocolFailure();
-      payload = [name, String(expiresInDays), [...scopes].sort().join(','), publishAttoLimit, publishXnoLimit, applyAttoLimit].join('\n');
+        || (scopes.includes('applications:apply')) !== Boolean(applyAttoLimit || applyXnoLimit)) throw protocolFailure();
+      const legacyFields = [name, String(expiresInDays), [...scopes].sort().join(','), publishAttoLimit, publishXnoLimit, applyAttoLimit];
+      payload = (applyXnoLimit ? ['agent-credential-v2', ...legacyFields, applyXnoLimit] : legacyFields).join('\n');
     }
     return sha256(['agent-credential-v1', request.accountId, request.identityId, operation,
       target || '', key, payload].join('\n'));

@@ -64,7 +64,7 @@ export function formatMarketApprovalPreview(preview: ReturnType<AttoApplication[
       ...(typeof credential.name === 'string' ? [`Name: ${credential.name.trim()}`] : []),
       ...(Array.isArray(credential.scopes) ? [`Scopes: ${credential.scopes.join(', ')}`] : []),
       ...(typeof command.targetApiKeyId === 'string' ? [`Credential ID: ${command.targetApiKeyId}`] : []));
-    for (const [name, label] of [['publishAttoLimit','ATTO publish ceiling'],['publishXnoLimit','XNO publish ceiling'],['applyAttoLimit','ATTO application ceiling']] as const) {
+    for (const [name, label] of [['publishAttoLimit','ATTO publish ceiling'],['publishXnoLimit','XNO publish ceiling'],['applyAttoLimit','ATTO application ceiling'],['applyXnoLimit','XNO application ceiling']] as const) {
       if (typeof credential[name] === 'string') fields.push(`${label}: ${String(credential[name])} atomic units`);
     }
   } else if (action.kind === 'identity-link') {
