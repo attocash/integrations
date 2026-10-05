@@ -92,6 +92,14 @@ export class Payments {
   }
 
   async marketTopUp(request: MarketTopUpRequest): Promise<unknown> {
+    const previous = typeof request.requestId === 'string' ? this.ledger.get(request.requestId) : undefined;
+    if (previous && this.isLegacyCreditedMarketTopUp(previous)) {
+      const raw = amountRaw(request.amount, request.unit);
+      if (raw !== previous.raw || (request.index !== undefined && request.index !== previous.index)) {
+        throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to a different historical Market payment.');
+      }
+      return this.legacyMarketTopUpResult(previous);
+    }
     this.wallet.requireWrite();
     if (!this.topUps) throw new AttoError('MARKET_NOT_CONNECTED', 'Connect this wallet to Market from a local terminal before using top-ups.');
     if (typeof request.requestId !== 'string' || !request.requestId || request.requestId.length > 128
@@ -117,17 +125,18 @@ export class Payments {
     const offered = await this.topUps.challenge(connection, paymentIdentifier, raw);
     const challenge = offered.challenge;
     if (!challenge) return this.unreservedMarketStatus(request.requestId, paymentIdentifier, offered.status);
-    if (offered.status.state !== 'ISSUED') return this.unreservedMarketStatus(request.requestId, paymentIdentifier, offered.status);
+    if (offered.status.state !== 'PENDING') return this.unreservedMarketStatus(request.requestId, paymentIdentifier, offered.status);
     const record = await this.reserveMarketTopUp(request, raw, paymentIdentifier, network, connection, challenge);
     return this.store.withAccountLocks([record.index], async () =>
       this.runMarketTopUp(record, connection, paymentIdentifier, challenge.requirement));
   }
 
   async marketTopUpStatus(requestId: string): Promise<unknown> {
-    if (!this.topUps) throw new AttoError('MARKET_NOT_CONNECTED', 'Connect this wallet to Market from a local terminal before reading top-up status.');
     const record = this.ledger.get(requestId);
     if (!record) throw new AttoError('JOURNAL_NOT_FOUND', 'This payment request is not in the local journal.');
     if (record.external?.kind !== 'market-topup') throw new AttoError('REQUEST_CONFLICT', 'This request ID does not belong to a Market top-up.');
+    if (this.isLegacyCreditedMarketTopUp(record)) return this.legacyMarketTopUpResult(record);
+    if (!this.topUps) throw new AttoError('MARKET_NOT_CONNECTED', 'Connect this wallet to Market from a local terminal before reading top-up status.');
     const connection = this.topUps.connection();
     this.checkMarketOwner(record, connection);
     return this.store.withAccountLocks([record.index], async () => {
@@ -229,6 +238,7 @@ export class Payments {
   }
 
   private async resumeMarketTopUp(record: SendRecord, connection: MarketConnection, paymentIdentifier: string): Promise<unknown> {
+    if (this.isLegacyCreditedMarketTopUp(record)) return this.legacyMarketTopUpResult(record);
     const network = this.topUpNetwork(this.wallet.settings());
     this.checkMarketTopUpRequest(record, { requestId: record.id, amount: record.raw, unit: 'RAW' }, record.raw, network, paymentIdentifier);
     this.checkMarketOwner(record, connection);
@@ -266,7 +276,7 @@ export class Payments {
     await this.reconcileMarketSend(this.ledger.get(record.id)!);
     let current = this.ledger.get(record.id)!;
     if (current.status === 'failed' || current.external!.nativeState === 'rejected'
-      || current.external!.paymentState === 'CONFIRMED' || current.external!.marketState === 'CREDITED') {
+      || this.marketFundingUsable(current.external!.marketState, current.external!.paymentState)) {
       return this.marketTopUpResult(current);
     }
     if (current.status === 'published' && !this.hasUnconfirmedMarketPayment(current)) return this.marketTopUpResult(current);
@@ -293,7 +303,7 @@ export class Payments {
       }));
       await this.saveMarketStatus(current.id, updated);
     } else {
-      if (current.external!.marketState === 'EXPIRED') return this.marketTopUpResult(current);
+      if (current.external!.marketState === 'REJECTED') return this.marketTopUpResult(current);
       if (!requirement) throw new AttoError('INVALID_STATE', 'The original Market challenge is unavailable; no replacement payment will be signed.');
       current = await this.prepareAndSubmitMarketTopUp(current, connection, paymentIdentifier, requirement);
     }
@@ -367,7 +377,7 @@ export class Payments {
       record.raw, record.external.network, expected);
     await this.saveMarketStatus(requestId, status);
     const current = this.ledger.get(requestId)!;
-    if (!current.hash && current.status === 'reserved' && status.state === 'EXPIRED') {
+    if (!current.hash && current.status === 'reserved' && status.state === 'REJECTED') {
       await this.store.withWalletLock(async () => this.ledger.fail(requestId));
     }
   }
@@ -417,17 +427,24 @@ export class Payments {
   }
 
   private hasUnconfirmedMarketPayment(record: SendRecord): boolean {
-    return record.external !== undefined && record.external.paymentState !== 'CONFIRMED'
-      && record.external.marketState !== 'CREDITED';
+    return record.external !== undefined && !this.marketFundingUsable(record.external.marketState, record.external.paymentState);
+  }
+
+  private marketFundingUsable(marketState: string, paymentState: string | null): boolean {
+    return ['PROCESSED', 'SETTLED'].includes(marketState) || ['PROCESSED', 'SETTLED'].includes(paymentState ?? '');
   }
 
   private marketStatusProjection(record: SendRecord): MarketTopUpStatus {
     const external = record.external;
     if (!external) throw new AttoError('INVALID_STATE', 'The payment is not a Market top-up.');
+    const marketState = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED']
+      .includes(external.marketState) ? external.marketState as MarketTopUpStatus['state'] : 'PENDING';
+    const paymentState = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED']
+      .includes(external.paymentState ?? '') ? external.paymentState as MarketTopUpStatus['paymentState'] : null;
     return { intentId: external.intentId, asset: 'ATTO', network: external.network, amountAtomic: record.raw,
-      state: external.marketState, expiresAt: external.intentExpiresAt, sendHash: record.hash ?? null,
-      payer: record.sourceAddress ?? null, paymentState: external.paymentState,
-      receivePending: external.receivePending ?? null, discrepancy: null };
+      state: marketState, expiresAt: external.intentExpiresAt, sendHash: record.hash ?? null,
+      payer: record.sourceAddress ?? null, paymentState,
+      receivePending: external.receivePending ?? null, discrepancy: null, receiveStatus: null };
   }
 
   private marketTopUpResult(record: SendRecord): Record<string, unknown> {
@@ -438,6 +455,15 @@ export class Payments {
       intentId: external.intentId, network: external.network, amount: amountOutput(record.raw), index: record.index,
       sourceAddress: record.sourceAddress ?? null, destination: record.destination, hash: record.hash ?? null,
       sendHash: record.hash ?? null, payer: record.sourceAddress ?? null, expiresAt: external.intentExpiresAt };
+  }
+
+  private isLegacyCreditedMarketTopUp(record: SendRecord): boolean {
+    return record.external?.kind === 'market-topup' && record.external.marketState === 'CREDITED';
+  }
+
+  private legacyMarketTopUpResult(record: SendRecord): Record<string, unknown> {
+    return { ...this.marketTopUpResult(record), historicalOnly: true, currentMarketBalance: 'unverified',
+      message: 'This wallet journal records a historical Market credit. It was not replayed and does not establish a balance in the current Market database.' };
   }
 
   private unreservedMarketStatus(requestId: string, paymentIdentifier: string, status: MarketTopUpStatus): Record<string, unknown> {

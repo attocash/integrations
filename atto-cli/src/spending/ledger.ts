@@ -40,8 +40,8 @@ export interface ExternalPaymentRecord {
   resourceUrl: string;
   requirementHash: string;
   intentExpiresAt: string;
-  marketState: 'ISSUED' | 'PENDING' | 'CREDITED' | 'EXPIRED';
-  paymentState: 'PREPARED' | 'ATTEMPTED' | 'UNKNOWN' | 'CONFIRMED' | 'FAILED' | null;
+  marketState: 'ISSUED' | 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CREDITED' | 'EXPIRED';
+  paymentState: 'PREPARED' | 'ATTEMPTED' | 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CONFIRMED' | 'FAILED' | null;
   nativeState: 'challenged' | 'unknown' | 'confirmed' | 'rejected';
   attemptedAt?: number;
   receivePending?: boolean | null;
@@ -638,8 +638,8 @@ export class SpendLedger {
       || typeof external.resourceUrl !== 'string' || external.resourceUrl.length > 2048
       || !/^[a-f0-9]{64}$/.test(external.requirementHash)
       || typeof external.intentExpiresAt !== 'string' || !Number.isFinite(Date.parse(external.intentExpiresAt))
-      || !['ISSUED', 'PENDING', 'CREDITED', 'EXPIRED'].includes(external.marketState)
-      || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'UNKNOWN', 'CONFIRMED', 'FAILED'].includes(external.paymentState))
+      || !['ISSUED', 'PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CREDITED', 'EXPIRED'].includes(external.marketState)
+      || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CONFIRMED', 'FAILED'].includes(external.paymentState))
       || !['challenged', 'unknown', 'confirmed', 'rejected'].includes(external.nativeState)
       || (external.attemptedAt !== undefined && (!Number.isSafeInteger(external.attemptedAt) || external.attemptedAt < 0))
       || (external.receivePending !== undefined && external.receivePending !== null && typeof external.receivePending !== 'boolean')) {

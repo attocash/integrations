@@ -10,8 +10,8 @@ const intentId = '00000000-0000-4000-8000-000000000079';
 
 function marketStatus(amountRaw, changes = {}) {
   return { intentId, asset: 'ATTO', network: 'atto:local', amountAtomic: amountRaw,
-    state: 'ISSUED', expiresAt: new Date(Date.now() + 300_000).toISOString(),
-    sendHash: null, payer: null, paymentState: 'PREPARED', receivePending: null, discrepancy: null,
+    state: 'PENDING', expiresAt: new Date(Date.now() + 300_000).toISOString(),
+    sendHash: null, payer: null, paymentState: null, receivePending: null, discrepancy: null, receiveStatus: null,
     ...changes };
 }
 
@@ -107,6 +107,76 @@ test('x402 exact bytes survive an unknown outcome and restart; ordinary sends st
   await assert.rejects(f.app.call('send', f.request('ordinary-blocked-after-restart', '1')), { code: 'POOL_BUSY' });
 });
 
+test('PROCESSED and SETTLED top-up states are usable and never trigger a second SEND', { timeout: 30_000 }, async t => {
+  const f = await fixture(t, [10]);
+  const request = { amount: '2', unit: 'RAW', requestId: 'market-processed-settled-once' };
+  let submissions = 0;
+  let status = marketStatus('2');
+  let updateStatus;
+  f.app.payments.topUps = mockTopUps(f.app, '2', async context => {
+    submissions++;
+    await context.beforeSubmit();
+    updateStatus = context.setStatus;
+    const record = context.app.ledger.get(request.requestId);
+    status = marketStatus('2', { state: 'PROCESSED', paymentState: 'PROCESSED',
+      sendHash: record.hash, payer: record.sourceAddress, receivePending: true });
+    updateStatus(status);
+  });
+
+  const processed = await f.app.call('market_topup', request);
+  assert.equal(processed.marketState, 'PROCESSED');
+  assert.equal(processed.paymentState, 'PROCESSED');
+  assert.equal(submissions, 1);
+
+  status = { ...status, state: 'SETTLED', paymentState: 'SETTLED', receivePending: false, receiveStatus: 'SETTLED' };
+  updateStatus(status);
+  const settled = await f.app.call('market_topup_status', { requestId: request.requestId });
+  assert.equal(settled.marketState, 'SETTLED');
+  assert.equal(settled.paymentState, 'SETTLED');
+  const replay = await f.app.call('market_topup', request);
+  assert.equal(replay.marketState, 'SETTLED');
+  assert.equal(submissions, 1, 'usable status must not submit another payment');
+  assert.equal(f.app.ledger.get(request.requestId).hash, processed.hash);
+});
+
+test('a legacy CREDITED wallet journal remains readable without replaying its old SEND against a reset Market', { timeout: 30_000 }, async t => {
+  const f = await fixture(t, [10]);
+  const request = { amount: '2', unit: 'RAW', requestId: 'market-legacy-credited' };
+  let continuationAttempts = 0;
+  f.app.payments.topUps = mockTopUps(f.app, '2', async context => {
+    continuationAttempts++;
+    await context.beforeSubmit();
+    throw new AttoError('MARKET_UNAVAILABLE', 'Synthetic lost acknowledgement.');
+  });
+  await assert.rejects(f.app.call('market_topup', request), { code: 'MARKET_UNAVAILABLE' });
+
+  const original = f.app.ledger.get(request.requestId);
+  const originalSecrets = f.app.ledger.externalSecretsFor(request.requestId);
+  assert.ok(original.hash);
+  f.app.ledger.externalStatus(request.requestId, { marketState: 'CREDITED', paymentState: 'CONFIRMED' });
+  await f.reopen();
+
+  // The preserved profile can be disconnected from the freshly reset Market database.
+  f.app.payments.topUps = undefined;
+  const status = await f.app.call('market_topup_status', { requestId: request.requestId });
+  const replay = await f.app.call('market_topup', request);
+
+  assert.equal(status.marketState, 'CREDITED');
+  assert.equal(status.historicalOnly, true);
+  assert.equal(status.currentMarketBalance, 'unverified');
+  assert.match(status.message, /does not establish a balance in the current Market database/);
+  assert.equal(replay.marketState, 'CREDITED');
+  assert.equal(replay.historicalOnly, true);
+  assert.equal(continuationAttempts, 1, 'the old continuation must never be submitted again');
+  assert.equal(f.app.ledger.get(request.requestId).hash, original.hash);
+  assert.deepEqual({ hash: f.app.ledger.get(request.requestId).hash,
+    transactionJson: f.app.ledger.externalSecretsFor(request.requestId).transactionJson,
+    paymentSignature: f.app.ledger.externalSecretsFor(request.requestId).paymentSignature },
+  { hash: original.hash, transactionJson: originalSecrets.transactionJson,
+    paymentSignature: originalSecrets.paymentSignature });
+  assert.equal(f.state.publicationAttempts.length, 0, 'the recorded signed SEND must not be published again');
+});
+
 test('a malformed terminal recovery response leaves the signed payment and allowance reserved', { timeout: 30_000 }, async t => {
   const f = await fixture(t, [10]);
   const request = { amount: '2', unit: 'RAW', requestId: 'market-unbound-terminal' };
@@ -126,7 +196,7 @@ test('a malformed terminal recovery response leaves the signed payment and allow
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     if (new URL(input).pathname === `/v1/agent/topups/${intentId}`) {
-      return new Response(JSON.stringify(marketStatus('2', { state: 'CREDITED', paymentState: 'CONFIRMED',
+      return new Response(JSON.stringify(marketStatus('2', { state: 'PROCESSED', paymentState: 'PROCESSED',
         sendHash: null, payer: null })), { status: 200 });
     }
     return originalFetch(input, init);

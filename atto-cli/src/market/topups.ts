@@ -31,13 +31,14 @@ export interface MarketTopUpStatus {
   asset: string;
   network: string;
   amountAtomic: string;
-  state: 'ISSUED' | 'PENDING' | 'CREDITED' | 'EXPIRED';
+  state: 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED';
   expiresAt: string;
   sendHash: string | null;
   payer: string | null;
-  paymentState: 'PREPARED' | 'ATTEMPTED' | 'UNKNOWN' | 'CONFIRMED' | 'FAILED' | null;
+  paymentState: 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | null;
   receivePending: boolean | null;
   discrepancy: string | null;
+  receiveStatus: string | null;
 }
 
 export interface TopUpChallenge {
@@ -253,7 +254,12 @@ export class MarketTopUpClient {
     const paymentResponse = response.headers.get('payment-response');
     if (!paymentResponse) throw new AttoError('MARKET_PROTOCOL', 'Market omitted the payment receipt.');
     const receipt = this.decodeObject(paymentResponse);
-    if (typeof receipt.success !== 'boolean' || typeof receipt.transaction !== 'string'
+    const paymentApplied = updated.state === 'PROCESSED' || updated.state === 'SETTLED';
+    const pending = ['PENDING', 'PUBLISHING', 'UNKNOWN'].includes(updated.state);
+    const rejected = updated.state === 'REJECTED';
+    const responseMatchesState = (response.status === 200 && paymentApplied)
+      || (response.status === 202 && pending) || (response.status === 409 && rejected);
+    if (!responseMatchesState || receipt.success !== paymentApplied || typeof receipt.transaction !== 'string'
       || receipt.transaction.toUpperCase() !== expected.hash.toUpperCase()
       || receipt.network !== expected.network || receipt.payer !== expected.payer
       || updated.sendHash?.toUpperCase() !== receipt.transaction.toUpperCase() || updated.payer !== receipt.payer
@@ -395,7 +401,7 @@ export class MarketTopUpClient {
 
   private assertStatusBinding(status: MarketTopUpStatus, paymentIdentifier: string, amountRaw: string, network: string,
     expected?: ExpectedMarketPayment): void {
-    const terminal = status.state === 'CREDITED' || status.paymentState === 'CONFIRMED';
+    const terminal = status.state === 'PROCESSED' || status.state === 'SETTLED';
     if (status.asset !== 'ATTO' || status.network !== network || status.amountAtomic !== amountRaw
       || !uuid(status.intentId) || !/^[1-9]\d*$/.test(status.amountAtomic)
       || !paymentIdentifier || instant(status.expiresAt) < 0
@@ -406,7 +412,10 @@ export class MarketTopUpClient {
       || (expected && !expected.hash && (status.sendHash !== null || status.payer !== null))
       || (expected && terminal && (!expected.hash || !expected.payer
         || status.sendHash?.toUpperCase() !== expected.hash.toUpperCase() || status.payer !== expected.payer))
+      || (expected && status.paymentState !== null && (!expected.hash || !expected.payer
+        || status.sendHash?.toUpperCase() !== expected.hash.toUpperCase() || status.payer !== expected.payer))
       || (expected?.requirePayment && (!expected.hash || !expected.payer
+        || status.paymentState === null
         || status.sendHash?.toUpperCase() !== expected.hash.toUpperCase() || status.payer !== expected.payer))) {
       throw new AttoError('MARKET_PROTOCOL', 'Market returned a top-up status for a different payment.');
     }
@@ -444,8 +453,8 @@ async function readBounded(response: Response, maxBytes: number): Promise<string
 
 function parseTopUpStatus(input: unknown): MarketTopUpStatus {
   const value = object(input);
-  const states = ['ISSUED', 'PENDING', 'CREDITED', 'EXPIRED'];
-  const paymentStates = ['PREPARED', 'ATTEMPTED', 'UNKNOWN', 'CONFIRMED', 'FAILED'];
+  const states = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED'];
+  const paymentStates = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED'];
   if (!value || !uuid(value.intentId) || typeof value.asset !== 'string' || typeof value.network !== 'string'
     || typeof value.amountAtomic !== 'string' || !states.includes(String(value.state))
     || typeof value.expiresAt !== 'string'
@@ -453,7 +462,8 @@ function parseTopUpStatus(input: unknown): MarketTopUpStatus {
     || (value.payer !== null && typeof value.payer !== 'string')
     || (value.paymentState !== null && !paymentStates.includes(String(value.paymentState)))
     || (value.receivePending !== null && typeof value.receivePending !== 'boolean')
-    || (value.discrepancy !== null && typeof value.discrepancy !== 'string')) {
+    || (value.discrepancy !== null && typeof value.discrepancy !== 'string')
+    || (value.receiveStatus !== null && typeof value.receiveStatus !== 'string')) {
     throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid top-up status.');
   }
   instant(value.expiresAt);

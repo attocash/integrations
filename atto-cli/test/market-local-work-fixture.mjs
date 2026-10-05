@@ -25,7 +25,7 @@ export async function startLocalAttoWorkServer(port = 0) {
       const block = {
         network: AttoNetwork.LOCAL,
         timestamp: AttoInstant.Companion.fromEpochMilliseconds(BigInt(body.timestamp)),
-        y2h: () => ({ s2q_1: new Int8Array(Buffer.from(body.target, 'hex')) }),
+        getTarget_dhambr_k$: () => ({ value_1: new Int8Array(Buffer.from(body.target, 'hex')) }),
       };
       for (let nonce = 0; nonce < 1_000_000; nonce++) {
         const bytes = new Uint8Array(8);

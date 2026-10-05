@@ -29,8 +29,8 @@ test('typed withdrawal approval validates controller, audience, action binding, 
   const issuedAt = new Date(Date.now()-1000).toISOString();
   const expiresAt = new Date(Date.now()+120_000).toISOString();
   const action = { kind:'withdrawal', network:'xno:live', destinationAddress:'nano_1111111111111111111111111111111111111111111111111111hifc8npp',
-    command:{asset:'XNO',atomicAmount:'25',destinationId,expectedSelectionVersion:2,idempotencyKey:requestId} };
-  const bindingHash = createHash('sha256').update(['withdrawal-create-v1',accountId,identityId,'XNO','25','xno:live',destinationId,
+    command:{asset:'XNO',atomicAmount:'25',destinationId,expectedSelectionVersion:2,idempotencyKey:requestId,network:'xno:live'} };
+  const bindingHash = createHash('sha256').update(['withdrawal-create-v2',accountId,identityId,'XNO','25','xno:live',destinationId,
     action.destinationAddress,'2',requestId].join('\n')).digest('hex');
   const message = `Atto Market Agent Controller Proof v1\nAudience: market-agent\nNetwork: live\nAddress: ${signer.address.value}\nPurpose: withdrawal creation\nRequest ID: ${challengeId}\nBinding Hash: ${bindingHash}\nNonce: ${'ab'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
   const request = {version:1,type:'atto-market-controller-approval-request',profileId:'agent',handoffId:'a'.repeat(32),
@@ -57,10 +57,17 @@ test('typed withdrawal approval validates controller, audience, action binding, 
   const expected = await signer.signMessage(new Int8Array(Buffer.from(message,'utf8')));
   assert.equal(response.signature,expected.toString());
 
+  // A v1 challenge is not accepted as a fallback for the new immediate-debit withdrawal binding.
+  const v1BindingHash = createHash('sha256').update(['withdrawal-create-v1',accountId,identityId,'XNO','25','xno:live',destinationId,
+    action.destinationAddress,'2',requestId].join('\n')).digest('hex');
+  assert.throws(()=>client.inspectProofApproval({...request,challenge:{...request.challenge,
+    message:message.replace(bindingHash,v1BindingHash)}}), {code:'MARKET_APPROVAL_PROTOCOL'});
+
   // Any changed destination, amount, request ID, account, or authority audience fails before signing.
   assert.throws(()=>client.inspectProofApproval({...request,action:{...action,command:{...action.command,atomicAmount:'26'}}}), {code:'MARKET_APPROVAL_PROTOCOL'});
   assert.throws(()=>client.inspectProofApproval({...request,action:{...action,destinationAddress:'nano_3differentdestination'}}), {code:'MARKET_APPROVAL_PROTOCOL'});
   assert.throws(()=>client.inspectProofApproval({...request,action:{...action,command:{...action.command,idempotencyKey:'00000000-0000-4000-8000-000000000205'}}}), {code:'MARKET_APPROVAL_PROTOCOL'});
+  assert.throws(()=>client.inspectProofApproval({...request,action:{...action,command:{...action.command,network:'xno:test'}}}), {code:'MARKET_APPROVAL_PROTOCOL'});
   assert.throws(()=>client.inspectProofApproval({...request,accountId:'00000000-0000-4000-8000-000000000206'}), {code:'MARKET_APPROVAL_MISMATCH'});
   assert.throws(()=>client.inspectProofApproval({...request,audience:'other-audience'}), {code:'MARKET_APPROVAL_MISMATCH'});
 });
@@ -84,7 +91,8 @@ test('typed payout enrollment, selection, and disablement sign producer-shaped n
   for (const [index,actionName] of ['ENROLL','SELECT','DISABLE'].entries()) {
     const requestId=`00000000-0000-4000-8000-00000000026${index+1}`;
     const challengeId=`00000000-0000-4000-8000-00000000027${index+1}`;
-    const command={action:actionName,asset:'ATTO',idempotencyKey:requestId,
+    // Mirrors the current MCP producer: network is present in both the signed outer action and API command.
+    const command={action:actionName,asset:'ATTO',idempotencyKey:requestId,network:'atto:dev',
       ...(actionName==='ENROLL'?{address:target}:{destinationId,expectedSelectionVersion:index})};
     const action={kind:'payout-address',command,network:'atto:dev',canonicalTargetAddress:target};
     const binding= createHash('sha256').update(['payout-address-v1',accountId,identityId,actionName,'ATTO',
@@ -104,6 +112,8 @@ test('typed payout enrollment, selection, and disablement sign producer-shaped n
     assert.equal(response.requestDigest,approvalRequestDigest(request));
     assert.equal(response.signature,(await signer.signMessage(new Int8Array(Buffer.from(message,'utf8')))).toString());
     assert.throws(()=>client.inspectProofApproval({...request,action:{...action,command:{...command,action:actionName==='DISABLE'?'SELECT':'DISABLE'}}}),
+      {code:'MARKET_APPROVAL_PROTOCOL'});
+    assert.throws(()=>client.inspectProofApproval({...request,action:{...action,command:{...command,network:'atto:live'}}}),
       {code:'MARKET_APPROVAL_PROTOCOL'});
   }
 });

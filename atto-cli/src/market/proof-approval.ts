@@ -228,11 +228,11 @@ function validActionKeys(action: Record<string, unknown>): boolean {
   }
   if (action.kind === 'payout-address') {
     return onlyKeys(action, ['kind','command','network','canonicalTargetAddress'])
-      && onlyKeys(record(action.command), ['action','asset','idempotencyKey','address','destinationId','expectedSelectionVersion']);
+      && onlyKeys(record(action.command), ['action','asset','idempotencyKey','address','destinationId','expectedSelectionVersion','network']);
   }
   if (action.kind === 'withdrawal') {
     return onlyKeys(action, ['kind','command','network','destinationAddress'])
-      && onlyKeys(record(action.command), ['asset','atomicAmount','destinationId','expectedSelectionVersion','idempotencyKey']);
+      && onlyKeys(record(action.command), ['asset','atomicAmount','destinationId','expectedSelectionVersion','idempotencyKey','network']);
   }
   if (action.kind === 'adminModeration') return onlyKeys(action,
     ['kind','targetKind','action','targetId','expectedTargetVersion','expectedModerationVersion','reason','idempotencyKey']);
@@ -315,6 +315,7 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
     const address = action.canonicalTargetAddress;
     if (!['ENROLL','SELECT','DISABLE'].includes(actionName) || !['ATTO','XNO'].includes(asset) || !key
       || destinationId === false || typeof network !== 'string' || typeof address !== 'string' || !address
+      || (command.network !== undefined && command.network !== network)
       || !(version === undefined || (typeof version === 'number' && Number.isSafeInteger(version) && version >= 0))
       || (actionName === 'ENROLL') !== (typeof command.address === 'string')
       || (actionName === 'ENROLL') !== (destinationId === '')) throw protocolFailure();
@@ -332,8 +333,9 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
     const address = action.destinationAddress;
     if (!['ATTO','XNO'].includes(asset) || typeof amount !== 'string' || !/^[1-9][0-9]{0,64}$/.test(amount)
       || !destinationId || !key || typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0
-      || typeof network !== 'string' || typeof address !== 'string' || !address) throw protocolFailure();
-    return sha256(['withdrawal-create-v1', request.accountId, request.identityId, asset, amount,
+      || typeof network !== 'string' || typeof address !== 'string' || !address
+      || (command.network !== undefined && command.network !== network)) throw protocolFailure();
+    return sha256(['withdrawal-create-v2', request.accountId, request.identityId, asset, amount,
       network, destinationId, address, String(version), key].join('\n'));
   }
   if (action.kind === 'adminModeration') {
