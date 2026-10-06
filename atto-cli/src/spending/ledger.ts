@@ -40,11 +40,12 @@ export interface ExternalPaymentRecord {
   resourceUrl: string;
   requirementHash: string;
   intentExpiresAt: string;
-  marketState: 'ISSUED' | 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CREDITED' | 'EXPIRED';
-  paymentState: 'PREPARED' | 'ATTEMPTED' | 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CONFIRMED' | 'FAILED' | null;
+  marketState: 'ISSUED' | 'PENDING' | 'ACCEPTED' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CREDITED' | 'EXPIRED';
+  paymentState: 'PREPARED' | 'ATTEMPTED' | 'PENDING' | 'ACCEPTED' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CONFIRMED' | 'FAILED' | null;
   nativeState: 'challenged' | 'unknown' | 'confirmed' | 'rejected';
   attemptedAt?: number;
   receivePending?: boolean | null;
+  receiveStatus?: 'PENDING' | 'ACCEPTED' | 'SETTLED' | 'REJECTED' | null;
 }
 
 export interface ExternalPaymentSecrets {
@@ -403,7 +404,7 @@ export class SpendLedger {
     return this.externalSecrets()[id];
   }
 
-  externalStatus(id: string, update: Partial<Pick<ExternalPaymentRecord, 'marketState' | 'paymentState' | 'receivePending'>>): void {
+  externalStatus(id: string, update: Partial<Pick<ExternalPaymentRecord, 'marketState' | 'paymentState' | 'receivePending' | 'receiveStatus'>>): void {
     this.update(id, record => {
       if (!record.external) throw new AttoError('SEND_STATE', 'This request is not a Market top-up.');
       const external = { ...record.external, ...update };
@@ -638,11 +639,13 @@ export class SpendLedger {
       || typeof external.resourceUrl !== 'string' || external.resourceUrl.length > 2048
       || !/^[a-f0-9]{64}$/.test(external.requirementHash)
       || typeof external.intentExpiresAt !== 'string' || !Number.isFinite(Date.parse(external.intentExpiresAt))
-      || !['ISSUED', 'PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CREDITED', 'EXPIRED'].includes(external.marketState)
-      || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CONFIRMED', 'FAILED'].includes(external.paymentState))
+      || !['ISSUED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CREDITED', 'EXPIRED'].includes(external.marketState)
+      || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CONFIRMED', 'FAILED'].includes(external.paymentState))
       || !['challenged', 'unknown', 'confirmed', 'rejected'].includes(external.nativeState)
       || (external.attemptedAt !== undefined && (!Number.isSafeInteger(external.attemptedAt) || external.attemptedAt < 0))
-      || (external.receivePending !== undefined && external.receivePending !== null && typeof external.receivePending !== 'boolean')) {
+      || (external.receivePending !== undefined && external.receivePending !== null && typeof external.receivePending !== 'boolean')
+      || (external.receiveStatus !== undefined && external.receiveStatus !== null
+        && !['PENDING', 'ACCEPTED', 'SETTLED', 'REJECTED'].includes(external.receiveStatus))) {
       throw new Error('Invalid external payment record.');
     }
     if (external.nativeState === 'challenged' && external.attemptedAt !== undefined) throw new Error('Invalid external attempt state.');

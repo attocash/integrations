@@ -65,7 +65,7 @@ test('x402 exact bytes survive an unknown outcome and restart; ordinary sends st
       assert.ok(record.hash, 'The native hash must be durable before the continuation request.');
       assert.equal(secrets.paymentSignature, context.header);
       submitted.push({ hash: record.hash, header: context.header, transaction: secrets.transactionJson });
-      context.setStatus(marketStatus('2', { state: 'PENDING', paymentState: 'UNKNOWN', sendHash: record.hash }));
+      context.setStatus(marketStatus('2', { state: 'PENDING', paymentState: 'PENDING', sendHash: record.hash }));
       throw new AttoError('MARKET_UNAVAILABLE', 'Synthetic lost acknowledgement.');
     });
   };
@@ -107,7 +107,7 @@ test('x402 exact bytes survive an unknown outcome and restart; ordinary sends st
   await assert.rejects(f.app.call('send', f.request('ordinary-blocked-after-restart', '1')), { code: 'POOL_BUSY' });
 });
 
-test('PROCESSED and SETTLED top-up states are usable and never trigger a second SEND', { timeout: 30_000 }, async t => {
+test('ACCEPTED and SETTLED top-up states are usable and never trigger a second SEND', { timeout: 30_000 }, async t => {
   const f = await fixture(t, [10]);
   const request = { amount: '2', unit: 'RAW', requestId: 'market-processed-settled-once' };
   let submissions = 0;
@@ -118,14 +118,14 @@ test('PROCESSED and SETTLED top-up states are usable and never trigger a second 
     await context.beforeSubmit();
     updateStatus = context.setStatus;
     const record = context.app.ledger.get(request.requestId);
-    status = marketStatus('2', { state: 'PROCESSED', paymentState: 'PROCESSED',
+    status = marketStatus('2', { state: 'ACCEPTED', paymentState: 'ACCEPTED',
       sendHash: record.hash, payer: record.sourceAddress, receivePending: true });
     updateStatus(status);
   });
 
   const processed = await f.app.call('market_topup', request);
-  assert.equal(processed.marketState, 'PROCESSED');
-  assert.equal(processed.paymentState, 'PROCESSED');
+  assert.equal(processed.marketState, 'ACCEPTED');
+  assert.equal(processed.paymentState, 'ACCEPTED');
   assert.equal(submissions, 1);
 
   status = { ...status, state: 'SETTLED', paymentState: 'SETTLED', receivePending: false, receiveStatus: 'SETTLED' };
@@ -161,11 +161,11 @@ test('a legacy CREDITED wallet journal remains readable without replaying its ol
   const status = await f.app.call('market_topup_status', { requestId: request.requestId });
   const replay = await f.app.call('market_topup', request);
 
-  assert.equal(status.marketState, 'CREDITED');
+  assert.equal(status.marketState, 'PENDING');
   assert.equal(status.historicalOnly, true);
   assert.equal(status.currentMarketBalance, 'unverified');
   assert.match(status.message, /does not establish a balance in the current Market database/);
-  assert.equal(replay.marketState, 'CREDITED');
+  assert.equal(replay.marketState, 'PENDING');
   assert.equal(replay.historicalOnly, true);
   assert.equal(continuationAttempts, 1, 'the old continuation must never be submitted again');
   assert.equal(f.app.ledger.get(request.requestId).hash, original.hash);
@@ -196,7 +196,7 @@ test('a malformed terminal recovery response leaves the signed payment and allow
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     if (new URL(input).pathname === `/v1/agent/topups/${intentId}`) {
-      return new Response(JSON.stringify(marketStatus('2', { state: 'PROCESSED', paymentState: 'PROCESSED',
+      return new Response(JSON.stringify(marketStatus('2', { state: 'ACCEPTED', paymentState: 'ACCEPTED',
         sendHash: null, payer: null })), { status: 200 });
     }
     return originalFetch(input, init);
@@ -322,7 +322,7 @@ test('an explicit Market replay rechecks pool membership and keeps the original 
       const secrets = f.app.ledger.externalSecretsFor(request.requestId);
       initial.push({ hash: record.hash, transactionJson: secrets.transactionJson,
         paymentSignature: secrets.paymentSignature });
-      context.setStatus(marketStatus('2', { state: 'PENDING', paymentState: 'UNKNOWN',
+      context.setStatus(marketStatus('2', { state: 'PENDING', paymentState: 'PENDING',
         sendHash: record.hash, payer: record.sourceAddress }));
       continuationSubmitted++;
       throw new AttoError('MARKET_UNAVAILABLE', 'Synthetic lost acknowledgement.');

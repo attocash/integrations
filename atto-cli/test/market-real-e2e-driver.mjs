@@ -100,7 +100,7 @@ try {
       assert.equal(pending.marketState, 'PENDING');
       const result = await app.call('market_topup', request);
       assert.ok(observed, 'The exact payment was not replayed.');
-      assert.ok(['PROCESSED', 'SETTLED'].includes(result.marketState),
+      assert.ok(['ACCEPTED', 'SETTLED'].includes(result.marketState),
         'confirmed funding remains successful after the linked RECEIVE settles');
       assert.equal(result.hash, before.hash);
       assert.equal(observed.headerDigest, digest(privateData.paymentSignature));

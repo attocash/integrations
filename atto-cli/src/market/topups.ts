@@ -31,14 +31,14 @@ export interface MarketTopUpStatus {
   asset: string;
   network: string;
   amountAtomic: string;
-  state: 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED';
+  state: 'PENDING' | 'ACCEPTED' | 'SETTLED' | 'REJECTED';
   expiresAt: string;
   sendHash: string | null;
   payer: string | null;
-  paymentState: 'PENDING' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | null;
+  paymentState: 'PENDING' | 'ACCEPTED' | 'SETTLED' | 'REJECTED' | null;
   receivePending: boolean | null;
   discrepancy: string | null;
-  receiveStatus: string | null;
+  receiveStatus: 'PENDING' | 'ACCEPTED' | 'SETTLED' | 'REJECTED' | null;
 }
 
 export interface TopUpChallenge {
@@ -254,8 +254,8 @@ export class MarketTopUpClient {
     const paymentResponse = response.headers.get('payment-response');
     if (!paymentResponse) throw new AttoError('MARKET_PROTOCOL', 'Market omitted the payment receipt.');
     const receipt = this.decodeObject(paymentResponse);
-    const paymentApplied = updated.state === 'PROCESSED' || updated.state === 'SETTLED';
-    const pending = ['PENDING', 'PUBLISHING', 'UNKNOWN'].includes(updated.state);
+    const paymentApplied = updated.state === 'ACCEPTED' || updated.state === 'SETTLED';
+    const pending = updated.state === 'PENDING';
     const rejected = updated.state === 'REJECTED';
     const responseMatchesState = (response.status === 200 && paymentApplied)
       || (response.status === 202 && pending) || (response.status === 409 && rejected);
@@ -401,7 +401,7 @@ export class MarketTopUpClient {
 
   private assertStatusBinding(status: MarketTopUpStatus, paymentIdentifier: string, amountRaw: string, network: string,
     expected?: ExpectedMarketPayment): void {
-    const terminal = status.state === 'PROCESSED' || status.state === 'SETTLED';
+    const terminal = status.state === 'ACCEPTED' || status.state === 'SETTLED';
     if (status.asset !== 'ATTO' || status.network !== network || status.amountAtomic !== amountRaw
       || !uuid(status.intentId) || !/^[1-9]\d*$/.test(status.amountAtomic)
       || !paymentIdentifier || instant(status.expiresAt) < 0
@@ -453,8 +453,8 @@ async function readBounded(response: Response, maxBytes: number): Promise<string
 
 function parseTopUpStatus(input: unknown): MarketTopUpStatus {
   const value = object(input);
-  const states = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED'];
-  const paymentStates = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED'];
+  const states = ['PENDING', 'ACCEPTED', 'SETTLED', 'REJECTED'];
+  const paymentStates = ['PENDING', 'ACCEPTED', 'SETTLED', 'REJECTED'];
   if (!value || !uuid(value.intentId) || typeof value.asset !== 'string' || typeof value.network !== 'string'
     || typeof value.amountAtomic !== 'string' || !states.includes(String(value.state))
     || typeof value.expiresAt !== 'string'
@@ -463,7 +463,7 @@ function parseTopUpStatus(input: unknown): MarketTopUpStatus {
     || (value.paymentState !== null && !paymentStates.includes(String(value.paymentState)))
     || (value.receivePending !== null && typeof value.receivePending !== 'boolean')
     || (value.discrepancy !== null && typeof value.discrepancy !== 'string')
-    || (value.receiveStatus !== null && typeof value.receiveStatus !== 'string')) {
+    || !(value.receiveStatus === null || ['PENDING', 'ACCEPTED', 'SETTLED', 'REJECTED'].includes(String(value.receiveStatus)))) {
     throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid top-up status.');
   }
   instant(value.expiresAt);

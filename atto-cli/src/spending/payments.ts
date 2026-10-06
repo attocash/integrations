@@ -218,6 +218,7 @@ export class Payments {
           resourceUrl: challenge.requirement.resourceUrl, requirementHash: challenge.requirement.fingerprint,
           intentExpiresAt: challenge.status.expiresAt, marketState: challenge.status.state,
           paymentState: challenge.status.paymentState, nativeState: 'challenged', receivePending: challenge.status.receivePending,
+          receiveStatus: challenge.status.receiveStatus,
         };
         const reserved = this.ledger.reserve({ id: request.requestId, index: chosen.source.address.index,
           destination: challenge.requirement.payTo, raw, sourceAddress: chosen.source.address.address,
@@ -385,6 +386,7 @@ export class Payments {
   private async saveMarketStatus(requestId: string, status: MarketTopUpStatus): Promise<void> {
     await this.store.withWalletLock(async () => this.ledger.externalStatus(requestId, {
       marketState: status.state, paymentState: status.paymentState, receivePending: status.receivePending,
+      receiveStatus: status.receiveStatus,
     }));
   }
 
@@ -431,27 +433,29 @@ export class Payments {
   }
 
   private marketFundingUsable(marketState: string, paymentState: string | null): boolean {
-    return ['PROCESSED', 'SETTLED'].includes(marketState) || ['PROCESSED', 'SETTLED'].includes(paymentState ?? '');
+    return ['ACCEPTED', 'SETTLED'].includes(marketState) || ['ACCEPTED', 'SETTLED'].includes(paymentState ?? '');
   }
 
   private marketStatusProjection(record: SendRecord): MarketTopUpStatus {
     const external = record.external;
     if (!external) throw new AttoError('INVALID_STATE', 'The payment is not a Market top-up.');
-    const marketState = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED']
+    const marketState = ['PENDING', 'ACCEPTED', 'SETTLED', 'REJECTED']
       .includes(external.marketState) ? external.marketState as MarketTopUpStatus['state'] : 'PENDING';
-    const paymentState = ['PENDING', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED']
+    const paymentState = ['PENDING', 'ACCEPTED', 'SETTLED', 'REJECTED']
       .includes(external.paymentState ?? '') ? external.paymentState as MarketTopUpStatus['paymentState'] : null;
     return { intentId: external.intentId, asset: 'ATTO', network: external.network, amountAtomic: record.raw,
       state: marketState, expiresAt: external.intentExpiresAt, sendHash: record.hash ?? null,
       payer: record.sourceAddress ?? null, paymentState,
-      receivePending: external.receivePending ?? null, discrepancy: null, receiveStatus: null };
+      receivePending: external.receivePending ?? null, discrepancy: null, receiveStatus: external.receiveStatus ?? null };
   }
 
   private marketTopUpResult(record: SendRecord): Record<string, unknown> {
     const external = record.external;
     if (!external) throw new AttoError('REQUEST_CONFLICT', 'This request ID does not belong to a Market top-up.');
+    const status = this.marketStatusProjection(record);
     return { requestId: record.id, status: record.status, nativeState: external.nativeState,
-      marketState: external.marketState, paymentState: external.paymentState, receivePending: external.receivePending ?? null,
+      marketState: status.state, paymentState: status.paymentState, receivePending: status.receivePending,
+      receiveStatus: status.receiveStatus,
       intentId: external.intentId, network: external.network, amount: amountOutput(record.raw), index: record.index,
       sourceAddress: record.sourceAddress ?? null, destination: record.destination, hash: record.hash ?? null,
       sendHash: record.hash ?? null, payer: record.sourceAddress ?? null, expiresAt: external.intentExpiresAt };
@@ -468,7 +472,8 @@ export class Payments {
 
   private unreservedMarketStatus(requestId: string, paymentIdentifier: string, status: MarketTopUpStatus): Record<string, unknown> {
     return { requestId, status: 'not_submitted', nativeState: 'not_submitted', marketState: status.state,
-      paymentState: status.paymentState, receivePending: status.receivePending, intentId: status.intentId,
+      paymentState: status.paymentState, receivePending: status.receivePending, receiveStatus: status.receiveStatus,
+      intentId: status.intentId,
       network: status.network, amount: amountOutput(status.amountAtomic), sendHash: status.sendHash, payer: status.payer,
       expiresAt: status.expiresAt, paymentIdentifier };
   }

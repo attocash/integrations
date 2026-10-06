@@ -62,10 +62,10 @@ test('configured Market client signs its controller proof and sends a bodyless b
   let paymentResponse = Buffer.from(JSON.stringify({ success: false, transaction: 'A'.repeat(64),
     network: 'atto:local', payer: controller.address.value, errorReason: 'settlement_pending' })).toString('base64');
   let continuationStatus = topUpStatus({ state: 'PENDING', sendHash: 'A'.repeat(64),
-    payer: controller.address.value, paymentState: 'UNKNOWN' });
+    payer: controller.address.value, paymentState: 'PENDING' });
   let continuationHttpStatus = 202;
-  let getStatus = topUpStatus({ state: 'PROCESSED', sendHash: 'A'.repeat(64),
-    payer: controller.address.value, paymentState: 'PROCESSED' });
+  let getStatus = topUpStatus({ state: 'ACCEPTED', sendHash: 'A'.repeat(64),
+    payer: controller.address.value, paymentState: 'ACCEPTED' });
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (input, init) => {
     const url = new URL(input);
@@ -134,8 +134,8 @@ test('configured Market client signs its controller proof and sends a bodyless b
   // Then the exact auth/resource binding is used, continuation follows the offered path with no body, and tokens stay in memory.
   assert.equal(connection.agentId, agentId);
   assert.equal(challenge.status.intentId, intentId);
-  assert.equal(pending.paymentState, 'UNKNOWN');
-  assert.equal(credited.state, 'PROCESSED');
+  assert.equal(pending.paymentState, 'PENDING');
+  assert.equal(credited.state, 'ACCEPTED');
   assert.equal(prepared, true);
   assert.deepEqual(order, ['persisted', 'continuation']);
   assert.equal(calls.filter(call => call.headers.has('origin')).length, 0);
@@ -145,13 +145,13 @@ test('configured Market client signs its controller proof and sends a bodyless b
   assert.doesNotMatch(JSON.stringify([...saved.entries()]), /access-token-at-least-16|refresh-token-at-least-16|PAYMENT-SIGNATURE/);
 
   // Both confirmed SEND and later RECEIVE states are successful; HTTP 200 must carry a matching successful receipt.
-  continuationStatus = topUpStatus({ state: 'PROCESSED', sendHash: 'A'.repeat(64),
-    payer: controller.address.value, paymentState: 'PROCESSED', receivePending: true });
+  continuationStatus = topUpStatus({ state: 'ACCEPTED', sendHash: 'A'.repeat(64),
+    payer: controller.address.value, paymentState: 'ACCEPTED', receivePending: true });
   paymentResponse = Buffer.from(JSON.stringify({ success: true, transaction: 'A'.repeat(64),
     network: 'atto:local', payer: controller.address.value })).toString('base64');
   continuationHttpStatus = 200;
   assert.equal((await client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
-    { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value }, async () => {})).state, 'PROCESSED');
+    { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value }, async () => {})).state, 'ACCEPTED');
   getStatus = topUpStatus({ state: 'SETTLED', sendHash: 'A'.repeat(64),
     payer: controller.address.value, paymentState: 'SETTLED', receivePending: false, receiveStatus: 'SETTLED' });
   assert.equal((await client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
@@ -159,8 +159,8 @@ test('configured Market client signs its controller proof and sends a bodyless b
   continuationHttpStatus = 202;
 
   // A same-amount terminal status for another intent or SEND cannot bind to the saved payment.
-  getStatus = topUpStatus({ intentId: '00000000-0000-4000-8000-000000000105', state: 'PROCESSED',
-    sendHash: 'A'.repeat(64), payer: controller.address.value, paymentState: 'PROCESSED' });
+  getStatus = topUpStatus({ intentId: '00000000-0000-4000-8000-000000000105', state: 'ACCEPTED',
+    sendHash: 'A'.repeat(64), payer: controller.address.value, paymentState: 'ACCEPTED' });
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
     { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKET_PROTOCOL' });
   getStatus = topUpStatus({ state: 'SETTLED', sendHash: 'B'.repeat(64), payer: controller.address.value,
@@ -171,7 +171,7 @@ test('configured Market client signs its controller proof and sends a bodyless b
     paymentState: 'SETTLED' });
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
     { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKET_PROTOCOL' });
-  for (const terminal of [{ state: 'PROCESSED' }, { paymentState: 'SETTLED' }]) {
+  for (const terminal of [{ state: 'ACCEPTED' }, { paymentState: 'SETTLED' }]) {
     for (const missing of [
       { sendHash: null, payer: controller.address.value },
       { sendHash: 'A'.repeat(64), payer: null },
@@ -186,23 +186,23 @@ test('configured Market client signs its controller proof and sends a bodyless b
   assert.equal((await client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
     { hash: 'A'.repeat(64), payer: controller.address.value })).state, 'PENDING');
   getStatus = topUpStatus({ state: 'PENDING', sendHash: 'A'.repeat(64), payer: controller.address.value,
-    paymentState: 'UNKNOWN' });
+    paymentState: 'PENDING' });
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local'),
     { code: 'MARKET_PROTOCOL' });
 
   // Paid-continuation body and PAYMENT-RESPONSE must agree with the assigned intent, hash, and payer.
-  continuationStatus = topUpStatus({ intentId: '00000000-0000-4000-8000-000000000105', state: 'PROCESSED',
-    sendHash: 'A'.repeat(64), payer: controller.address.value, paymentState: 'PROCESSED' });
+  continuationStatus = topUpStatus({ intentId: '00000000-0000-4000-8000-000000000105', state: 'ACCEPTED',
+    sendHash: 'A'.repeat(64), payer: controller.address.value, paymentState: 'ACCEPTED' });
   await assert.rejects(client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
     { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value }, async () => {}),
   { code: 'MARKET_PROTOCOL' });
   continuationStatus = topUpStatus({ state: 'PENDING', sendHash: 'B'.repeat(64),
-    payer: controller.address.value, paymentState: 'UNKNOWN' });
+    payer: controller.address.value, paymentState: 'PENDING' });
   await assert.rejects(client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
     { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value }, async () => {}),
   { code: 'MARKET_PROTOCOL' });
   continuationStatus = topUpStatus({ state: 'PENDING', sendHash: 'A'.repeat(64),
-    payer: controller.address.value, paymentState: 'UNKNOWN' });
+    payer: controller.address.value, paymentState: 'PENDING' });
   paymentResponse = Buffer.from(JSON.stringify({ success: false, transaction: 'A'.repeat(64),
     network: 'atto:local', payer: recipient.address.value, errorReason: 'settlement_pending' })).toString('base64');
   await assert.rejects(client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
