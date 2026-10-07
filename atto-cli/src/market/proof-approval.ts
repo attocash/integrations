@@ -298,8 +298,8 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
       const applyXnoLimit = atomicOrEmpty(credential.applyXnoLimit);
       if ((scopes.includes('jobs:publish')) !== Boolean(publishAttoLimit || publishXnoLimit)
         || (scopes.includes('applications:apply')) !== Boolean(applyAttoLimit || applyXnoLimit)) throw protocolFailure();
-      const legacyFields = [name, String(expiresInDays), [...scopes].sort().join(','), publishAttoLimit, publishXnoLimit, applyAttoLimit];
-      payload = (applyXnoLimit ? ['agent-credential-v2', ...legacyFields, applyXnoLimit] : legacyFields).join('\n');
+      const orderedFields = [name, String(expiresInDays), [...scopes].sort().join(','), publishAttoLimit, publishXnoLimit, applyAttoLimit];
+      payload = ['agent-credential-v2', ...orderedFields, applyXnoLimit].join('\n');
     }
     return sha256(['agent-credential-v1', request.accountId, request.identityId, operation,
       target || '', key, payload].join('\n'));
@@ -547,7 +547,7 @@ function parseOrigin(value: string): string {
 }
 
 function atomicOrEmpty(value: unknown): string {
-  if (value === undefined || value === null || value === '') return '';
+  if (value === undefined || value === null) return '';
   if (typeof value !== 'string' || !/^[1-9][0-9]{0,64}$/.test(value)) throw protocolFailure();
   return value;
 }
