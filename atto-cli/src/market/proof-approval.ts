@@ -13,6 +13,12 @@ const SCOPES = new Set([
   'jobs:read', 'applications:read', 'applications:apply', 'applications:withdraw',
   'jobs:draft:write', 'jobs:publish', 'submissions:write', 'submissions:read',
   'activity:read', 'activity:write', 'balances:read',
+  'files:read', 'files:write', 'products:read', 'products:write', 'products:publish', 'products:purchase',
+  'purchases:read', 'purchases:refund',
+]);
+const SHOP_SCOPES = new Set([
+  'files:read', 'files:write', 'products:read', 'products:write', 'products:publish', 'products:purchase',
+  'purchases:read', 'purchases:refund',
 ]);
 
 export interface MarketProofApprovalRequest {
@@ -224,7 +230,8 @@ function validActionKeys(action: Record<string, unknown>): boolean {
     const command = record(action.command);
     if (!onlyKeys(command, ['operation','idempotencyKey','targetApiKeyId','credential'])) return false;
     if (command.credential === undefined) return true;
-    return onlyKeys(record(command.credential), ['name','expiresInDays','scopes','publishAttoLimit','publishXnoLimit','applyAttoLimit','applyXnoLimit']);
+    return onlyKeys(record(command.credential), ['name','expiresInDays','scopes','publishAttoLimit','publishXnoLimit',
+      'applyAttoLimit','applyXnoLimit','purchaseAttoLimit','purchaseXnoLimit']);
   }
   if (action.kind === 'payout-address') {
     return onlyKeys(action, ['kind','command','network','canonicalTargetAddress'])
@@ -296,10 +303,15 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
       const publishXnoLimit = atomicOrEmpty(credential.publishXnoLimit);
       const applyAttoLimit = atomicOrEmpty(credential.applyAttoLimit);
       const applyXnoLimit = atomicOrEmpty(credential.applyXnoLimit);
+      const purchaseAttoLimit = atomicOrEmpty(credential.purchaseAttoLimit);
+      const purchaseXnoLimit = atomicOrEmpty(credential.purchaseXnoLimit);
       if ((scopes.includes('jobs:publish')) !== Boolean(publishAttoLimit || publishXnoLimit)
-        || (scopes.includes('applications:apply')) !== Boolean(applyAttoLimit || applyXnoLimit)) throw protocolFailure();
+        || (scopes.includes('applications:apply')) !== Boolean(applyAttoLimit || applyXnoLimit)
+        || (scopes.includes('products:purchase')) !== Boolean(purchaseAttoLimit || purchaseXnoLimit)) throw protocolFailure();
       const orderedFields = [name, String(expiresInDays), [...scopes].sort().join(','), publishAttoLimit, publishXnoLimit, applyAttoLimit];
-      payload = ['agent-credential-v2', ...orderedFields, applyXnoLimit].join('\n');
+      payload = scopes.some(scope => SHOP_SCOPES.has(scope))
+        ? ['agent-credential-v3', ...orderedFields, applyXnoLimit, purchaseAttoLimit, purchaseXnoLimit].join('\n')
+        : ['agent-credential-v2', ...orderedFields, applyXnoLimit].join('\n');
     }
     return sha256(['agent-credential-v1', request.accountId, request.identityId, operation,
       target || '', key, payload].join('\n'));

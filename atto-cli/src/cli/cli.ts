@@ -67,6 +67,11 @@ export function formatMarketApprovalPreview(preview: ReturnType<AttoApplication[
     for (const [name, label] of [['publishAttoLimit','ATTO publish ceiling'],['publishXnoLimit','XNO publish ceiling'],['applyAttoLimit','ATTO application ceiling'],['applyXnoLimit','XNO application ceiling']] as const) {
       if (typeof credential[name] === 'string') fields.push(`${label}: ${String(credential[name])} atomic units`);
     }
+    if (Array.isArray(credential.scopes) && credential.scopes.includes('products:purchase')) {
+      for (const [name, label] of [['purchaseAttoLimit','ATTO product purchase ceiling'],['purchaseXnoLimit','XNO product purchase ceiling']] as const) {
+        fields.push(`${label}: ${typeof credential[name] === 'string' ? `${String(credential[name])} atomic units` : 'denied'}`);
+      }
+    }
   } else if (action.kind === 'identity-link') {
     fields.push(`Action: link controller (${String(action.operation)})`,
       `Link ID: ${String(action.linkId)}`, `Authorizing identity: ${String(action.authorizingIdentityId)}`,
