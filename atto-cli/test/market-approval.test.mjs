@@ -1,15 +1,17 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import test from 'node:test';
 import { AttoMnemonic } from '@attocash/commons-core';
 import { derivedSigner } from '../dist/wallet/signing.js';
 import { approvalRequestDigest } from '../dist/market/proof-approval.js';
 import { MarketTopUpClient } from '../dist/market/topups.js';
+import { formatMarketApprovalPreview } from '../dist/cli/cli.js';
 
 const origin = 'https://market.example';
 const accountId = '00000000-0000-4000-8000-000000000100';
 const agentId = '00000000-0000-4000-8000-000000000102';
 const identityId = '00000000-0000-4000-8000-000000000101';
+const buyerAgentId = '00000000-0000-4000-8000-000000000103';
 
 test('typed withdrawal approval validates controller, audience, action binding, and signs exact server message', async t => {
   // Given one saved wallet, its configured Market account, and an immutable XNO withdrawal challenge.
@@ -154,3 +156,177 @@ test('browser proof approval preserves an exact browser-origin audience', async 
   assert.throws(()=>client.inspectProofApproval({...request,proofOrigin:attacker,audience:attacker,
     challenge:{...request.challenge,message:message.replace(`Audience: ${origin}`,`Audience: ${attacker}`)}}), {code:'MARKET_APPROVAL_MISMATCH'});
 });
+
+test('typed product purchase and refund approvals bind exact Shop terms and sign for either asset', async t => {
+  // Given a connected ATTO controller and server-shaped product approval challenges for both Market assets.
+  const fixture = await approvalFixture(t);
+  const largeGross = '9'.repeat(65);
+  const challengeCases = [];
+  for (const [index, asset] of ['ATTO', 'XNO'].entries()) {
+    const feeAtomic = index === 0 ? '0' : '17';
+    const netAtomic = (BigInt(largeGross) - BigInt(feeAtomic)).toString();
+    challengeCases.push({
+      authority: null,
+      action: { kind:'productPurchase', releaseId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+        expectedReleaseHash:'ab'.repeat(32), sellerAgentId:agentId, asset,
+        grossAtomic:largeGross, feeAtomic, netAtomic, idempotencyKey:randomUUID() },
+      purpose:'product purchase',
+    });
+    for (const authority of ['SELLER', 'ADMIN']) {
+      challengeCases.push({
+        authority,
+        action: { kind:'productRefund', purchaseId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+          expectedPurchaseVersion:7, authority, buyerAgentId, sellerAgentId:agentId, asset,
+          grossAtomic:largeGross, feeAtomic, netAtomic, originalPurchaseReceiptHash:'cd'.repeat(32),
+          idempotencyKey:randomUUID() },
+        purpose:'product refund',
+      });
+    }
+  }
+
+  // When each action is checked and signed, it must match the contract's field order and preserve the request identity.
+  for (const [index, item] of challengeCases.entries()) {
+    const request = productApprovalRequest(fixture.signer, item.action, item.purpose, index);
+    const { preview } = fixture.client.inspectProofApproval(request);
+    const response = await fixture.client.signProofApproval(request);
+    const summary = formatMarketApprovalPreview(preview);
+
+    // Then the real ATTO signature covers the exact challenge and the terminal preview exposes every decision term.
+    assert.equal(response.signature,
+      (await fixture.signer.signMessage(new Int8Array(Buffer.from(request.challenge.message, 'utf8')))).toString());
+    assert.equal(response.requestDigest, approvalRequestDigest(request));
+    assert.equal(response.challengeId, request.challenge.challengeId);
+    assert.equal(response.handoffId, request.handoffId);
+    assert.match(summary, new RegExp(`Asset: ${item.action.asset}`));
+    assert.match(summary, new RegExp(`Gross: ${largeGross} atomic`));
+    assert.match(summary, new RegExp(`Fee: ${item.action.feeAtomic} atomic`));
+    assert.match(summary, new RegExp(`Net: ${item.action.netAtomic} atomic`));
+    assert.match(summary, new RegExp(`Idempotency key: ${item.action.idempotencyKey}`));
+    if (item.action.kind === 'productPurchase') {
+      assert.match(summary, /Action: purchase digital product release/);
+      assert.match(summary, new RegExp(`Seller: ${item.action.sellerAgentId}`));
+      assert.match(summary, new RegExp(`Release: ${item.action.releaseId}`));
+      assert.match(summary, new RegExp(`Release SHA-256: ${item.action.expectedReleaseHash}`));
+    } else {
+      assert.match(summary, new RegExp(`Authority: ${item.authority}`));
+      assert.match(summary, new RegExp(`Purchase: ${item.action.purchaseId}`));
+      assert.match(summary, new RegExp(`Original purchase receipt SHA-256: ${item.action.originalPurchaseReceiptHash}`));
+      assert.match(summary, new RegExp(`Expected purchase version: ${item.action.expectedPurchaseVersion}`));
+      assert.match(summary, new RegExp(`Buyer: ${item.action.buyerAgentId}`));
+      assert.match(summary, new RegExp(`Seller: ${item.action.sellerAgentId}`));
+      assert.match(summary, item.authority === 'SELLER' ? /Action: seller refund/ : /Action: administrator refund compensation/);
+    }
+  }
+});
+
+test('product approvals reject changed, incomplete, or malformed terms before signing', async t => {
+  // Given valid signed-challenge fixtures for purchase and administrator refund actions.
+  const fixture = await approvalFixture(t);
+  const grossAtomic = '9'.repeat(65);
+  const purchase = { kind:'productPurchase', releaseId:'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+    expectedReleaseHash:'ab'.repeat(32), sellerAgentId:agentId, asset:'ATTO', grossAtomic,
+    feeAtomic:'0', netAtomic:grossAtomic, idempotencyKey:randomUUID() };
+  const refund = { kind:'productRefund', purchaseId:'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb',
+    expectedPurchaseVersion:7, authority:'ADMIN', buyerAgentId, sellerAgentId:agentId, asset:'XNO',
+    grossAtomic, feeAtomic:'0', netAtomic:grossAtomic, originalPurchaseReceiptHash:'cd'.repeat(32),
+    idempotencyKey:randomUUID() };
+  const purchaseRequest = productApprovalRequest(fixture.signer, purchase, 'product purchase', 40);
+  const refundRequest = productApprovalRequest(fixture.signer, refund, 'product refund', 41);
+
+  // When unknown keys, missing keys, invalid types, or any altered bound term is presented for approval.
+  const invalidRequests = [
+    { ...purchaseRequest, action:{ ...purchase, clientPrice:'1' } },
+    { ...purchaseRequest, action:without(purchase, 'sellerAgentId') },
+    { ...purchaseRequest, action:{ ...purchase, releaseId:purchase.releaseId.toUpperCase() } },
+    { ...purchaseRequest, action:{ ...purchase, expectedReleaseHash:purchase.expectedReleaseHash.toUpperCase() } },
+    { ...purchaseRequest, action:{ ...purchase, expectedReleaseHash:'ef'.repeat(32) } },
+    { ...purchaseRequest, action:{ ...purchase, idempotencyKey:randomUUID() } },
+    { ...purchaseRequest, action:{ ...purchase, asset:'NANO' } },
+    { ...purchaseRequest, action:{ ...purchase, grossAtomic:'0' } },
+    { ...purchaseRequest, action:{ ...purchase, grossAtomic:'0' + grossAtomic } },
+    { ...purchaseRequest, action:{ ...purchase, grossAtomic:'1'.repeat(66), netAtomic:'1'.repeat(66) } },
+    { ...purchaseRequest, action:{ ...purchase, grossAtomic:BigInt(grossAtomic) } },
+    { ...purchaseRequest, action:{ ...purchase, feeAtomic:'-1' } },
+    { ...purchaseRequest, action:{ ...purchase, feeAtomic:'1'.repeat(66) } },
+    { ...purchaseRequest, action:{ ...purchase, netAtomic:'0' } },
+    { ...purchaseRequest, action:{ ...purchase, netAtomic:'8'.repeat(65) } },
+    { ...purchaseRequest, purpose:'product refund' },
+    { ...purchaseRequest, challenge:{ ...purchaseRequest.challenge,
+      message:purchaseRequest.challenge.message.replace(/Binding Hash: [0-9a-f]{64}/, `Binding Hash: ${'f'.repeat(64)}`) } },
+    { ...refundRequest, action:{ ...refund, unexpected:true } },
+    { ...refundRequest, action:without(refund, 'originalPurchaseReceiptHash') },
+    { ...refundRequest, action:{ ...refund, authority:'OWNER' } },
+    { ...refundRequest, action:{ ...refund, authority:'SELLER' } },
+    { ...refundRequest, action:{ ...refund, idempotencyKey:randomUUID() } },
+    { ...refundRequest, action:{ ...refund, expectedPurchaseVersion:Number.MAX_SAFE_INTEGER + 1 } },
+    { ...refundRequest, action:{ ...refund, purchaseId:refund.purchaseId.toUpperCase() } },
+    { ...refundRequest, action:{ ...refund, originalPurchaseReceiptHash:'CD'.repeat(32) } },
+    { ...refundRequest, action:{ ...refund, netAtomic:'1'.repeat(66) } },
+    { ...refundRequest, action:{ ...refund, asset:'ATTO', feeAtomic:'1' } },
+  ];
+
+  // Then every malformed or rebound approval is refused by the strict codec before a signature can be produced.
+  for (const request of invalidRequests) {
+    assert.throws(() => fixture.client.inspectProofApproval(request), { code:'MARKET_APPROVAL_PROTOCOL' });
+  }
+});
+
+async function approvalFixture(t) {
+  const phrase = (await AttoMnemonic.generate()).phrase;
+  const seed = await (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync();
+  const signer = await derivedSigner(seed, 0);
+  const fingerprint = createHash('sha256').update(signer.publicKey.toString()).digest('hex');
+  const saved = new Map([
+    ['identity', { address:signer.address.value, fingerprint }],
+    ['market.topups.connection', { version:1, apiUrl:`${origin}/v1/agent/topups`, audience:'market-agent',
+      controllerIndex:0, controllerAddress:signer.address.value, accountId, agentId, identityId,
+      walletFingerprint:fingerprint }],
+  ]);
+  t.after(() => seed.value.fill(0));
+  return {
+    signer,
+    client: new MarketTopUpClient({ get:key=>saved.get(key), set:(key,value)=>saved.set(key,value) }, {
+      settings:()=>({ network:'LIVE' }),
+      addresses:()=>[{ index:0, address:signer.address.value, publicKey:signer.publicKey.toString(), active:true }],
+      seed:async()=>(await AttoMnemonic.fromPhrase(phrase)).toSeedAsync(), mcp:false,
+    }),
+  };
+}
+
+function productApprovalRequest(signer, action, purpose, suffix) {
+  const issuedAt = new Date(Date.now() - 1000).toISOString();
+  const expiresAt = new Date(Date.now() + 120_000).toISOString();
+  const challengeId = randomUUID();
+  const fields = action.kind === 'productPurchase'
+    ? ['market-product-purchase-approval-v1', accountId, identityId, action.releaseId, action.expectedReleaseHash,
+      action.asset, action.grossAtomic, action.idempotencyKey]
+    : ['market-product-refund-approval-v1', action.authority, accountId, identityId, action.purchaseId,
+      action.originalPurchaseReceiptHash, String(action.expectedPurchaseVersion), action.asset, action.grossAtomic,
+      action.idempotencyKey];
+  const bindingHash = lengthPrefixedApprovalHash(fields);
+  const message = `Atto Market Agent Controller Proof v1\nAudience: market-agent\nNetwork: live\nAddress: ${signer.address.value}`
+    + `\nPurpose: ${purpose}\nRequest ID: ${challengeId}\nBinding Hash: ${bindingHash}\nNonce: ${String(suffix).padStart(2, '0').repeat(32)}`
+    + `\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
+  return { version:1, type:'atto-market-controller-approval-request', profileId:'agent',
+    handoffId:randomUUID().replaceAll('-', ''), marketOrigin:origin, transport:'AGENT_API', proofOrigin:null,
+    audience:'market-agent', accountId, identityId, controller:{ network:'ATTO', address:signer.address.value, index:0 },
+    purpose, action, challenge:{ challengeId, message, issuedAt, expiresAt } };
+}
+
+function lengthPrefixedApprovalHash(fields) {
+  const digest = createHash('sha256');
+  for (const field of fields) {
+    const bytes = Buffer.from(field, 'utf8');
+    const length = Buffer.alloc(4);
+    length.writeUInt32BE(bytes.length);
+    digest.update(length);
+    digest.update(bytes);
+  }
+  return digest.digest('hex');
+}
+
+function without(value, key) {
+  const copy = { ...value };
+  delete copy[key];
+  return copy;
+}

@@ -55,6 +55,20 @@ export function formatMarketApprovalPreview(preview: ReturnType<AttoApplication[
   if (action.kind === 'withdrawal') {
     fields.push(`Action: withdraw ${String(command.atomicAmount)} ${String(command.asset)} on ${String(action.network)}`,
       `Destination: ${String(action.destinationAddress)} (${String(command.destinationId)})`);
+  } else if (action.kind === 'productPurchase') {
+    fields.push('Action: purchase digital product release', `Seller: ${String(action.sellerAgentId)}`,
+      `Release: ${String(action.releaseId)}`, `Release SHA-256: ${String(action.expectedReleaseHash)}`,
+      `Asset: ${String(action.asset)}`, `Gross: ${String(action.grossAtomic)} atomic`,
+      `Fee: ${String(action.feeAtomic)} atomic`, `Net: ${String(action.netAtomic)} atomic`,
+      `Idempotency key: ${String(action.idempotencyKey)}`);
+  } else if (action.kind === 'productRefund') {
+    const authority = String(action.authority);
+    fields.push(`Action: ${authority === 'ADMIN' ? 'administrator refund compensation' : 'seller refund'}`,
+      `Authority: ${authority}`, `Buyer: ${String(action.buyerAgentId)}`, `Seller: ${String(action.sellerAgentId)}`,
+      `Purchase: ${String(action.purchaseId)}`, `Original purchase receipt SHA-256: ${String(action.originalPurchaseReceiptHash)}`,
+      `Expected purchase version: ${String(action.expectedPurchaseVersion)}`, `Asset: ${String(action.asset)}`,
+      `Gross: ${String(action.grossAtomic)} atomic`, `Fee: ${String(action.feeAtomic)} atomic`,
+      `Net: ${String(action.netAtomic)} atomic`, `Idempotency key: ${String(action.idempotencyKey)}`);
   } else if (action.kind === 'payout-address') {
     fields.push(`Action: ${String(command.action)} ${String(command.asset)} payout address on ${String(action.network)}`,
       `Destination: ${String(action.canonicalTargetAddress)}`);

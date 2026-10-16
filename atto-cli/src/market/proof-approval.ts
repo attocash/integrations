@@ -7,7 +7,7 @@ const PURPOSES = new Set([
   'link authorizer', 'link new identity', 'unlink',
   'payout address enrollment', 'payout address selection', 'payout address disablement',
   'withdrawal creation', 'administrator public moderation', 'administrator job cancellation or expiry',
-  'administrator dispute opening', 'administrator dispute resolution',
+  'administrator dispute opening', 'administrator dispute resolution', 'product purchase', 'product refund',
 ]);
 const SCOPES = new Set([
   'jobs:read', 'applications:read', 'applications:apply', 'applications:withdraw',
@@ -215,6 +215,8 @@ function expectedPurpose(action: Record<string, unknown>): string {
     case 'adminJobClose': return 'administrator job cancellation or expiry';
     case 'adminDisputeOpen': return 'administrator dispute opening';
     case 'adminDisputeResolution': return 'administrator dispute resolution';
+    case 'productPurchase': return 'product purchase';
+    case 'productRefund': return 'product refund';
     default: return '';
   }
 }
@@ -249,6 +251,11 @@ function validActionKeys(action: Record<string, unknown>): boolean {
     ['kind','jobId','expectedEngagementVersion','representedAgentId','reason','statement','evidenceUrls','auditReason','idempotencyKey']);
   if (action.kind === 'adminDisputeResolution') return onlyKeys(action,
     ['kind','disputeId','expectedDisputeVersion','outcome','rationale','idempotencyKey']);
+  if (action.kind === 'productPurchase') return hasExactKeys(action,
+    ['kind','releaseId','expectedReleaseHash','sellerAgentId','asset','grossAtomic','feeAtomic','netAtomic','idempotencyKey']);
+  if (action.kind === 'productRefund') return hasExactKeys(action,
+    ['kind','purchaseId','expectedPurchaseVersion','authority','buyerAgentId','sellerAgentId','asset','grossAtomic',
+      'feeAtomic','netAtomic','originalPurchaseReceiptHash','idempotencyKey']);
   return false;
 }
 
@@ -259,6 +266,29 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
     return undefined;
   }
   if (!request.accountId || !request.identityId) throw protocolFailure();
+  if (action.kind === 'productPurchase') {
+    const releaseId = uuid(action.releaseId);
+    const sellerAgentId = uuid(action.sellerAgentId);
+    const key = uuid(action.idempotencyKey);
+    if (!releaseId || !sellerAgentId || !isSha256Hex(action.expectedReleaseHash) || !isAsset(action.asset)
+      || !validProductAtomicTerms(action.grossAtomic, action.feeAtomic, action.netAtomic) || !key) throw protocolFailure();
+    return lengthPrefixedSha256(['market-product-purchase-approval-v1', request.accountId, request.identityId,
+      releaseId, action.expectedReleaseHash as string, action.asset as string, action.grossAtomic as string, key]);
+  }
+  if (action.kind === 'productRefund') {
+    const purchaseId = uuid(action.purchaseId);
+    const version = safeVersion(action.expectedPurchaseVersion);
+    const buyerAgentId = uuid(action.buyerAgentId);
+    const sellerAgentId = uuid(action.sellerAgentId);
+    const key = uuid(action.idempotencyKey);
+    if (!purchaseId || version === undefined || (action.authority !== 'SELLER' && action.authority !== 'ADMIN')
+      || !buyerAgentId || !sellerAgentId || !isAsset(action.asset)
+      || !validProductAtomicTerms(action.grossAtomic, action.feeAtomic, action.netAtomic)
+      || !isSha256Hex(action.originalPurchaseReceiptHash) || !key) throw protocolFailure();
+    return lengthPrefixedSha256(['market-product-refund-approval-v1', action.authority, request.accountId,
+      request.identityId, purchaseId, action.originalPurchaseReceiptHash as string, String(version), action.asset as string,
+      action.grossAtomic as string, key]);
+  }
   if (action.kind === 'identity-link') {
     const operation = action.operation;
     const linkId = uuid(action.linkId);
@@ -416,6 +446,26 @@ function browserOriginAllowed(connection: MarketConnection, proofOrigin: string)
 
 function safeVersion(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
+}
+
+function isAsset(value: unknown): value is 'ATTO' | 'XNO' {
+  return value === 'ATTO' || value === 'XNO';
+}
+
+function isSha256Hex(value: unknown): value is string {
+  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
+}
+
+function validProductAtomicTerms(gross: unknown, fee: unknown, net: unknown): boolean {
+  if (typeof gross !== 'string' || !/^[1-9][0-9]{0,64}$/.test(gross)
+    || typeof fee !== 'string' || !/^(?:0|[1-9][0-9]{0,64})$/.test(fee)
+    || typeof net !== 'string' || !/^[1-9][0-9]{0,64}$/.test(net)) return false;
+  return BigInt(gross) === BigInt(fee) + BigInt(net);
+}
+
+function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && actual.every(key => keys.includes(key));
 }
 
 function boundedAsciiSpaceReason(value: unknown, maximumCodePoints: number): string | undefined {
