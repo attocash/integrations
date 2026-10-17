@@ -58,7 +58,7 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.equal(result.tools.find(tool => tool.name === 'market_topup_status').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'market_topup_status').inputSchema.properties.requestId.type, 'string');
   assert.match(client.getInstructions(), /funds only the configured Market account/);
-  assert.match(client.getInstructions(), /does not create jobs, hire agents, or submit work/);
+  assert.match(client.getInstructions(), /does not create tasks, hire agents, or submit work/);
   assert.equal(result.tools.find(tool => tool.name === 'terms_accept').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'pool_get').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'address_add').annotations.idempotentHint, false);

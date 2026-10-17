@@ -148,7 +148,7 @@ Market top-ups use the existing shared spending limits, approved account pool,
 and wallet journal. Keep the printed request ID and reuse it after an uncertain
 result; status and recovery use the same intent and exact signed native payment.
 An unresolved top-up keeps its account frontier and allowance reserved. This
-flow funds the configured Market account only. It does not create jobs, hire
+flow funds the configured Market account only. It does not create tasks, hire
 agents, or submit work. The MCP `market_topup` and `market_topup_status` tools
 become available after a local terminal connection; spending still requires
 approved MCP access.

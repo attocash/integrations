@@ -6,12 +6,12 @@ const PURPOSES = new Set([
   'login', 'API-key creation', 'API-key rotation', 'API-key revocation',
   'link authorizer', 'link new identity', 'unlink',
   'payout address enrollment', 'payout address selection', 'payout address disablement',
-  'withdrawal creation', 'administrator public moderation', 'administrator job cancellation or expiry',
+  'withdrawal creation', 'administrator public moderation', 'administrator task cancellation or expiry',
   'administrator dispute opening', 'administrator dispute resolution', 'product purchase', 'product refund',
 ]);
 const SCOPES = new Set([
-  'jobs:read', 'applications:read', 'applications:apply', 'applications:withdraw',
-  'jobs:draft:write', 'jobs:publish', 'submissions:write', 'submissions:read',
+  'tasks:read', 'applications:read', 'applications:apply', 'applications:withdraw',
+  'tasks:draft:write', 'tasks:publish', 'submissions:write', 'submissions:read',
   'activity:read', 'activity:write', 'balances:read',
   'files:read', 'files:write', 'products:read', 'products:write', 'products:publish', 'products:purchase',
   'purchases:read', 'purchases:refund',
@@ -212,7 +212,7 @@ function expectedPurpose(action: Record<string, unknown>): string {
     case 'payout-address': return ({ ENROLL: 'payout address enrollment', SELECT: 'payout address selection', DISABLE: 'payout address disablement' } as Record<string, string>)[String(record(action.command).action)] ?? '';
     case 'withdrawal': return 'withdrawal creation';
     case 'adminModeration': return 'administrator public moderation';
-    case 'adminJobClose': return 'administrator job cancellation or expiry';
+    case 'adminTaskClose': return 'administrator task cancellation or expiry';
     case 'adminDisputeOpen': return 'administrator dispute opening';
     case 'adminDisputeResolution': return 'administrator dispute resolution';
     case 'productPurchase': return 'product purchase';
@@ -233,7 +233,7 @@ function validActionKeys(action: Record<string, unknown>): boolean {
     if (!onlyKeys(command, ['operation','idempotencyKey','targetApiKeyId','credential'])) return false;
     if (command.credential === undefined) return true;
     return onlyKeys(record(command.credential), ['name','expiresInDays','scopes','publishAttoLimit','publishXnoLimit',
-      'applyAttoLimit','applyXnoLimit','purchaseAttoLimit','purchaseXnoLimit']);
+      'applyAttoLimit','applyXnoLimit','purchaseAttoLimit','purchaseXnoLimit','productPublishAttoLimit','productPublishXnoLimit']);
   }
   if (action.kind === 'payout-address') {
     return onlyKeys(action, ['kind','command','network','canonicalTargetAddress'])
@@ -245,10 +245,10 @@ function validActionKeys(action: Record<string, unknown>): boolean {
   }
   if (action.kind === 'adminModeration') return onlyKeys(action,
     ['kind','targetKind','action','targetId','expectedTargetVersion','expectedModerationVersion','reason','idempotencyKey']);
-  if (action.kind === 'adminJobClose') return onlyKeys(action,
-    ['kind','jobId','action','expectedVersion','reason','idempotencyKey']);
+  if (action.kind === 'adminTaskClose') return onlyKeys(action,
+    ['kind','taskId','action','expectedVersion','reason','idempotencyKey']);
   if (action.kind === 'adminDisputeOpen') return onlyKeys(action,
-    ['kind','jobId','expectedEngagementVersion','representedAgentId','reason','statement','evidenceUrls','auditReason','idempotencyKey']);
+    ['kind','taskId','expectedEngagementVersion','representedAgentId','reason','statement','evidenceUrls','auditReason','idempotencyKey']);
   if (action.kind === 'adminDisputeResolution') return onlyKeys(action,
     ['kind','disputeId','expectedDisputeVersion','outcome','rationale','idempotencyKey']);
   if (action.kind === 'productPurchase') return hasExactKeys(action,
@@ -335,13 +335,19 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
       const applyXnoLimit = atomicOrEmpty(credential.applyXnoLimit);
       const purchaseAttoLimit = atomicOrEmpty(credential.purchaseAttoLimit);
       const purchaseXnoLimit = atomicOrEmpty(credential.purchaseXnoLimit);
-      if ((scopes.includes('jobs:publish')) !== Boolean(publishAttoLimit || publishXnoLimit)
+      const productPublishAttoLimit = atomicOrEmpty(credential.productPublishAttoLimit);
+      const productPublishXnoLimit = atomicOrEmpty(credential.productPublishXnoLimit);
+      if ((scopes.includes('tasks:publish')) !== Boolean(publishAttoLimit || publishXnoLimit)
         || (scopes.includes('applications:apply')) !== Boolean(applyAttoLimit || applyXnoLimit)
-        || (scopes.includes('products:purchase')) !== Boolean(purchaseAttoLimit || purchaseXnoLimit)) throw protocolFailure();
+        || (scopes.includes('products:purchase')) !== Boolean(purchaseAttoLimit || purchaseXnoLimit)
+        || (Boolean(productPublishAttoLimit || productPublishXnoLimit) && !scopes.includes('products:publish'))) throw protocolFailure();
       const orderedFields = [name, String(expiresInDays), [...scopes].sort().join(','), publishAttoLimit, publishXnoLimit, applyAttoLimit];
-      payload = scopes.some(scope => SHOP_SCOPES.has(scope))
-        ? ['agent-credential-v3', ...orderedFields, applyXnoLimit, purchaseAttoLimit, purchaseXnoLimit].join('\n')
-        : ['agent-credential-v2', ...orderedFields, applyXnoLimit].join('\n');
+      payload = productPublishAttoLimit || productPublishXnoLimit
+        ? ['agent-credential-v4', ...orderedFields, applyXnoLimit, purchaseAttoLimit, purchaseXnoLimit,
+          productPublishAttoLimit, productPublishXnoLimit].join('\n')
+        : scopes.some(scope => SHOP_SCOPES.has(scope))
+          ? ['agent-credential-v3', ...orderedFields, applyXnoLimit, purchaseAttoLimit, purchaseXnoLimit].join('\n')
+          : ['agent-credential-v2', ...orderedFields, applyXnoLimit].join('\n');
     }
     return sha256(['agent-credential-v1', request.accountId, request.identityId, operation,
       target || '', key, payload].join('\n'));
@@ -388,9 +394,9 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
     const moderationVersion = safeVersion(action.expectedModerationVersion);
     const reason = boundedAsciiSpaceReason(action.reason, 1_000);
     const key = uuid(action.idempotencyKey);
-    if ((targetKind !== 'JOB' && targetKind !== 'PROFILE')
+    if ((targetKind !== 'TASK' && targetKind !== 'PROFILE')
       || !['HIDE','RESTORE','SUSPEND'].includes(String(operation))
-      || (targetKind === 'JOB' && operation === 'SUSPEND')
+      || (targetKind === 'TASK' && operation === 'SUSPEND')
       || !targetId || targetVersion === undefined || moderationVersion === undefined || reason === undefined || !key) {
       throw protocolFailure();
     }
@@ -398,19 +404,19 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
       request.identityId, targetKind, targetId, String(operation), String(targetVersion),
       String(moderationVersion), reason, key]);
   }
-  if (action.kind === 'adminJobClose') {
-    const jobId = uuid(action.jobId);
+  if (action.kind === 'adminTaskClose') {
+    const taskId = uuid(action.taskId);
     const operation = action.action;
     const version = safeVersion(action.expectedVersion);
     const reason = boundedAsciiSpaceReason(action.reason, 1_000);
     const key = uuid(action.idempotencyKey);
-    if (!jobId || (operation !== 'CANCEL' && operation !== 'EXPIRE')
+    if (!taskId || (operation !== 'CANCEL' && operation !== 'EXPIRE')
       || version === undefined || reason === undefined || !key) throw protocolFailure();
-    return lengthPrefixedSha256(['market-admin-job-close-v1', request.accountId, request.identityId,
-      jobId, operation, String(version), reason, key]);
+    return lengthPrefixedSha256(['market-admin-task-close-v1', request.accountId, request.identityId,
+      taskId, operation, String(version), reason, key]);
   }
   if (action.kind === 'adminDisputeOpen') {
-    const jobId = uuid(action.jobId);
+    const taskId = uuid(action.taskId);
     const engagementVersion = safeVersion(action.expectedEngagementVersion);
     const representedAgentId = uuid(action.representedAgentId);
     const reason = action.reason;
@@ -418,10 +424,10 @@ function bindingHash(request: MarketProofApprovalRequest): string | undefined {
     const statement = boundedDisputeText(action.statement);
     const auditReason = boundedDisputeText(action.auditReason);
     const evidence = canonicalEvidenceUrls(action.evidenceUrls);
-    if (!jobId || engagementVersion === undefined || !representedAgentId
+    if (!taskId || engagementVersion === undefined || !representedAgentId
       || (reason !== 'NON_DELIVERY' && reason !== 'DELIVERABLE_MISMATCH' && reason !== 'OTHER')
       || !key || statement === undefined || auditReason === undefined || evidence === undefined) throw protocolFailure();
-    return lengthPrefixedSha256(['dispute-admin-open-v1', request.accountId, request.identityId, jobId,
+    return lengthPrefixedSha256(['dispute-admin-open-v1', request.accountId, request.identityId, taskId,
       String(engagementVersion), representedAgentId, reason, key, statement, auditReason, ...evidence]);
   }
   if (action.kind === 'adminDisputeResolution') {

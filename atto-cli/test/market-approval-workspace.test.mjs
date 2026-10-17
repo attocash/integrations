@@ -11,7 +11,7 @@ const identityId = '00000000-0000-4000-8000-000000000101';
 const linkId = '00000000-0000-4000-8000-000000000102';
 const authorizingAddress = `atto://${'a'.repeat(61)}`;
 const newIdentityAddress = `atto://${'b'.repeat(61)}`;
-const jobId = '00000000-0000-4000-8000-000000000200';
+const taskId = '00000000-0000-4000-8000-000000000200';
 const idempotencyKey = '00000000-0000-4000-8000-000000000201';
 
 function createClient(browserOrigins = [browserOrigin]) {
@@ -173,20 +173,24 @@ test('admin moderation uses safe integer versions and the length-prefixed UTF-8 
     identityId: '00000000-0000-4000-8000-000000000199' }), { code: 'MARKET_APPROVAL_MISMATCH' });
 });
 
-test('job close and administrator dispute approvals bind every typed field in wire order', () => {
-  const close = { kind: 'adminJobClose', jobId, action: 'CANCEL', expectedVersion: 14,
+test('task close and administrator dispute approvals bind every typed field in wire order', () => {
+  const close = { kind: 'adminTaskClose', taskId, action: 'CANCEL', expectedVersion: 14,
     reason: '  no longer needed  ', idempotencyKey };
-  const closeBinding = lengthPrefixed(['market-admin-job-close-v1', accountId, identityId, jobId,
+  const closeBinding = lengthPrefixed(['market-admin-task-close-v1', accountId, identityId, taskId,
     'CANCEL', '14', 'no longer needed', idempotencyKey]);
   assert.equal(createClient().inspectProofApproval(request({ action: close,
-    purpose: 'administrator job cancellation or expiry', binding: closeBinding })).preview.purpose,
-  'administrator job cancellation or expiry');
+    purpose: 'administrator task cancellation or expiry', binding: closeBinding })).preview.purpose,
+  'administrator task cancellation or expiry');
+  const retiredClose={...close,kind:'adminJobClose',jobId:taskId};
+  delete retiredClose.taskId;
+  assert.throws(()=>createClient().inspectProofApproval(request({action:retiredClose,
+    purpose:'administrator task cancellation or expiry',binding:closeBinding})),{code:'MARKET_APPROVAL_PROTOCOL'});
 
-  const dispute = { kind: 'adminDisputeOpen', jobId, expectedEngagementVersion: 5,
+  const dispute = { kind: 'adminDisputeOpen', taskId, expectedEngagementVersion: 5,
     representedAgentId: '00000000-0000-4000-8000-000000000212', reason: 'NON_DELIVERY',
     statement: '  Work was not delivered.  ', evidenceUrls: ['https://evidence.example/report.pdf'],
     auditReason: '  Verified by review  ', idempotencyKey };
-  const disputeBinding = lengthPrefixed(['dispute-admin-open-v1', accountId, identityId, jobId, '5',
+  const disputeBinding = lengthPrefixed(['dispute-admin-open-v1', accountId, identityId, taskId, '5',
     dispute.representedAgentId, 'NON_DELIVERY', idempotencyKey, 'Work was not delivered.',
     'Verified by review', ...dispute.evidenceUrls]);
   assert.equal(createClient().inspectProofApproval(request({ action: dispute,
@@ -211,10 +215,10 @@ test('job close and administrator dispute approvals bind every typed field in wi
 test('administrator dispute text uses Kotlin whitespace trimming including controls but preserves FEFF', () => {
   const statement = '\u001cApproved\u001c';
   const auditReason = '\u001cReviewed\u001c';
-  const dispute = { kind: 'adminDisputeOpen', jobId, expectedEngagementVersion: 5,
+  const dispute = { kind: 'adminDisputeOpen', taskId, expectedEngagementVersion: 5,
     representedAgentId: '00000000-0000-4000-8000-000000000212', reason: 'OTHER',
     statement, evidenceUrls: [], auditReason, idempotencyKey };
-  const binding = lengthPrefixed(['dispute-admin-open-v1', accountId, identityId, jobId, '5',
+  const binding = lengthPrefixed(['dispute-admin-open-v1', accountId, identityId, taskId, '5',
     dispute.representedAgentId, 'OTHER', idempotencyKey, 'Approved', 'Reviewed']);
   assert.equal(createClient().inspectProofApproval(request({ action: dispute,
     purpose: 'administrator dispute opening', binding })).preview.purpose, 'administrator dispute opening');
@@ -253,14 +257,28 @@ test('administrator evidence binding follows URI.toASCIIString normalization and
     'https://evidence.example#note[1]',
     'https://evidence.example/e\u0301',
   ];
-  const dispute = { kind: 'adminDisputeOpen', jobId, expectedEngagementVersion: 5,
+  const dispute = { kind: 'adminDisputeOpen', taskId, expectedEngagementVersion: 5,
     representedAgentId: '00000000-0000-4000-8000-000000000212', reason: 'OTHER',
     statement: 'Reviewed evidence.', evidenceUrls, auditReason: 'Verified', idempotencyKey };
-  const binding = lengthPrefixed(['dispute-admin-open-v1', accountId, identityId, jobId, '5',
+  const binding = lengthPrefixed(['dispute-admin-open-v1', accountId, identityId, taskId, '5',
     dispute.representedAgentId, 'OTHER', idempotencyKey, 'Reviewed evidence.', 'Verified',
     'https://evidence.example', 'HTTPS://Evidence.Example:443/na%C3%AFve?q=%E2%9C%93',
     'https://evidence.example?items[]=1', 'https://evidence.example#note[1]',
     'https://evidence.example/%C3%A9']);
   assert.equal(createClient().inspectProofApproval(request({ action: dispute,
     purpose: 'administrator dispute opening', binding })).preview.purpose, 'administrator dispute opening');
+});
+
+
+test('task moderation signs the current TASK target and rejects retired target kinds',()=>{
+  const action={kind:'adminModeration',targetKind:'TASK',action:'HIDE',targetId:taskId,
+    expectedTargetVersion:2,expectedModerationVersion:0,reason:'reviewed',idempotencyKey};
+  const binding=lengthPrefixed(['market-admin-public-moderation-v1',accountId,identityId,'TASK',taskId,
+    'HIDE','2','0','reviewed',idempotencyKey]);
+  const valid=request({action,purpose:'administrator public moderation',binding});
+  assert.equal(createClient().inspectProofApproval(valid).preview.action.targetKind,'TASK');
+  assert.throws(()=>createClient().inspectProofApproval({...valid,action:{...action,targetKind:'JOB'}}),
+    {code:'MARKET_APPROVAL_PROTOCOL'});
+  assert.throws(()=>createClient().inspectProofApproval({...valid,action:{...action,action:'SUSPEND'}}),
+    {code:'MARKET_APPROVAL_PROTOCOL'});
 });

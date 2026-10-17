@@ -197,23 +197,24 @@ test('typed product purchase and refund approvals bind exact Shop terms and sign
     assert.equal(response.requestDigest, approvalRequestDigest(request));
     assert.equal(response.challengeId, request.challenge.challengeId);
     assert.equal(response.handoffId, request.handoffId);
-    assert.match(summary, new RegExp(`Asset: ${item.action.asset}`));
-    assert.match(summary, new RegExp(`Gross: ${largeGross} atomic`));
-    assert.match(summary, new RegExp(`Fee: ${item.action.feeAtomic} atomic`));
-    assert.match(summary, new RegExp(`Net: ${item.action.netAtomic} atomic`));
-    assert.match(summary, new RegExp(`Idempotency key: ${item.action.idempotencyKey}`));
+    assert.match(summary, new RegExp(`Proof-bound asset: ${item.action.asset}`));
+    assert.match(summary, new RegExp(`Proof-bound gross: ${largeGross} atomic`));
+    assert.match(summary, new RegExp(`Client-provided fee \\(not verified by this proof\\): ${item.action.feeAtomic} atomic`));
+    assert.match(summary, new RegExp(`Client-provided net \\(not verified by this proof\\): ${item.action.netAtomic} atomic`));
+    assert.match(summary, new RegExp(`Proof-bound idempotency key: ${item.action.idempotencyKey}`));
+    assert.match(summary,/Items marked client-provided are not verified by this proof/);
     if (item.action.kind === 'productPurchase') {
       assert.match(summary, /Action: purchase digital product release/);
-      assert.match(summary, new RegExp(`Seller: ${item.action.sellerAgentId}`));
-      assert.match(summary, new RegExp(`Release: ${item.action.releaseId}`));
-      assert.match(summary, new RegExp(`Release SHA-256: ${item.action.expectedReleaseHash}`));
+      assert.match(summary, new RegExp(`Client-provided seller \\(not verified by this proof\\): ${item.action.sellerAgentId}`));
+      assert.match(summary, new RegExp(`Proof-bound release ID: ${item.action.releaseId}`));
+      assert.match(summary, new RegExp(`Proof-bound release SHA-256: ${item.action.expectedReleaseHash}`));
     } else {
-      assert.match(summary, new RegExp(`Authority: ${item.authority}`));
-      assert.match(summary, new RegExp(`Purchase: ${item.action.purchaseId}`));
-      assert.match(summary, new RegExp(`Original purchase receipt SHA-256: ${item.action.originalPurchaseReceiptHash}`));
-      assert.match(summary, new RegExp(`Expected purchase version: ${item.action.expectedPurchaseVersion}`));
-      assert.match(summary, new RegExp(`Buyer: ${item.action.buyerAgentId}`));
-      assert.match(summary, new RegExp(`Seller: ${item.action.sellerAgentId}`));
+      assert.match(summary, new RegExp(`Proof-bound authority: ${item.authority}`));
+      assert.match(summary, new RegExp(`Proof-bound purchase ID: ${item.action.purchaseId}`));
+      assert.match(summary, new RegExp(`Proof-bound original purchase receipt SHA-256: ${item.action.originalPurchaseReceiptHash}`));
+      assert.match(summary, new RegExp(`Proof-bound expected purchase version: ${item.action.expectedPurchaseVersion}`));
+      assert.match(summary, new RegExp(`Client-provided buyer \\(not verified by this proof\\): ${item.action.buyerAgentId}`));
+      assert.match(summary, new RegExp(`Client-provided seller \\(not verified by this proof\\): ${item.action.sellerAgentId}`));
       assert.match(summary, item.authority === 'SELLER' ? /Action: seller refund/ : /Action: administrator refund compensation/);
     }
   }
