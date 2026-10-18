@@ -16,8 +16,8 @@ import { configureHelp, commandErrorMessage } from './help.js';
 import type { AccountPool, SpendingPolicy } from '../wallet/types.js';
 import type { ReceiveProgress } from '../wallet/auto-receive.js';
 import { runDoctor } from '../doctor/doctor.js';
-import { readMarketProofApprovalRequest, writeMarketProofApprovalResponse } from '../market/approval-files.js';
-import { normalizeDisputeText, normalizeEvidenceUrls } from '../market/proof-approval.js';
+import { readMarketplaceProofApprovalRequest, writeMarketplaceProofApprovalResponse } from '../marketplace/approval-files.js';
+import { normalizeDisputeText, normalizeEvidenceUrls } from '../marketplace/proof-approval.js';
 
 function number(value: string): number {
   if (!/^\d+$/.test(value) || !Number.isSafeInteger(Number(value))) throw new InvalidArgumentError('Use an unsigned integer.');
@@ -38,11 +38,11 @@ function compact(input: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
 }
 
-export function formatMarketApprovalPreview(preview: ReturnType<AttoApplication['inspectMarketProofApproval']>['preview']): string {
+export function formatMarketplaceApprovalPreview(preview: ReturnType<AttoApplication['inspectMarketplaceProofApproval']>['preview']): string {
   const action = preview.action;
   const command = action.command && typeof action.command === 'object' ? action.command as Record<string, unknown> : {};
   const fields = [
-    `Market: ${preview.marketOrigin}`,
+    `Marketplace: ${preview.marketplaceOrigin}`,
     `Transport: ${preview.transport}`,
     `Proof origin: ${preview.proofOrigin ?? '(none; Agent API audience)'}`,
     `Audience: ${preview.audience}`,
@@ -128,8 +128,8 @@ export function formatMarketApprovalPreview(preview: ReturnType<AttoApplication[
     fields.push(`Action: create a controller session for ${String(action.address)}`);
   }
   const heading = action.kind === 'productPurchase' || action.kind === 'productRefund'
-    ? 'Review this Market challenge before signing. Items marked client-provided are not verified by this proof:'
-    : 'Review this server-authored Market wallet proof before signing:';
+    ? 'Review this Marketplace challenge before signing. Items marked client-provided are not verified by this proof:'
+    : 'Review this server-authored Marketplace wallet proof before signing:';
   return `${heading}\n${fields.map(field => `  ${field}`).join('\n')}`;
 }
 
@@ -374,47 +374,47 @@ export async function runCli(argv = process.argv): Promise<void> {
       });
     });
   program.command('metrics').description('Read public Atto market metrics').action(() => call('metrics_get'));
-  const market = program.command('market').description('Fund and inspect the configured Market account');
-  market.command('connect').description('Connect this wallet to Market in a local terminal')
-    .requiredOption('--api-url <url>', 'Market /v1/agent/topups URL')
-    .requiredOption('--audience <audience>', 'Exact Market controller-proof audience')
+  const marketplace = program.command('marketplace').description('Fund and inspect the configured Marketplace account');
+  marketplace.command('connect').description('Connect this wallet to Marketplace in a local terminal')
+    .requiredOption('--api-url <url>', 'Marketplace /v1/agent/topups URL')
+    .requiredOption('--audience <audience>', 'Exact Marketplace controller-proof audience')
     .option('--browser-origin <origin>', 'Allow this exact browser origin for typed proof approvals (repeatable)',
       (origin: string, previous: string[]) => [...previous, origin], [])
     .option('--controller-index <index>', 'Saved wallet controller account index (default: 0)', number, 0)
     .action(async options => {
       requireTerminal();
-      const result = await app().connectMarket({ apiUrl: options.apiUrl, audience: options.audience,
+      const result = await app().connectMarketplace({ apiUrl: options.apiUrl, audience: options.audience,
         controllerIndex: options.controllerIndex, ...(options.browserOrigin?.length ? { browserOrigins: options.browserOrigin } : {}) });
-      output(result, 'market_connect');
+      output(result, 'marketplace_connect');
     });
-  market.command('topup <amount>').description('Fund the configured Market ATTO account under wallet spending limits')
+  marketplace.command('topup <amount>').description('Fund the configured Marketplace ATTO account under wallet spending limits')
     .option('--unit <unit>', 'ATTO (default) or RAW')
     .option('--request-id <id>', 'Payment ID (generated if omitted); reuse it after uncertainty')
     .option('--index <index>', 'Source account index (defaults to the approved pool)', number)
     .action(async (amount, options) => {
       const requestId = options.requestId ?? randomUUID();
       const input = compact({ amount, unit: options.unit, requestId, index: options.index });
-      parseOperation('market_topup', input);
+      parseOperation('marketplace_topup', input);
       sendRequestId = requestId;
       process.stderr.write(program.opts().json ? `${JSON.stringify({ progress: { requestId } })}\n`
-        : `Market top-up request ID: ${requestId}\n`);
-      await call('market_topup', input);
+        : `Marketplace top-up request ID: ${requestId}\n`);
+      await call('marketplace_topup', input);
     });
-  market.command('status <request-id>').description('Read and reconcile a Market top-up by its original request ID')
-    .action(requestId => call('market_topup_status', { requestId }));
-  market.command('approve <request-file>').description('Review and sign one exact typed Market controller-proof request')
+  marketplace.command('status <request-id>').description('Read and reconcile a Marketplace top-up by its original request ID')
+    .action(requestId => call('marketplace_topup_status', { requestId }));
+  marketplace.command('approve <request-file>').description('Review and sign one exact typed Marketplace controller-proof request')
     .action(async requestFile => {
       requireTerminal();
-      const request = readMarketProofApprovalRequest(requestFile);
-      const { preview } = app().inspectMarketProofApproval(request);
-      process.stderr.write(`${formatMarketApprovalPreview(preview)}\n`);
-      if (await terminalPrompt('Type approve to sign this exact Market challenge: ') !== 'approve') {
-        throw new AttoError('CANCELLED', 'No Market wallet approval was signed.');
+      const request = readMarketplaceProofApprovalRequest(requestFile);
+      const { preview } = app().inspectMarketplaceProofApproval(request);
+      process.stderr.write(`${formatMarketplaceApprovalPreview(preview)}\n`);
+      if (await terminalPrompt('Type approve to sign this exact Marketplace challenge: ') !== 'approve') {
+        throw new AttoError('CANCELLED', 'No Marketplace wallet approval was signed.');
       }
-      const response = await app().approveMarketProof(request);
-      const responseFile = writeMarketProofApprovalResponse(requestFile, response);
+      const response = await app().approveMarketplaceProof(request);
+      const responseFile = writeMarketplaceProofApprovalResponse(requestFile, response);
       output({ approved: true, responseFile, handoffId: preview.handoffId,
-        challengeId: preview.challengeId, expiresAt: preview.expiresAt }, 'market_approve');
+        challengeId: preview.challengeId, expiresAt: preview.expiresAt }, 'marketplace_approve');
     });
   program.command('quote').description('Preview a USD-to-Atto conversion using the indicative market price; does not send funds')
     .requiredOption('--usd <amount>', 'Exact USD amount')
@@ -586,11 +586,11 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto message sign': 'atto message sign --index 0 --text "exact challenge"',
     'atto message verify': 'atto message verify --public-key <hex> --signature <hex> --text "exact challenge"',
     'atto send': 'atto send <address> 1\n  atto send --to-index 1 --amount 1\n  atto send --to-label "Savings" --amount 1\n  atto send <address> --usd 1',
-    'atto market': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto market topup 1 --request-id marketplace-funding-001\n  atto market status marketplace-funding-001',
-    'atto market connect': 'atto market connect --api-url https://market.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example',
-    'atto market topup': 'atto market topup 1 --request-id marketplace-funding-001',
-    'atto market status': 'atto market status marketplace-funding-001',
-    'atto market approve': 'atto market approve ./market-approval-request.json',
+    'atto marketplace': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto marketplace topup 1 --request-id marketplace-funding-001\n  atto marketplace status marketplace-funding-001',
+    'atto marketplace connect': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example',
+    'atto marketplace topup': 'atto marketplace topup 1 --request-id marketplace-funding-001',
+    'atto marketplace status': 'atto marketplace status marketplace-funding-001',
+    'atto marketplace approve': 'atto marketplace approve ./marketplace-approval-request.json',
     'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1',
     'atto terms': 'atto terms show', 'atto terms show': 'atto terms show',
     'atto terms accept': 'atto terms accept --version <version-shown-by-terms-show> --accepted',

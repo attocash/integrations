@@ -95,10 +95,10 @@ test('shared validation rejects numeric amounts, secrets, invalid indexes, and a
   assert.throws(() => parseOperation('limits_propose', { policy: { perRequest: null, rolling: [{ days: 0.5, amount: '1', unit: 'ATTO' }] } }), { code: 'INVALID_INPUT' });
   assert.deepEqual(parseOperation('address_derive', {}), { index: 0 });
   assert.deepEqual(parseOperation('send', { destination: 'atto_test', amount: '1', unit: 'USD', requestId: 'usd-1' }), { destination: 'atto_test', amount: '1', unit: 'USD', requestId: 'usd-1' });
-  assert.deepEqual(parseOperation('market_topup', { amount: '1.25', requestId: 'market-1' }), { amount: '1.25', unit: 'ATTO', requestId: 'market-1' });
-  assert.throws(() => parseOperation('market_topup', { amount: 1, requestId: 'market-1' }), { code: 'INVALID_INPUT' });
-  assert.throws(() => parseOperation('market_topup', { amount: '1', unit: 'USD', requestId: 'market-1' }), { code: 'INVALID_INPUT' });
-  assert.deepEqual(parseOperation('market_topup_status', { requestId: 'market-1' }), { requestId: 'market-1' });
+  assert.deepEqual(parseOperation('marketplace_topup', { amount: '1.25', requestId: 'marketplace-1' }), { amount: '1.25', unit: 'ATTO', requestId: 'marketplace-1' });
+  assert.throws(() => parseOperation('marketplace_topup', { amount: 1, requestId: 'marketplace-1' }), { code: 'INVALID_INPUT' });
+  assert.throws(() => parseOperation('marketplace_topup', { amount: '1', unit: 'USD', requestId: 'marketplace-1' }), { code: 'INVALID_INPUT' });
+  assert.deepEqual(parseOperation('marketplace_topup_status', { requestId: 'marketplace-1' }), { requestId: 'marketplace-1' });
   assert.throws(() => parseOperation('terms_accept', { version: '2026-09-05', accepted: false }), { code: 'INVALID_INPUT' });
   assert.throws(() => parseOperation('terms_accept', { version: '2026-09-05' }), { code: 'INVALID_INPUT' });
 });
@@ -161,9 +161,9 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   const indexed = JSON.parse((await run(['send', '--to-index', '1', '--amount', '1'])).stdout).result;
   const history = JSON.parse((await run(['history', '--index', '1'])).stdout).result;
   const receivables = JSON.parse((await run(['receivables', '--index', '1'])).stdout).result;
-  const topup = JSON.parse((await run(['market', 'topup', '1.25', '--unit', 'RAW', '--request-id', 'market-funding-1', '--index', '3'])).stdout).result;
-  const topupStatus = JSON.parse((await run(['market', 'status', 'market-funding-1'])).stdout).result;
-  const generatedTopupRun = await run(['market', 'topup', '1']);
+  const topup = JSON.parse((await run(['marketplace', 'topup', '1.25', '--unit', 'RAW', '--request-id', 'marketplace-funding-1', '--index', '3'])).stdout).result;
+  const topupStatus = JSON.parse((await run(['marketplace', 'status', 'marketplace-funding-1'])).stdout).result;
+  const generatedTopupRun = await run(['marketplace', 'topup', '1']);
   const generatedTopup = JSON.parse(generatedTopupRun.stdout).result.input.requestId;
   const verifiedByAddress = JSON.parse((await run(['message', 'verify', '--address', verificationAddress, '--signature', 'bb'.repeat(64), '--hex', ''])).stdout).result;
 
@@ -186,8 +186,8 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   assert.match(indexed.input.requestId, /^[0-9a-f-]{36}$/);
   assert.deepEqual(history, { name: 'history_list', input: { event: 'entry', index: 1 } });
   assert.deepEqual(receivables, { name: 'receivables_list', input: { index: 1 } });
-  assert.deepEqual(topup, { name: 'market_topup', input: { amount: '1.25', unit: 'RAW', requestId: 'market-funding-1', index: 3 } });
-  assert.deepEqual(topupStatus, { name: 'market_topup_status', input: { requestId: 'market-funding-1' } });
+  assert.deepEqual(topup, { name: 'marketplace_topup', input: { amount: '1.25', unit: 'RAW', requestId: 'marketplace-funding-1', index: 3 } });
+  assert.deepEqual(topupStatus, { name: 'marketplace_topup_status', input: { requestId: 'marketplace-funding-1' } });
   assert.match(generatedTopup, /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
   assert.ok(generatedTopupRun.stderr.includes(JSON.stringify({ progress: { requestId: generatedTopup } })));
   assert.deepEqual(verifiedByAddress, { name: 'message_verify', input: { address: verificationAddress, signature: 'bb'.repeat(64), messageHex: '' } });
@@ -211,13 +211,13 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   }
 });
 
-test('Market connection command requires a terminal and accepts only the named connection fields', async t => {
+test('Marketplace connection command requires a terminal and accepts only the named connection fields', async t => {
   // Given a CLI harness that substitutes the application connection method and controls terminal flags.
-  const directory = await mkdtemp(join(tmpdir(), 'atto-cli-market-connect-'));
+  const directory = await mkdtemp(join(tmpdir(), 'atto-cli-marketplace-connect-'));
   t.after(() => rm(directory, { recursive: true, force: true }));
   const source = `
     const { AttoApplication } = await import(process.env.ATTO_TEST_APP_MODULE);
-    AttoApplication.prototype.connectMarket = async input => ({ connected: true, ...input });
+    AttoApplication.prototype.connectMarketplace = async input => ({ connected: true, ...input });
     if (process.env.ATTO_TEST_TERMINAL === '1') {
       Object.defineProperty(process.stdin, 'isTTY', { value: true });
       Object.defineProperty(process.stderr, 'isTTY', { value: true });
@@ -234,17 +234,17 @@ test('Market connection command requires a terminal and accepts only the named c
   });
 
   // When a nonterminal attempts connection, then terminal approval is required before any wallet app is opened.
-  await assert.rejects(run(['market', 'connect', '--api-url', 'https://market.example/v1/agent/topups', '--audience', 'agent', '--controller-index', '2']), error => {
+  await assert.rejects(run(['marketplace', 'connect', '--api-url', 'https://marketplace.example/v1/agent/topups', '--audience', 'agent', '--controller-index', '2']), error => {
     assert.equal(JSON.parse(error.stdout).error.code, 'TERMINAL_REQUIRED');
     return true;
   });
 
   // When the same fixed connection command runs in a terminal, it forwards only the bound configuration.
-  const result = JSON.parse((await run(['market', 'connect', '--api-url', 'https://market.example/v1/agent/topups', '--audience', 'agent', '--controller-index', '2'], true)).stdout).result;
-  assert.deepEqual(result, { connected: true, apiUrl: 'https://market.example/v1/agent/topups', audience: 'agent', controllerIndex: 2 });
+  const result = JSON.parse((await run(['marketplace', 'connect', '--api-url', 'https://marketplace.example/v1/agent/topups', '--audience', 'agent', '--controller-index', '2'], true)).stdout).result;
+  assert.deepEqual(result, { connected: true, apiUrl: 'https://marketplace.example/v1/agent/topups', audience: 'agent', controllerIndex: 2 });
 
   // Repeated browser origins remain an explicit ordered allowlist in the local connection request.
-  const provisioned = JSON.parse((await run(['market', 'connect', '--api-url', 'https://market.example/v1/agent/topups',
+  const provisioned = JSON.parse((await run(['marketplace', 'connect', '--api-url', 'https://marketplace.example/v1/agent/topups',
     '--audience', 'agent', '--controller-index', '2', '--browser-origin', 'https://site.example',
     '--browser-origin', 'https://admin.example'], true)).stdout).result;
   assert.deepEqual(provisioned.browserOrigins, ['https://site.example', 'https://admin.example']);

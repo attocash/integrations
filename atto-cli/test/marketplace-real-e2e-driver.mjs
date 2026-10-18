@@ -1,4 +1,4 @@
-// Invoked only by the isolated Market LOCAL integration test with a disposable profile.
+// Invoked only by the isolated Marketplace LOCAL integration test with a disposable profile.
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
@@ -7,7 +7,7 @@ import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { AttoMnemonic, AttoWork } from '@attocash/commons-core';
 import { AttoApplication } from '../dist/application/app.js';
 
-const [stage, directory, marketOrigin, nodeOrigin, fundingHash] = process.argv.slice(2);
+const [stage, directory, marketplaceOrigin, nodeOrigin, fundingHash] = process.argv.slice(2);
 const secretFile = join(directory, 'e2e-mnemonic');
 const secrets = {
   get: async () => readFile(secretFile, 'utf8').catch(error => {
@@ -16,7 +16,7 @@ const secrets = {
   }),
   set: async phrase => writeFile(secretFile, phrase, { mode: 0o600 }),
 };
-const request = { amount: '500000000', unit: 'RAW', requestId: 'real-market-local-e2e' };
+const request = { amount: '500000000', unit: 'RAW', requestId: 'real-marketplace-local-e2e' };
 const digest = value => createHash('sha256').update(value).digest('hex');
 const app = new AttoApplication({ directory, secrets });
 // The disposable node image has no /works service. Supply valid Commons work
@@ -48,8 +48,8 @@ try {
       access: 'spend', pool: { indexes: [0], consolidate: false },
     });
     await app.approveLimitsProposal(proposal.id);
-    const connected = await app.connectMarket({ apiUrl: `${marketOrigin}/v1/agent/topups`,
-      audience: 'urn:atto-market:agent-api:test', controllerIndex: 0 });
+    const connected = await app.connectMarketplace({ apiUrl: `${marketplaceOrigin}/v1/agent/topups`,
+      audience: 'urn:marketplace:agent-api:test', controllerIndex: 0 });
     console.log(JSON.stringify({ stage, address: address.address, publicKey: address.publicKey,
       accountId: connected.accountId, agentId: connected.agentId, identityId: connected.identityId }));
   } else if (stage === 'receive') {
@@ -61,7 +61,7 @@ try {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input);
-      if (url.origin === marketOrigin && url.pathname.startsWith('/v1/agent/topups/')
+      if (url.origin === marketplaceOrigin && url.pathname.startsWith('/v1/agent/topups/')
         && init.method === 'POST') {
         assert.equal(init.body, undefined, 'The paid continuation must be bodyless.');
         const header = new Headers(init.headers).get('PAYMENT-SIGNATURE');
@@ -75,15 +75,15 @@ try {
       return originalFetch(input, init);
     };
     if (stage === 'first') {
-      await assert.rejects(app.call('market_topup', request), { code: 'MARKET_UNAVAILABLE' });
-      assert.ok(observed, 'Market continuation was not forwarded.');
+      await assert.rejects(app.call('marketplace_topup', request), { code: 'MARKETPLACE_UNAVAILABLE' });
+      assert.ok(observed, 'Marketplace continuation was not forwarded.');
       const record = app.ledger.get(request.requestId);
       const privateData = app.ledger.externalSecretsFor(request.requestId);
       assert.equal(record.status, 'signed');
       assert.ok(record.hash && privateData.paymentSignature && privateData.transactionJson);
       assert.equal(digest(privateData.paymentSignature), observed.headerDigest);
       console.log(JSON.stringify({ stage, hash: record.hash, status: record.status,
-        marketState: record.external.marketState, pendingRaw: app.ledger.usage().pendingRaw,
+        marketplaceState: record.external.marketplaceState, pendingRaw: app.ledger.usage().pendingRaw,
         paymentIdentifier: record.external.paymentIdentifier,
         headerDigest: observed.headerDigest, transactionDigest: digest(privateData.transactionJson),
         forwardedHttpStatus: observed.httpStatus, bodyless: observed.bodyless }));
@@ -91,26 +91,26 @@ try {
       const before = app.ledger.get(request.requestId);
       const privateData = app.ledger.externalSecretsFor(request.requestId);
       assert.ok(before.hash && privateData.paymentSignature && privateData.transactionJson);
-      await assert.rejects(app.call('market_topup', { ...request, amount: '500000001' }),
+      await assert.rejects(app.call('marketplace_topup', { ...request, amount: '500000001' }),
         { code: 'REQUEST_CONFLICT' });
       const other = await app.call('address_derive', { index: 1 });
       await assert.rejects(app.call('send', { destination: other.address, amount: '1', unit: 'RAW',
-        requestId: 'ordinary-send-blocked-by-market' }), { code: 'POOL_BUSY' });
-      const pending = await app.call('market_topup_status', { requestId: request.requestId });
-      assert.equal(pending.marketState, 'PENDING');
-      const result = await app.call('market_topup', request);
+        requestId: 'ordinary-send-blocked-by-marketplace' }), { code: 'POOL_BUSY' });
+      const pending = await app.call('marketplace_topup_status', { requestId: request.requestId });
+      assert.equal(pending.marketplaceState, 'PENDING');
+      const result = await app.call('marketplace_topup', request);
       assert.ok(observed, 'The exact payment was not replayed.');
-      assert.ok(['ACCEPTED', 'SETTLED'].includes(result.marketState),
+      assert.ok(['ACCEPTED', 'SETTLED'].includes(result.marketplaceState),
         'confirmed funding remains successful after the linked RECEIVE settles');
       assert.equal(result.hash, before.hash);
       assert.equal(observed.headerDigest, digest(privateData.paymentSignature));
       const final = app.ledger.get(request.requestId);
       console.log(JSON.stringify({ stage, hash: final.hash, status: final.status,
-        marketState: final.external.marketState, paymentState: final.external.paymentState,
+        marketplaceState: final.external.marketplaceState, paymentState: final.external.paymentState,
         pendingRaw: app.ledger.usage().pendingRaw, headerDigest: observed.headerDigest,
         transactionDigest: digest(privateData.transactionJson), forwardedHttpStatus: observed.httpStatus,
         bodyless: observed.bodyless, changedRequestRejected: true, ordinarySendBlocked: true,
-        pendingBeforeReplay: pending.marketState }));
+        pendingBeforeReplay: pending.marketplaceState }));
     }
   } else {
     throw new Error(`Unknown test stage: ${stage}`);

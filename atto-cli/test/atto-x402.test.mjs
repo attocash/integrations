@@ -11,7 +11,7 @@ test('Commons 8 signed SEND preserves raw unsigned integers above 2^53 inside x4
   assert.equal(await transaction.isValid(), true);
   assert.match(transactionJson, /"balance":9007199254740993/);
 
-  const apiUrl = 'https://market.example.test/v1/agent/topups';
+  const apiUrl = 'https://marketplace.example.test/v1/agent/topups';
   const intentId = '00000000-0000-4000-8000-000000000079';
   const requirementJson = JSON.stringify({ x402Version: 2,
     resource: { url: `${apiUrl}/${intentId}` },
@@ -34,10 +34,10 @@ test('Commons 8 signed SEND preserves raw unsigned integers above 2^53 inside x4
 });
 
 test('x402 challenges reject unsupported mechanism fields and resources outside the exact intent', async () => {
-  // Given a valid immutable exact-v2 Market challenge for the signed LOCAL vector.
+  // Given a valid immutable exact-v2 Marketplace challenge for the signed LOCAL vector.
   const transactionJson = (await readFile(new URL('./fixtures/commons8-send-bigint.json', import.meta.url), 'utf8')).trim();
   const transaction = AttoTransaction.fromJson(transactionJson);
-  const apiUrl = 'https://market.example.test/v1/agent/topups';
+  const apiUrl = 'https://marketplace.example.test/v1/agent/topups';
   const intentId = '00000000-0000-4000-8000-000000000079';
   const base = { x402Version: 2, resource: { url: `${apiUrl}/${intentId}` },
     accepts: [{ scheme: 'exact', network: 'atto:local', amount: '10', asset: 'atto',
@@ -58,9 +58,9 @@ test('x402 challenges reject unsupported mechanism fields and resources outside 
     { ...base, accepts: [{ ...base.accepts[0], asset: 'xno' }] },
     { ...base, accepts: [{ ...base.accepts[0], extra: { assetTransferMethod: 'native-state', paymentFlow: 'upfront' } }] },
     { ...base, extensions: { 'payment-identifier': { schema: { type: 'object' }, info: { required: false } } } },
-  ]) assert.throws(() => parse(candidate), { code: 'MARKET_PROTOCOL' });
+  ]) assert.throws(() => parse(candidate), { code: 'MARKETPLACE_PROTOCOL' });
 
   // Then resource origin, intent path, query, and fragment are checked separately from payment terms.
-  assert.throws(() => parse({ ...base, resource: { url: 'https://other.example/v1/agent/topups/' + intentId } }), { code: 'MARKET_RESOURCE_MISMATCH' });
-  assert.throws(() => parse({ ...base, resource: { url: `${apiUrl}/${intentId}?next=elsewhere` } }), { code: 'MARKET_RESOURCE_MISMATCH' });
+  assert.throws(() => parse({ ...base, resource: { url: 'https://other.example/v1/agent/topups/' + intentId } }), { code: 'MARKETPLACE_RESOURCE_MISMATCH' });
+  assert.throws(() => parse({ ...base, resource: { url: `${apiUrl}/${intentId}?next=elsewhere` } }), { code: 'MARKETPLACE_RESOURCE_MISMATCH' });
 });

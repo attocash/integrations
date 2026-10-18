@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import test from 'node:test';
 import { AttoMnemonic } from '@attocash/commons-core';
 import { derivedSigner } from '../dist/wallet/signing.js';
-import { MarketTopUpClient, validateMarketApiUrl } from '../dist/market/topups.js';
+import { MarketplaceTopUpClient, validateMarketplaceApiUrl } from '../dist/marketplace/topups.js';
 
 const apiUrl = 'http://127.0.0.1:43210/v1/agent/topups';
 const intentId = '00000000-0000-4000-8000-000000000079';
@@ -27,22 +27,22 @@ function requirementHeader(payTo) {
   return Buffer.from(JSON.stringify(value)).toString('base64');
 }
 
-test('Market URL validation keeps the fixed resource path and confines HTTP to loopback LOCAL', () => {
+test('Marketplace URL validation keeps the fixed resource path and confines HTTP to loopback LOCAL', () => {
   // Given
-  const validHttps = 'https://market.example/v1/agent/topups';
+  const validHttps = 'https://marketplace.example/v1/agent/topups';
 
   // When / Then
-  assert.equal(validateMarketApiUrl(validHttps, 'LIVE'), validHttps);
-  assert.equal(validateMarketApiUrl(apiUrl, 'LOCAL'), apiUrl);
-  for (const value of ['http://market.example/v1/agent/topups', 'http://127.0.0.1/v1/agent/topups/extra',
-    'https://user:secret@market.example/v1/agent/topups', 'https://market.example/v1/agent/topups?redirect=https://evil.test']) {
-    assert.throws(() => validateMarketApiUrl(value, 'LOCAL'), { code: 'MARKET_CONFIGURATION' });
+  assert.equal(validateMarketplaceApiUrl(validHttps, 'LIVE'), validHttps);
+  assert.equal(validateMarketplaceApiUrl(apiUrl, 'LOCAL'), apiUrl);
+  for (const value of ['http://marketplace.example/v1/agent/topups', 'http://127.0.0.1/v1/agent/topups/extra',
+    'https://user:secret@marketplace.example/v1/agent/topups', 'https://marketplace.example/v1/agent/topups?redirect=https://evil.test']) {
+    assert.throws(() => validateMarketplaceApiUrl(value, 'LOCAL'), { code: 'MARKETPLACE_CONFIGURATION' });
   }
-  assert.throws(() => validateMarketApiUrl(apiUrl, 'LIVE'), { code: 'MARKET_CONFIGURATION' });
+  assert.throws(() => validateMarketplaceApiUrl(apiUrl, 'LIVE'), { code: 'MARKETPLACE_CONFIGURATION' });
 });
 
-test('configured Market client signs its controller proof and sends a bodyless bound continuation', async t => {
-  // Given a single configured local Market origin, a saved controller, and a server returning the current handshake DTOs.
+test('configured Marketplace client signs its controller proof and sends a bodyless bound continuation', async t => {
+  // Given a single configured local Marketplace origin, a saved controller, and a server returning the current handshake DTOs.
   const phrase = (await AttoMnemonic.generate()).phrase;
   const seed = await (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync();
   const controller = await derivedSigner(seed, 0);
@@ -55,7 +55,7 @@ test('configured Market client signs its controller proof and sends a bodyless b
   const challengeId = '00000000-0000-4000-8000-000000000103';
   const issuedAt = new Date(Date.now() - 1000).toISOString();
   const expiresAt = new Date(Date.now() + 120_000).toISOString();
-  const proofMessage = `Atto Market Agent Controller Proof v1\nAudience: market-test\nNetwork: live\nAddress: ${controller.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nNonce: ${'ab'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
+  const proofMessage = `Marketplace Agent Controller Proof v1\nAudience: marketplace-test\nNetwork: live\nAddress: ${controller.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nNonce: ${'ab'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
   const paymentIdentifier = 'account-scoped-payment-079';
   let sessionAgentId = agentId;
   const paymentSignature = Buffer.from('opaque exact signed payment bytes').toString('base64');
@@ -93,7 +93,7 @@ test('configured Market client signs its controller proof and sends a bodyless b
       assert.equal(headers.get('origin'), null);
       assert.equal(call.redirect, 'error');
       order.push('continuation');
-      assert.equal(init.body, undefined, 'Market continuation has no JSON request body.');
+      assert.equal(init.body, undefined, 'Marketplace continuation has no JSON request body.');
       assert.equal(headers.get('payment-signature'), paymentSignature);
       return new Response(JSON.stringify(continuationStatus), {
         status: continuationHttpStatus, headers: { 'PAYMENT-RESPONSE': paymentResponse },
@@ -111,16 +111,16 @@ test('configured Market client signs its controller proof and sends a bodyless b
     if (url.pathname === `/v1/agent/topups/${intentId}` && init.method === 'GET') {
       return new Response(JSON.stringify(getStatus), { status: 200 });
     }
-    throw new Error(`Unexpected Market request ${init.method} ${url.pathname}`);
+    throw new Error(`Unexpected Marketplace request ${init.method} ${url.pathname}`);
   };
   t.after(() => { globalThis.fetch = originalFetch; seed.value.fill(0); });
 
-  const client = new MarketTopUpClient(store, { settings: () => ({ network: 'LOCAL' }),
+  const client = new MarketplaceTopUpClient(store, { settings: () => ({ network: 'LOCAL' }),
     addresses: () => [{ index: 0, address: controller.address.value, publicKey: controller.publicKey.toString(), active: true }],
     seed: async () => (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync(), mcp: false });
 
   // When the local owner connects, requests the challenge, submits a payment, and reads its status.
-  const connection = await client.connect({ apiUrl, audience: 'market-test', controllerIndex: 0 });
+  const connection = await client.connect({ apiUrl, audience: 'marketplace-test', controllerIndex: 0 });
   const challenge = await client.challenge(connection, paymentIdentifier, '10');
   let prepared = false;
   const pending = await client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
@@ -141,7 +141,7 @@ test('configured Market client signs its controller proof and sends a bodyless b
   assert.equal(calls.filter(call => call.headers.has('origin')).length, 0);
   assert.ok(calls.every(call => call.url.origin === new URL(apiUrl).origin));
   assert.ok(calls.every(call => call.redirect === 'error'));
-  assert.deepEqual([...saved.keys()].sort(), ['identity', 'market.topups.connection']);
+  assert.deepEqual([...saved.keys()].sort(), ['identity', 'marketplace.topups.connection']);
   assert.doesNotMatch(JSON.stringify([...saved.entries()]), /access-token-at-least-16|refresh-token-at-least-16|PAYMENT-SIGNATURE/);
 
   // Both confirmed SEND and later RECEIVE states are successful; HTTP 200 must carry a matching successful receipt.
@@ -162,15 +162,15 @@ test('configured Market client signs its controller proof and sends a bodyless b
   getStatus = topUpStatus({ intentId: '00000000-0000-4000-8000-000000000105', state: 'ACCEPTED',
     sendHash: 'A'.repeat(64), payer: controller.address.value, paymentState: 'ACCEPTED' });
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
-    { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKET_PROTOCOL' });
+    { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKETPLACE_PROTOCOL' });
   getStatus = topUpStatus({ state: 'SETTLED', sendHash: 'B'.repeat(64), payer: controller.address.value,
     paymentState: 'SETTLED' });
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
-    { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKET_PROTOCOL' });
+    { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKETPLACE_PROTOCOL' });
   getStatus = topUpStatus({ state: 'SETTLED', sendHash: 'A'.repeat(64), payer: recipient.address.value,
     paymentState: 'SETTLED' });
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
-    { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKET_PROTOCOL' });
+    { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKETPLACE_PROTOCOL' });
   for (const terminal of [{ state: 'ACCEPTED' }, { paymentState: 'SETTLED' }]) {
     for (const missing of [
       { sendHash: null, payer: controller.address.value },
@@ -179,7 +179,7 @@ test('configured Market client signs its controller proof and sends a bodyless b
     ]) {
       getStatus = topUpStatus({ state: 'PENDING', paymentState: 'PENDING', ...terminal, ...missing });
       await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local',
-        { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKET_PROTOCOL' });
+        { hash: 'A'.repeat(64), payer: controller.address.value }), { code: 'MARKETPLACE_PROTOCOL' });
     }
   }
   getStatus = topUpStatus();
@@ -188,34 +188,34 @@ test('configured Market client signs its controller proof and sends a bodyless b
   getStatus = topUpStatus({ state: 'PENDING', sendHash: 'A'.repeat(64), payer: controller.address.value,
     paymentState: 'PENDING' });
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local'),
-    { code: 'MARKET_PROTOCOL' });
+    { code: 'MARKETPLACE_PROTOCOL' });
 
   // Paid-continuation body and PAYMENT-RESPONSE must agree with the assigned intent, hash, and payer.
   continuationStatus = topUpStatus({ intentId: '00000000-0000-4000-8000-000000000105', state: 'ACCEPTED',
     sendHash: 'A'.repeat(64), payer: controller.address.value, paymentState: 'ACCEPTED' });
   await assert.rejects(client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
     { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value }, async () => {}),
-  { code: 'MARKET_PROTOCOL' });
+  { code: 'MARKETPLACE_PROTOCOL' });
   continuationStatus = topUpStatus({ state: 'PENDING', sendHash: 'B'.repeat(64),
     payer: controller.address.value, paymentState: 'PENDING' });
   await assert.rejects(client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
     { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value }, async () => {}),
-  { code: 'MARKET_PROTOCOL' });
+  { code: 'MARKETPLACE_PROTOCOL' });
   continuationStatus = topUpStatus({ state: 'PENDING', sendHash: 'A'.repeat(64),
     payer: controller.address.value, paymentState: 'PENDING' });
   paymentResponse = Buffer.from(JSON.stringify({ success: false, transaction: 'A'.repeat(64),
     network: 'atto:local', payer: recipient.address.value, errorReason: 'settlement_pending' })).toString('base64');
   await assert.rejects(client.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
     { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value }, async () => {}),
-  { code: 'MARKET_PROTOCOL' });
+  { code: 'MARKETPLACE_PROTOCOL' });
 
-  // If a later login resolves a different Market agent for this controller, reject before reading payment status.
+  // If a later login resolves a different Marketplace agent for this controller, reject before reading payment status.
   sessionAgentId = '00000000-0000-4000-8000-000000000104';
   client.session.value.accessExpiresAt = 0;
-  await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local'), { code: 'MARKET_IDENTITY_CHANGED' });
+  await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local'), { code: 'MARKETPLACE_IDENTITY_CHANGED' });
 });
 
-test('MCP cannot reconfigure Market origin or controller before network access', async t => {
+test('MCP cannot reconfigure Marketplace origin or controller before network access', async t => {
   // Given a configured connection response with a different agent identity and an MCP-only client.
   const saved = new Map([['identity', { address: 'controller', fingerprint: 'a'.repeat(64) }]]);
   const store = { get: key => saved.get(key), set: (key, value) => saved.set(key, value) };
@@ -224,10 +224,10 @@ test('MCP cannot reconfigure Market origin or controller before network access',
   globalThis.fetch = async () => { fetches++; return new Response(JSON.stringify({ challengeId: '00000000-0000-4000-8000-000000000103',
     message: 'unexpected', issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString() }), { status: 200 }); };
   t.after(() => { globalThis.fetch = previousFetch; });
-  const client = new MarketTopUpClient(store, { settings: () => ({ network: 'LOCAL' }), addresses: () => [], seed: async () => { throw new Error('must not read seed'); }, mcp: true });
+  const client = new MarketplaceTopUpClient(store, { settings: () => ({ network: 'LOCAL' }), addresses: () => [], seed: async () => { throw new Error('must not read seed'); }, mcp: true });
 
-  // When MCP attempts to choose its own Market origin, then the terminal-only guard rejects it before fetch or signing.
-  await assert.rejects(client.connect({ apiUrl, audience: 'market-test', controllerIndex: 0 }), { code: 'LOCAL_APPROVAL_REQUIRED' });
+  // When MCP attempts to choose its own Marketplace origin, then the terminal-only guard rejects it before fetch or signing.
+  await assert.rejects(client.connect({ apiUrl, audience: 'marketplace-test', controllerIndex: 0 }), { code: 'LOCAL_APPROVAL_REQUIRED' });
 
   // Then no remote request, key read, or public connection row is created.
   assert.equal(fetches, 0);

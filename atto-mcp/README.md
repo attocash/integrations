@@ -271,7 +271,7 @@ for storage, backup, and reset details.
 | Payment pool | `pool_get` |
 | Local payment journal | `journal_list`, `journal_get` |
 | Representatives | `representative_change` |
-| Market information | `metrics_get`, `price_quote` |
+| Marketplace information | `metrics_get`, `price_quote` |
 | USD payment terms | `terms_get`, `terms_accept` |
 | Shared budgets | `limits_get`, `limits_propose` |
 | Session watches | `watch_start`, `watch_list`, `watch_read`, `watch_stop` |
@@ -331,7 +331,7 @@ USD sends use an indicative conversion and require explicit acceptance of the
 current terms. Read `terms_get`, obtain the user's acknowledgement, and call
 `terms_accept` with that version and `accepted: true`. `metrics_get` and
 `price_quote` can be read without acceptance. USD sends work on LIVE, reject
-market observations older than 72 hours, and retain their original Atto amount
+marketplace observations older than 72 hours, and retain their original Atto amount
 when the same request ID is retried. They do not perform an exchange trade or
 guarantee a dollar value.
 

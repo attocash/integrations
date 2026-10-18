@@ -26,14 +26,14 @@ function object(value: unknown): Record<string, unknown> | undefined {
 
 function decodeBase64(value: string, maxBytes: number): string {
   if (value.length < 1 || value.length > MAX_HEADER_CHARS || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
-    throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid payment challenge.');
+    throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid payment challenge.');
   }
   const bytes = Buffer.from(value, 'base64');
   if (bytes.length < 1 || bytes.length > maxBytes || bytes.toString('base64') !== value) {
-    throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid payment challenge.');
+    throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid payment challenge.');
   }
   try { return new TextDecoder('utf-8', { fatal: true }).decode(bytes); }
-  catch { throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid payment challenge.'); }
+  catch { throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid payment challenge.'); }
 }
 
 export function parseAttoExactRequirement(input: {
@@ -46,7 +46,7 @@ export function parseAttoExactRequirement(input: {
   const rawJson = decodeBase64(input.header, MAX_REQUIRED_BYTES);
   let decoded: unknown;
   try { decoded = JSON.parse(rawJson); }
-  catch { throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid payment challenge.'); }
+  catch { throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid payment challenge.'); }
   const requirement = object(decoded);
   const resource = object(requirement?.resource);
   const accepts = requirement?.accepts;
@@ -65,19 +65,19 @@ export function parseAttoExactRequirement(input: {
     || (accepted.maxTimeoutSeconds as number) < 1 || (accepted.maxTimeoutSeconds as number) > 3600
     || extra?.assetTransferMethod !== 'native' || extra.paymentFlow !== 'authorization'
     || identifierInfo?.required !== true || !identifierSchema) {
-    throw new AttoError('MARKET_PROTOCOL', 'Market returned an unsupported ATTO payment challenge.');
+    throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an unsupported ATTO payment challenge.');
   }
   let offered: URL;
   try { offered = new URL(resourceUrl); }
-  catch { throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid payment resource.'); }
+  catch { throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid payment resource.'); }
   if (offered.origin !== expected.origin || offered.pathname !== expected.pathname || offered.search || offered.hash
     || offered.username || offered.password) {
-    throw new AttoError('MARKET_RESOURCE_MISMATCH', 'Market offered a payment resource outside the configured top-up origin and intent.');
+    throw new AttoError('MARKETPLACE_RESOURCE_MISMATCH', 'Marketplace offered a payment resource outside the configured top-up origin and intent.');
   }
   let payTo: string;
   try { payTo = parseAddress(accepted.payTo as string).value; }
-  catch { throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid ATTO deposit address.'); }
-  if (payTo !== accepted.payTo) throw new AttoError('MARKET_PROTOCOL', 'Market returned a noncanonical ATTO deposit address.');
+  catch { throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid ATTO deposit address.'); }
+  if (payTo !== accepted.payTo) throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned a noncanonical ATTO deposit address.');
   return {
     rawJson,
     resource,
@@ -96,12 +96,12 @@ export function parseAttoExactRequirement(input: {
 export function paymentPayload(requirement: AttoExactRequirement, paymentIdentifier: string, transaction: AttoTransaction): { json: string; header: string } {
   const transactionJson = transaction.toJson();
   if (!transactionJson || Buffer.byteLength(transactionJson, 'utf8') > MAX_REQUIRED_BYTES) {
-    throw new AttoError('MARKET_PROTOCOL', 'The signed ATTO transaction exceeds the supported payment size.');
+    throw new AttoError('MARKETPLACE_PROTOCOL', 'The signed ATTO transaction exceeds the supported payment size.');
   }
   const json = `{"x402Version":2,"resource":${JSON.stringify(requirement.resource)},"accepted":${JSON.stringify(requirement.accepted)},"payload":{"transaction":${transactionJson}},"extensions":{"payment-identifier":{"schema":${JSON.stringify(requirement.identifierSchema)},"info":{"required":true,"id":${JSON.stringify(paymentIdentifier)}}}}}`;
   const encoded = Buffer.from(json, 'utf8').toString('base64');
   if (Buffer.byteLength(json, 'utf8') > MAX_REQUIRED_BYTES || encoded.length > MAX_HEADER_CHARS) {
-    throw new AttoError('MARKET_PROTOCOL', 'The ATTO payment payload exceeds the supported size.');
+    throw new AttoError('MARKETPLACE_PROTOCOL', 'The ATTO payment payload exceeds the supported size.');
   }
   return { json, header: encoded };
 }
@@ -109,7 +109,7 @@ export function paymentPayload(requirement: AttoExactRequirement, paymentIdentif
 export function paymentDeadline(transaction: AttoTransaction, maxTimeoutSeconds: number, intentExpiresAt: string): bigint {
   const timeoutDeadline = BigInt(transaction.block.timestamp.toEpochMilliseconds()) + BigInt(maxTimeoutSeconds) * 1000n;
   const expiry = Date.parse(intentExpiresAt);
-  if (!Number.isSafeInteger(expiry) || expiry < 0) throw new AttoError('MARKET_PROTOCOL', 'Market returned an invalid top-up expiry.');
+  if (!Number.isSafeInteger(expiry) || expiry < 0) throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid top-up expiry.');
   const intentDeadline = BigInt(expiry);
   return timeoutDeadline < intentDeadline ? timeoutDeadline : intentDeadline;
 }

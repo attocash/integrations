@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -286,5 +286,119 @@ test('payment metadata accepts bounded JSON objects and rejects oversized or dee
   assert.equal(paymentMetadataSchema.safeParse({ reason: 'Invoice', tags: ['one', 'two'], context: { number: 3 } }).success, true);
   for (const value of [[], { reason: '€'.repeat(1500) }, { a: { b: { c: { d: { e: { f: true } } } } } }, { unsupported: 1n }]) {
     assert.equal(paymentMetadataSchema.safeParse(value).success, false);
+  }
+});
+
+function historicalPayment(kind, id, raw, status = 'reserved') {
+  return { id, index: 1, destination: 'historical-recipient', raw, createdAt: now, status,
+    ...(status === 'unknown' || status === 'published' ? { hash: `${id}-hash`, blockJson: '{}',
+      ...(status === 'published' ? { publishedAt: now } : {}) } : {}),
+    external: { kind, version: 1, paymentIdentifier: `identifier-${id}`, network: 'atto:local',
+      intentId: '11111111-1111-4111-8111-111111111111', resourceUrl: 'http://localhost/v1/agent/topups',
+      requirementHash: 'a'.repeat(64), intentExpiresAt: new Date(now + 60_000).toISOString(), marketState: 'PENDING',
+      paymentState: null, nativeState: status === 'reserved' ? 'challenged' : 'unknown',
+      ...(status !== 'reserved' ? { attemptedAt: now } : {}) } };
+}
+
+test('historical Market records preserve generic journal reads, reservations, and exact stored bytes', t => {
+  // Given a shared wallet with ordinary history, both old payment kinds, and a current Marketplace record.
+  const { store, ledger, directory } = fixture(t);
+  const generic = { ...payment('ordinary', '10'), plan: undefined, status: 'reserved' };
+  const topup = historicalPayment('market-topup', 'historical-topup', '20');
+  const intent = historicalPayment('market-intent', 'historical-intent', '30', 'unknown');
+  const published = historicalPayment('market-topup', 'historical-published', '40', 'published');
+  const { marketState, ...currentExternal } = historicalPayment('marketplace-topup', 'current-topup', '5').external;
+  const current = { ...historicalPayment('marketplace-topup', 'current-topup', '5'),
+    external: { ...currentExternal, marketplaceState: marketState } };
+  const records = [generic, topup, intent, published, current];
+  store.set('spending.records', records);
+  ledger.setPolicy({ ...policy, rolling: [{ days: 1, amount: '105', unit: 'RAW' }] });
+  const snapshot = () => ['state.sqlite', 'state.sqlite-wal'].map(name => readFileSync(join(directory, name)));
+  const before = snapshot();
+  const saved = JSON.stringify(store.get('spending.records'));
+
+  // When historical records are read through the same paths as ordinary wallet history and spending checks.
+  const page = ledger.journalList();
+  const usage = ledger.usage(now);
+  ledger.assertReservationAllowed('ordinary', now);
+
+  // Then old tags stay visible, all reservations remain counted, and reading performs no database rewrite.
+  assert.equal(ledger.journalGet('ordinary').id, generic.id);
+  assert.deepEqual(ledger.get(topup.id), topup);
+  assert.deepEqual(ledger.get(intent.id), intent);
+  assert.deepEqual(ledger.get(current.id), current);
+  assert.equal(page.items.length, 5);
+  assert.deepEqual(ledger.pending().map(record => record.id), ['ordinary', topup.id, intent.id, current.id]);
+  assert.equal(usage.pendingRaw, '65');
+  assert.equal(usage.rolling[0].publishedRaw, '40');
+  assert.equal(usage.rolling[0].usedRaw, '105');
+  assert.throws(() => ledger.assertCanReserve('1', now), { code: 'SPENDING_LIMIT' });
+  assert.equal(JSON.stringify(store.get('spending.records')), saved);
+  assert.deepEqual(snapshot(), before);
+});
+
+test('ordinary payment mutations preserve historical records without upgrading their authorization', t => {
+  // Given both historical kinds in the same journal as an ordinary pending send.
+  const { store, ledger } = fixture(t);
+  const historical = [historicalPayment('market-topup', 'historical-topup', '20'),
+    historicalPayment('market-intent', 'historical-intent', '30', 'unknown')];
+  store.set('spending.records', historical);
+  const before = JSON.stringify(historical);
+  const request = { ...payment('new-ordinary', '10'), plan: undefined };
+
+  // When a new ordinary payment is reserved and then signed.
+  ledger.reserve(request);
+  ledger.signed(request.id, 'ordinary-send-hash', '{}');
+
+  // Then the new payment uses its normal format and neither old record is rewritten or usable for new signing.
+  assert.equal(ledger.get(request.id).status, 'signed');
+  assert.equal(ledger.get(request.id).external, undefined);
+  assert.equal(JSON.stringify(store.get('spending.records').slice(0, 2)), before);
+  for (const record of historical) {
+    assert.throws(() => ledger.reserve({ ...record, id: `${record.id}-replacement` }), { code: 'INVALID_REQUEST' });
+    assert.throws(() => ledger.signed(record.id, 'replacement-hash', '{}'));
+    assert.throws(() => ledger.externalStatus(record.id, { marketplaceState: 'ACCEPTED' }), { code: 'SEND_STATE' });
+  }
+  assert.equal(JSON.stringify(store.get('spending.records').slice(0, 2)), before);
+});
+
+test('historical payment accounting does not resume old Marketplace authorizations', async t => {
+  // Given old payment records and the current public Marketplace topup entrypoint.
+  const { store, ledger } = fixture(t);
+  store.set('spending.records', [historicalPayment('market-topup', 'historical-topup', '20'),
+    historicalPayment('market-intent', 'historical-intent', '30', 'unknown')]);
+  const { Payments } = await import(pathToFileURL(join(packageDirectory, 'dist/spending/payments.js')).href);
+  const payments = new Payments(store, ledger, { mcp: true }, undefined, undefined,
+    undefined, undefined, undefined);
+  const before = JSON.stringify(store.get('spending.records'));
+
+  // When the current recovery operation receives an old ID.
+  const topup = payments.marketplaceTopUpStatus('historical-topup');
+
+  // Then the current entrypoint rejects the old authorization, and pending accounts remain fenced.
+  await assert.rejects(topup, { code: 'REQUEST_CONFLICT' });
+  assert.throws(() => payments.requireAvailable(1), { code: 'ACCOUNT_RESERVED' });
+  assert.equal(JSON.stringify(store.get('spending.records')), before);
+});
+
+test('historical journal compatibility still rejects malformed and hybrid payment records', t => {
+  // Given representative corruptions of old payment tags and shared accounting data.
+  const { store, ledger } = fixture(t);
+  const valid = historicalPayment('market-topup', 'historical-topup', '20');
+  const variants = [
+    { ...valid, raw: '-1' },
+    ...[{ kind: 'market-unknown' }, { marketState: undefined }, { marketState: 'INVALID' },
+      { marketplaceState: 'PENDING' }, { version: 2 }, { requirementHash: 'invalid' },
+      { nativeState: 'unknown' }].map(change => ({ ...valid, external: { ...valid.external, ...change } })),
+  ];
+
+  // When each malformed record is loaded from durable state.
+  for (const record of variants) {
+    store.set('spending.records', [record]);
+    const before = JSON.stringify(store.get('spending.records'));
+
+    // Then it remains rejected without a cleanup or migration write.
+    assert.throws(() => ledger.journalList(), { code: 'INVALID_STATE' });
+    assert.equal(JSON.stringify(store.get('spending.records')), before);
   }
 });

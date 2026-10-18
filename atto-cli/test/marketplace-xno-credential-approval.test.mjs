@@ -1,15 +1,15 @@
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
 import test from 'node:test';
-import {inspectMarketProofApproval} from '../dist/market/proof-approval.js';
-import {formatMarketApprovalPreview} from '../dist/cli/cli.js';
+import {inspectMarketplaceProofApproval} from '../dist/marketplace/proof-approval.js';
+import {formatMarketplaceApprovalPreview} from '../dist/cli/cli.js';
 
 const accountId='00000000-0000-4000-8000-000000000100';
 const agentId='00000000-0000-4000-8000-000000000102';
 const identityId='00000000-0000-4000-8000-000000000101';
 const address='atto://'+'a'.repeat(61);
-const origin='https://market.example';
-const connection={version:1,apiUrl:origin+'/v1/agent/topups',audience:'market-agent',controllerIndex:0,
+const origin='https://marketplace.example';
+const connection={version:1,apiUrl:origin+'/v1/agent/topups',audience:'marketplace-agent',controllerIndex:0,
   controllerAddress:address,accountId,agentId,identityId,walletFingerprint:'fingerprint'};
 const grants=[
   {applyXnoLimit:null,expectedHash:'18b6e7f5c4752aab453791029cf884181b9c6b1e9cab40bb52a7d0050e213d94'},
@@ -30,8 +30,8 @@ for(const grant of grants) {
     const issuedAt=new Date(Date.now()-1000).toISOString();
     const expiresAt=new Date(Date.now()+120000).toISOString();
     const message=[
-      'Atto Market Agent Controller Proof v1',
-      'Audience: market-agent',
+      'Marketplace Agent Controller Proof v1',
+      'Audience: marketplace-agent',
       'Network: live',
       'Address: '+address,
       'Purpose: API-key creation',
@@ -41,15 +41,15 @@ for(const grant of grants) {
       'Issued At: '+issuedAt,
       'Expiration Time: '+expiresAt,
     ].join('\n');
-    const request={version:1,type:'atto-market-controller-approval-request',profileId:'agent',handoffId:'a'.repeat(32),
-      marketOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'market-agent',accountId,identityId,
+    const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'a'.repeat(32),
+      marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
       controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
       action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
       challenge:{challengeId,message,issuedAt,expiresAt}};
 
     // When the wallet validates the action and creates the human approval summary.
-    const {preview}=inspectMarketProofApproval(request,connection,()=>address);
-    const summary=formatMarketApprovalPreview(preview);
+    const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
+    const summary=formatMarketplaceApprovalPreview(preview);
 
     // Then each configured asset ceiling is visible, and changing any binding fails before signing.
     assert.ok(summary.includes('ATTO publish ceiling: 100 atomic units'));
@@ -58,22 +58,22 @@ for(const grant of grants) {
     if(grant.applyXnoLimit!==null) assert.ok(summary.includes('XNO application ceiling: 400 atomic units'));
     const changed={...request,action:{...request.action,command:{...request.action.command,
       credential:{...credential,applyXnoLimit:'401'}}}};
-    assert.throws(()=>inspectMarketProofApproval(changed,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+    assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
     const retiredScope=structuredClone(request);
     retiredScope.action.command.credential.scopes[0]='jobs:publish';
-    assert.throws(()=>inspectMarketProofApproval(retiredScope,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+    assert.throws(()=>inspectMarketplaceProofApproval(retiredScope,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 
     // Omission and explicit null use the same empty V2 field when another grant remains valid.
     const omitted=structuredClone(request);
     delete omitted.action.command.credential.applyXnoLimit;
-    if(grant.applyXnoLimit===null) assert.doesNotThrow(()=>inspectMarketProofApproval(omitted,connection,()=>address));
-    else assert.throws(()=>inspectMarketProofApproval(omitted,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+    if(grant.applyXnoLimit===null) assert.doesNotThrow(()=>inspectMarketplaceProofApproval(omitted,connection,()=>address));
+    else assert.throws(()=>inspectMarketplaceProofApproval(omitted,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 
     // Empty ceiling strings are malformed and cannot be normalized into the empty canonical slot.
     for(const field of ['publishAttoLimit','publishXnoLimit','applyAttoLimit','applyXnoLimit']) {
       const malformed=structuredClone(request);
       malformed.action.command.credential[field]='';
-      assert.throws(()=>inspectMarketProofApproval(malformed,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+      assert.throws(()=>inspectMarketplaceProofApproval(malformed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
     }
   });
 }
@@ -89,19 +89,19 @@ test('Shop credential approval uses V3 slots and displays explicit purchase ceil
   const issuedAt=new Date(Date.now()-1000).toISOString();
   const expiresAt=new Date(Date.now()+120000).toISOString();
   const message=[
-    'Atto Market Agent Controller Proof v1','Audience: market-agent','Network: live','Address: '+address,
+    'Marketplace Agent Controller Proof v1','Audience: marketplace-agent','Network: live','Address: '+address,
     'Purpose: API-key creation','Request ID: '+challengeId,'Binding Hash: '+binding,'Nonce: '+'cd'.repeat(32),
     'Issued At: '+issuedAt,'Expiration Time: '+expiresAt,
   ].join('\n');
-  const request={version:1,type:'atto-market-controller-approval-request',profileId:'agent',handoffId:'b'.repeat(32),
-    marketOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'market-agent',accountId,identityId,
+  const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'b'.repeat(32),
+    marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
     controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
     action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
     challenge:{challengeId,message,issuedAt,expiresAt}};
 
   // When the controller approval parser verifies the new canonical payload and formats its summary.
-  const {preview}=inspectMarketProofApproval(request,connection,()=>address);
-  const summary=formatMarketApprovalPreview(preview);
+  const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
+  const summary=formatMarketplaceApprovalPreview(preview);
 
   // Then the exact grant is reviewable and changed or missing ceilings fail before signing.
   assert.match(summary,/Scopes: products:purchase, files:read/);
@@ -109,10 +109,10 @@ test('Shop credential approval uses V3 slots and displays explicit purchase ceil
   assert.match(summary,/XNO product purchase ceiling: denied/);
   const changed=structuredClone(request);
   changed.action.command.credential.purchaseAttoLimit='901';
-  assert.throws(()=>inspectMarketProofApproval(changed,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+  assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
   const missing=structuredClone(request);
   delete missing.action.command.credential.purchaseAttoLimit;
-  assert.throws(()=>inspectMarketProofApproval(missing,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+  assert.throws(()=>inspectMarketplaceProofApproval(missing,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 });
 
 test('product publication grant uses the cross-language V4 approval vector and shows both reservation ceilings',()=>{
@@ -126,18 +126,18 @@ test('product publication grant uses the cross-language V4 approval vector and s
   const challengeId='00000000-0000-4000-8000-000000000203';
   const issuedAt=new Date(Date.now()-1000).toISOString();
   const expiresAt=new Date(Date.now()+120000).toISOString();
-  const message=['Atto Market Agent Controller Proof v1','Audience: market-agent','Network: live','Address: '+address,
+  const message=['Marketplace Agent Controller Proof v1','Audience: marketplace-agent','Network: live','Address: '+address,
     'Purpose: API-key creation','Request ID: '+challengeId,'Binding Hash: '+binding,'Nonce: '+'ef'.repeat(32),
     'Issued At: '+issuedAt,'Expiration Time: '+expiresAt].join('\n');
-  const request={version:1,type:'atto-market-controller-approval-request',profileId:'agent',handoffId:'d'.repeat(32),
-    marketOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'market-agent',accountId,identityId,
+  const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'d'.repeat(32),
+    marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
     controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
     action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
     challenge:{challengeId,message,issuedAt,expiresAt}};
 
   // When the local controller parser binds the command to its typed challenge.
-  const {preview}=inspectMarketProofApproval(request,connection,()=>address);
-  const summary=formatMarketApprovalPreview(preview);
+  const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
+  const summary=formatMarketplaceApprovalPreview(preview);
 
   // Then both new ceilings are visible and the published cross-language digest matches exactly.
   assert.match(summary,/Scopes: products:publish/);
@@ -145,10 +145,10 @@ test('product publication grant uses the cross-language V4 approval vector and s
   assert.match(summary,/XNO product publication reservation ceiling: 30 atomic units/);
   const changed=structuredClone(request);
   changed.action.command.credential.productPublishXnoLimit='31';
-  assert.throws(()=>inspectMarketProofApproval(changed,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+  assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
   const malformed=structuredClone(request);
   malformed.action.command.credential.productPublishAttoLimit='';
-  assert.throws(()=>inspectMarketProofApproval(malformed,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+  assert.throws(()=>inspectMarketplaceProofApproval(malformed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 });
 
 test('legacy products:publish grants without reservation ceilings retain the V3 payload',()=>{
@@ -161,18 +161,18 @@ test('legacy products:publish grants without reservation ceilings retain the V3 
   const challengeId='00000000-0000-4000-8000-000000000403';
   const issuedAt=new Date(Date.now()-1000).toISOString();
   const expiresAt=new Date(Date.now()+120000).toISOString();
-  const message=['Atto Market Agent Controller Proof v1','Audience: market-agent','Network: live','Address: '+address,
+  const message=['Marketplace Agent Controller Proof v1','Audience: marketplace-agent','Network: live','Address: '+address,
     'Purpose: API-key creation','Request ID: '+challengeId,'Binding Hash: '+binding,'Nonce: '+'fa'.repeat(32),
     'Issued At: '+issuedAt,'Expiration Time: '+expiresAt].join('\n');
-  const request={version:1,type:'atto-market-controller-approval-request',profileId:'agent',handoffId:'e'.repeat(32),
-    marketOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'market-agent',accountId,identityId,
+  const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'e'.repeat(32),
+    marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
     controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
     action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
     challenge:{challengeId,message,issuedAt,expiresAt}};
 
   // When the CLI checks the legacy command and the exact V3 challenge digest.
-  const {preview}=inspectMarketProofApproval(request,connection,()=>address);
-  const summary=formatMarketApprovalPreview(preview);
+  const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
+  const summary=formatMarketplaceApprovalPreview(preview);
 
   // Then legacy product authority remains reviewable without acquiring any new-reservation ceiling.
   assert.match(summary,/ATTO product publication reservation ceiling: denied/);
@@ -180,8 +180,8 @@ test('legacy products:publish grants without reservation ceilings retain the V3 
   const explicitNulls=structuredClone(request);
   explicitNulls.action.command.credential.productPublishAttoLimit=null;
   explicitNulls.action.command.credential.productPublishXnoLimit=null;
-  assert.doesNotThrow(()=>inspectMarketProofApproval(explicitNulls,connection,()=>address));
+  assert.doesNotThrow(()=>inspectMarketplaceProofApproval(explicitNulls,connection,()=>address));
   const changed=structuredClone(request);
   changed.action.command.credential.productPublishAttoLimit='20';
-  assert.throws(()=>inspectMarketProofApproval(changed,connection,()=>address),{code:'MARKET_APPROVAL_PROTOCOL'});
+  assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 });

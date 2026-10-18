@@ -28,11 +28,11 @@ export interface SendRecord {
   quote?: unknown;
   selection?: 'automatic' | 'explicit';
   plan?: PaymentPlan;
-  external?: ExternalPaymentRecord;
+  external?: ExternalPaymentRecord | LegacyExternalPaymentRecord;
 }
 
 export interface ExternalPaymentRecord {
-  kind: 'market-topup' | 'market-intent';
+  kind: 'marketplace-topup' | 'marketplace-intent';
   version: 1;
   paymentIdentifier: string;
   network: 'atto:live' | 'atto:local';
@@ -40,7 +40,7 @@ export interface ExternalPaymentRecord {
   resourceUrl: string;
   requirementHash: string;
   intentExpiresAt: string;
-  marketState: 'ISSUED' | 'PENDING' | 'ACCEPTED' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CREDITED' | 'EXPIRED';
+  marketplaceState: 'ISSUED' | 'PENDING' | 'ACCEPTED' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CREDITED' | 'EXPIRED';
   paymentState: 'PREPARED' | 'ATTEMPTED' | 'PENDING' | 'ACCEPTED' | 'PUBLISHING' | 'UNKNOWN' | 'PROCESSED' | 'SETTLED' | 'REJECTED' | 'CONFIRMED' | 'FAILED' | null;
   nativeState: 'challenged' | 'unknown' | 'confirmed' | 'rejected';
   attemptedAt?: number;
@@ -48,9 +48,16 @@ export interface ExternalPaymentRecord {
   receiveStatus?: 'PENDING' | 'ACCEPTED' | 'SETTLED' | 'REJECTED' | null;
 }
 
+/** Historical wallet accounting only; these records cannot authorize current Marketplace payments. */
+interface LegacyExternalPaymentRecord extends Omit<ExternalPaymentRecord, 'kind' | 'marketplaceState'> {
+  kind: 'market-topup' | 'market-intent';
+  marketState: ExternalPaymentRecord['marketplaceState'];
+  marketplaceState?: never;
+}
+
 export interface ExternalPaymentSecrets {
   version: 1;
-  paymentKind?: 'market-topup' | 'market-intent';
+  paymentKind?: 'marketplace-topup' | 'marketplace-intent';
   apiUrl: string;
   audience: string;
   accountId?: string;
@@ -66,7 +73,8 @@ export interface ExternalPaymentSecrets {
 }
 
 export type SendReservation = Pick<SendRecord, 'id' | 'index' | 'destination' | 'raw' | 'createdAt'>
-  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding' | 'external'>>;
+  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding'>>
+  & { external?: ExternalPaymentRecord };
 
 const DAY_MS = 86_400_000;
 const POLICY_KEY = 'spending.policy';
@@ -337,7 +345,8 @@ export class SpendLedger {
     this.store.transaction(() => {
       const records = this.records();
       const record = records.find(value => value.id === id);
-      if (!record?.external || record.hash || record.status !== 'reserved') throw new AttoError('SEND_STATE', 'This Market payment no longer accepts a challenge.');
+      if (!record?.external || (record.external.kind !== 'marketplace-topup' && record.external.kind !== 'marketplace-intent')
+        || record.hash || record.status !== 'reserved') throw new AttoError('SEND_STATE', 'This Marketplace payment no longer accepts a challenge.');
       if (createHashHex(requirementJson) !== record.external.requirementHash) throw new AttoError('SEND_STATE', 'The x402 requirement fingerprint does not match.');
       const secrets = this.externalSecrets();
       const current = secrets[id];
@@ -362,7 +371,8 @@ export class SpendLedger {
       const records = this.records();
       const position = records.findIndex(value => value.id === id);
       const record = records[position];
-      if (!record?.external || record.status !== 'reserved' || record.hash) throw new AttoError('SEND_STATE', 'This Market payment cannot be assigned another SEND.');
+      if (!record?.external || (record.external.kind !== 'marketplace-topup' && record.external.kind !== 'marketplace-intent')
+        || record.status !== 'reserved' || record.hash) throw new AttoError('SEND_STATE', 'This Marketplace payment cannot be assigned another SEND.');
       const secrets = this.externalSecrets();
       const current = secrets[id];
       if (!current || createHashHex(current.requirementJson) !== record.external.requirementHash) {
@@ -393,7 +403,7 @@ export class SpendLedger {
       secrets[id] = nextSecrets;
       records[position] = { ...record, hash: input.hash, blockJson: input.blockJson, status: 'signed',
         external: { ...record.external, nativeState: 'unknown',
-          ...(record.external.kind === 'market-intent' ? { paymentState: 'PREPARED' as const } : {}), attemptedAt: input.attemptedAt } };
+          ...(record.external.kind === 'marketplace-intent' ? { paymentState: 'PREPARED' as const } : {}), attemptedAt: input.attemptedAt } };
       this.validateDetails(records[position]!);
       this.store.set(EXTERNAL_SECRETS_KEY, secrets);
       this.store.set(RECORDS_KEY, records);
@@ -404,9 +414,11 @@ export class SpendLedger {
     return this.externalSecrets()[id];
   }
 
-  externalStatus(id: string, update: Partial<Pick<ExternalPaymentRecord, 'marketState' | 'paymentState' | 'receivePending' | 'receiveStatus'>>): void {
+  externalStatus(id: string, update: Partial<Pick<ExternalPaymentRecord, 'marketplaceState' | 'paymentState' | 'receivePending' | 'receiveStatus'>>): void {
     this.update(id, record => {
-      if (!record.external) throw new AttoError('SEND_STATE', 'This request is not a Market top-up.');
+      if (!record.external || (record.external.kind !== 'marketplace-topup' && record.external.kind !== 'marketplace-intent')) {
+        throw new AttoError('SEND_STATE', 'This request is not a current Marketplace payment.');
+      }
       const external = { ...record.external, ...update };
       this.validateExternal(external);
       return { ...record, external };
@@ -416,7 +428,7 @@ export class SpendLedger {
   completeExternal(id: string, result: unknown, publishedAt: number): void {
     this.update(id, record => {
       if (!record.external || !record.hash || record.status === 'failed' || !Number.isSafeInteger(publishedAt) || publishedAt < 0) {
-        throw new AttoError('SEND_STATE', 'Only a recorded Market SEND can be confirmed.');
+        throw new AttoError('SEND_STATE', 'Only a recorded Marketplace SEND can be confirmed.');
       }
       return { ...record, status: 'published', result, publishedAt,
         external: { ...record.external, nativeState: 'confirmed' } };
@@ -426,10 +438,10 @@ export class SpendLedger {
   /** Call only after the canonical account height proves a competing block. */
   rejectExternal(id: string, result: unknown): void {
     this.update(id, record => {
-      if (!record.external || !record.hash || record.status === 'published') throw new AttoError('SEND_STATE', 'Only an unresolved Market SEND can be rejected.');
+      if (!record.external || !record.hash || record.status === 'published') throw new AttoError('SEND_STATE', 'Only an unresolved Marketplace SEND can be rejected.');
       return { ...record, status: 'failed', result,
         external: { ...record.external, nativeState: 'rejected',
-          ...(record.external.kind === 'market-intent' ? { paymentState: 'FAILED' as const } : {}) } };
+          ...(record.external.kind === 'marketplace-intent' ? { paymentState: 'FAILED' as const } : {}) } };
     });
   }
 
@@ -546,8 +558,7 @@ export class SpendLedger {
         if (record.hash !== undefined && (typeof record.hash !== 'string' || !record.hash || typeof record.blockJson !== 'string' || !record.blockJson)) throw new Error();
         if (record.status === 'signed' && !record.hash) throw new Error();
         if (record.status === 'published' && (!record.hash || !Number.isSafeInteger(record.publishedAt) || (record.publishedAt ?? -1) < 0)) throw new Error();
-        this.validateDetails(record);
-        if (record.external !== undefined) this.validateExternal(record.external);
+        this.validateDetails(record, true);
         ids.add(record.id);
       }
       return records;
@@ -618,7 +629,7 @@ export class SpendLedger {
     }
   }
 
-  private validateDetails(record: SendReservation): void {
+  private validateDetails(record: Omit<SendRecord, 'status'>, historical = false): void {
     if (record.destinationBinding !== undefined) {
       validateDestinationBinding(record.destinationBinding);
       if (record.destinationBinding.address !== record.destination || record.destinationBinding.network !== record.network) throw new Error('Payment destination binding mismatch.');
@@ -628,18 +639,26 @@ export class SpendLedger {
     if (record.selection !== undefined && record.selection !== 'automatic' && record.selection !== 'explicit') throw new Error();
     if (record.metadata !== undefined) paymentMetadataSchema.parse(record.metadata);
     if (record.plan !== undefined) validatePaymentPlan(record.plan, record);
-    if (record.external !== undefined) this.validateExternal(record.external);
+    if (record.external !== undefined) this.validateExternal(record.external, historical);
   }
 
-  private validateExternal(external: ExternalPaymentRecord): void {
-    if (!external || !['market-topup', 'market-intent'].includes(external.kind) || external.version !== 1
+  private validateExternal(external: ExternalPaymentRecord | LegacyExternalPaymentRecord, historical = false): void {
+    if (historical && external && (external.kind === 'market-topup' || external.kind === 'market-intent')) {
+      if (Object.hasOwn(external, 'marketplaceState')) throw new Error('Invalid historical external payment record.');
+      // Validate the old shape without replacing its stored tags or resuming its authorization.
+      return this.validateExternal({ ...external,
+        kind: external.kind === 'market-topup' ? 'marketplace-topup' : 'marketplace-intent',
+        marketplaceState: external.marketState });
+    }
+
+    if (!external || !['marketplace-topup', 'marketplace-intent'].includes(external.kind) || external.version !== 1
       || !/^[A-Za-z0-9_-]{16,128}$/.test(external.paymentIdentifier)
       || !['atto:live', 'atto:local'].includes(external.network)
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(external.intentId)
       || typeof external.resourceUrl !== 'string' || external.resourceUrl.length > 2048
       || !/^[a-f0-9]{64}$/.test(external.requirementHash)
       || typeof external.intentExpiresAt !== 'string' || !Number.isFinite(Date.parse(external.intentExpiresAt))
-      || !['ISSUED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CREDITED', 'EXPIRED'].includes(external.marketState)
+      || !['ISSUED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CREDITED', 'EXPIRED'].includes(external.marketplaceState ?? '')
       || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CONFIRMED', 'FAILED'].includes(external.paymentState))
       || !['challenged', 'unknown', 'confirmed', 'rejected'].includes(external.nativeState)
       || (external.attemptedAt !== undefined && (!Number.isSafeInteger(external.attemptedAt) || external.attemptedAt < 0))
@@ -657,13 +676,13 @@ export class SpendLedger {
     try {
       if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
       for (const [id, secret] of Object.entries(value)) {
-        const paymentKind = secret?.paymentKind ?? 'market-topup';
-        const topUpOwnerInvalid = paymentKind === 'market-topup' &&
+        const paymentKind = secret?.paymentKind ?? 'marketplace-topup';
+        const topUpOwnerInvalid = paymentKind === 'marketplace-topup' &&
           (typeof secret?.accountId !== 'string' || typeof secret?.agentId !== 'string'
             || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(secret.agentId)
             || typeof secret?.identityId !== 'string' || !Number.isSafeInteger(secret?.controllerIndex)
             || typeof secret?.controllerAddress !== 'string');
-        if (!id || !secret || secret.version !== 1 || !['market-topup', 'market-intent'].includes(paymentKind)
+        if (!id || !secret || secret.version !== 1 || !['marketplace-topup', 'marketplace-intent'].includes(paymentKind)
           || (secret.paymentKind !== undefined && secret.paymentKind !== paymentKind)
           || typeof secret.apiUrl !== 'string' || secret.apiUrl.length > 2048
           || typeof secret.audience !== 'string' || secret.audience.length < 1 || secret.audience.length > 255
@@ -682,14 +701,14 @@ export class SpendLedger {
     }
   }
 
-  private externalDefinition(external: ExternalPaymentRecord | undefined): unknown {
+  private externalDefinition(external: SendRecord['external']): unknown {
     if (!external) return undefined;
     const { kind, version, paymentIdentifier, network, intentId, resourceUrl, requirementHash, intentExpiresAt } = external;
     return { kind, version, paymentIdentifier, network, intentId, resourceUrl, requirementHash, intentExpiresAt };
   }
 
   private ownerDefinition(owner: ExternalPaymentSecrets): unknown {
-    const { version, paymentKind = 'market-topup', apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress } = owner;
+    const { version, paymentKind = 'marketplace-topup', apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress } = owner;
     return { version, paymentKind, apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress };
   }
 

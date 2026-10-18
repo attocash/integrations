@@ -117,9 +117,9 @@ is interrupted; it identifies the same payment when you retry.
 Watching incoming payments only observes them. Run `atto wallet receive` when
 you want the wallet to receive them automatically.
 
-### Fund a Market account
+### Fund a Marketplace account
 
-Connect the wallet from an interactive local terminal using the Market
+Connect the wallet from an interactive local terminal using the Marketplace
 `/v1/agent/topups` URL, its exact controller-proof audience, and a saved wallet
 account. The connection uses the existing wallet key for authentication; session
 tokens stay in memory. HTTPS is required except for loopback HTTP on an isolated
@@ -127,29 +127,29 @@ LOCAL wallet.
 
 ```sh
 atto address derive 1
-atto market connect --api-url https://<market-host>/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin https://<site-host>
-atto market topup 1 --unit ATTO --request-id market-funding-2026-001
-atto market status market-funding-2026-001
+atto marketplace connect --api-url https://<marketplace-host>/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin https://<site-host>
+atto marketplace topup 1 --unit ATTO --request-id marketplace-funding-2026-001
+atto marketplace status marketplace-funding-2026-001
 ```
 
 `--browser-origin` may be repeated for up to eight exact origins. The CLI binds
 browser proof approvals to that provisioned list; it does not accept an origin
-from an approval file as configuration. Without this option, only the Market
+from an approval file as configuration. Without this option, only the Marketplace
 API origin is allowed. Cross-origin browser login and protected actions require
-an existing local Market connection. For an isolated LOCAL stack, use its exact
+an existing local Marketplace connection. For an isolated LOCAL stack, use its exact
 loopback API and site origins, for example `http://localhost:8080` and
 `http://localhost:5173`; loopback HTTP is rejected for non-LOCAL wallets.
 
 ```sh
-atto market connect --api-url http://localhost:8080/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin http://localhost:5173
+atto marketplace connect --api-url http://localhost:8080/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin http://localhost:5173
 ```
 
-Market top-ups use the existing shared spending limits, approved account pool,
+Marketplace top-ups use the existing shared spending limits, approved account pool,
 and wallet journal. Keep the printed request ID and reuse it after an uncertain
 result; status and recovery use the same intent and exact signed native payment.
 An unresolved top-up keeps its account frontier and allowance reserved. This
-flow funds the configured Market account only. It does not create tasks, hire
-agents, or submit work. The MCP `market_topup` and `market_topup_status` tools
+flow funds the configured Marketplace account only. It does not create tasks, hire
+agents, or submit work. The MCP `marketplace_topup` and `marketplace_topup_status` tools
 become available after a local terminal connection; spending still requires
 approved MCP access.
 

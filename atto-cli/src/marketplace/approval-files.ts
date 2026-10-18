@@ -2,12 +2,12 @@ import { randomBytes } from 'node:crypto';
 import { closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { AttoError } from '../domain/errors.js';
-import type { MarketProofApprovalRequest, MarketProofApprovalResponse } from './proof-approval.js';
+import type { MarketplaceProofApprovalRequest, MarketplaceProofApprovalResponse } from './proof-approval.js';
 
 const MAX_REQUEST_BYTES = 32_768;
 const PRIVATE_FILE_MODE = 0o600;
 
-export function readMarketProofApprovalRequest(pathValue: string): MarketProofApprovalRequest {
+export function readMarketplaceProofApprovalRequest(pathValue: string): MarketplaceProofApprovalRequest {
   if (typeof pathValue !== 'string' || pathValue.length > 4096 || pathValue.includes('\0')) throw invalidFile();
   const path = resolve(pathValue);
   let descriptor: number | undefined;
@@ -23,7 +23,7 @@ export function readMarketProofApprovalRequest(pathValue: string): MarketProofAp
     if (bytes.length > MAX_REQUEST_BYTES) throw invalidFile();
     const parsed: unknown = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
     if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw invalidFile();
-    return parsed as MarketProofApprovalRequest;
+    return parsed as MarketplaceProofApprovalRequest;
   } catch (error) {
     if (error instanceof AttoError) throw error;
     throw invalidFile();
@@ -32,7 +32,7 @@ export function readMarketProofApprovalRequest(pathValue: string): MarketProofAp
   }
 }
 
-export function writeMarketProofApprovalResponse(requestPathValue: string, response: MarketProofApprovalResponse): string {
+export function writeMarketplaceProofApprovalResponse(requestPathValue: string, response: MarketplaceProofApprovalResponse): string {
   const requestPath = resolve(requestPathValue);
   const requestName = basename(requestPath);
   if (!/^[a-f0-9]{32}\.request\.json$/.test(requestName) || requestName.slice(0, 32) !== response.handoffId) throw invalidFile();
@@ -53,7 +53,7 @@ export function writeMarketProofApprovalResponse(requestPathValue: string, respo
     descriptor = undefined;
     try { linkSync(temporaryPath, responsePath); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new AttoError('MARKET_APPROVAL_EXISTS', 'An approval response file already exists. Keep the exact response or request a new Market challenge.');
+      if ((error as NodeJS.ErrnoException).code === 'EEXIST') throw new AttoError('MARKETPLACE_APPROVAL_EXISTS', 'An approval response file already exists. Keep the exact response or request a new Marketplace challenge.');
       throw error;
     }
     const directoryFd = openSync(directoryPath, constants.O_RDONLY | constants.O_DIRECTORY);
@@ -61,7 +61,7 @@ export function writeMarketProofApprovalResponse(requestPathValue: string, respo
     return responsePath;
   } catch (error) {
     if (error instanceof AttoError) throw error;
-    throw new AttoError('MARKET_APPROVAL_FILE', 'The signed response could not be stored in a private response file.');
+    throw new AttoError('MARKETPLACE_APPROVAL_FILE', 'The signed response could not be stored in a private response file.');
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
     try { unlinkSync(temporaryPath); } catch { /* No temp file remains if link failed or cleanup already ran. */ }
@@ -73,5 +73,5 @@ function ownedByCurrentUser(uid: number): boolean {
 }
 
 function invalidFile(): AttoError {
-  return new AttoError('MARKET_APPROVAL_FILE', 'Use the exact private Market approval request file from its configured handoff directory.');
+  return new AttoError('MARKETPLACE_APPROVAL_FILE', 'Use the exact private Marketplace approval request file from its configured handoff directory.');
 }

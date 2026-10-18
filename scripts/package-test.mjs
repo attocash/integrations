@@ -105,8 +105,8 @@ async function verifyCli(directory, prefix, noMcp) {
     import assert from 'node:assert/strict';
     const core = await import('@attocash/cli/core');
     assert.equal(core.operations.length, 40);
-    assert.equal(core.operations.find(operation => operation.name === 'market_topup')?.readOnly, false);
-    assert.equal(core.operations.find(operation => operation.name === 'market_topup_status')?.readOnly, true);
+    assert.equal(core.operations.find(operation => operation.name === 'marketplace_topup')?.readOnly, false);
+    assert.equal(core.operations.find(operation => operation.name === 'marketplace_topup_status')?.readOnly, true);
     assert.equal(typeof core.errorResult, 'function');
     const app = core.createApplication({ directory: process.argv[1] });
     assert.deepEqual(Object.keys(app).sort(), ['call', 'close', 'start']);
@@ -197,7 +197,7 @@ try {
   const mcpVersion = await execute(process.execPath, [join(globalModules, '@attocash/mcp/dist/main.js'), '--version'], { cwd: temporary, timeout: 15_000 });
   assert.equal(cli.stdout.trim(), cliManifest.version);
   assert.equal(mcpVersion.stdout.trim(), mcpManifest.version);
-  const detached = await execute(process.execPath, ['--test', '--test-name-pattern=detached|background|stop retains|unavailable credentials|dead owner|real CLI send|lost receive|startup acknowledges',
+  const detached = await execute(process.execPath, ['--test', '--test-concurrency=1', '--test-name-pattern=detached|background|stop retains|unavailable credentials|dead owner|real CLI send|lost receive|startup acknowledges',
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'), join(root, 'atto-cli/test/payments.test.mjs'),
   ], { cwd: temporary, timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
     env: { ...process.env, ATTO_TEST_CLI_PACKAGE_DIR: join(globalModules, '@attocash/cli') } });

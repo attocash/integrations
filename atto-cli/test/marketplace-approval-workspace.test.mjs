@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { MarketTopUpClient } from '../dist/market/topups.js';
-import { formatMarketApprovalPreview } from '../dist/cli/cli.js';
+import { MarketplaceTopUpClient } from '../dist/marketplace/topups.js';
+import { formatMarketplaceApprovalPreview } from '../dist/cli/cli.js';
 
 const apiOrigin = 'http://localhost:8080';
 const browserOrigin = 'http://localhost:5173';
@@ -18,7 +18,7 @@ function createClient(browserOrigins = [browserOrigin]) {
   const connection = {
     version: 1,
     apiUrl: `${apiOrigin}/v1/agent/topups`,
-    audience: 'market-agent',
+    audience: 'marketplace-agent',
     controllerIndex: 0,
     controllerAddress: authorizingAddress,
     accountId,
@@ -29,13 +29,13 @@ function createClient(browserOrigins = [browserOrigin]) {
   };
   const saved = new Map([
     ['identity', { address: authorizingAddress, fingerprint: 'fingerprint' }],
-    ['market.topups.connection', connection],
+    ['marketplace.topups.connection', connection],
   ]);
   const addresses = [
     { index: 0, address: authorizingAddress, publicKey: '00', active: true },
     { index: 1, address: newIdentityAddress, publicKey: '01', active: true },
   ];
-  return new MarketTopUpClient({ get: key => saved.get(key), set: (key, value) => saved.set(key, value) }, {
+  return new MarketplaceTopUpClient({ get: key => saved.get(key), set: (key, value) => saved.set(key, value) }, {
     settings: () => ({ network: 'LOCAL' }),
     addresses: () => addresses,
     seed: async () => { throw new Error('inspect must not access wallet key material'); },
@@ -57,22 +57,22 @@ function lengthPrefixed(fields) {
 }
 
 function request({ action, purpose, address = authorizingAddress, index = 0, binding,
-  market = apiOrigin, proof = browserOrigin, audience = proof, account = accountId, identity = identityId }) {
+  marketplace = apiOrigin, proof = browserOrigin, audience = proof, account = accountId, identity = identityId }) {
   const challengeId = '00000000-0000-4000-8000-000000000301';
   const issuedAt = new Date(Date.now() - 1000).toISOString();
   const expiresAt = new Date(Date.now() + 120_000).toISOString();
   const lines = [
-    'Atto Market Agent Controller Proof v1', `Audience: ${audience}`, 'Network: live',
+    'Marketplace Agent Controller Proof v1', `Audience: ${audience}`, 'Network: live',
     `Address: ${address}`, `Purpose: ${purpose}`, `Request ID: ${challengeId}`,
     ...(binding ? [`Binding Hash: ${binding}`] : []), `Nonce: ${'cd'.repeat(32)}`,
     `Issued At: ${issuedAt}`, `Expiration Time: ${expiresAt}`,
   ];
   return {
     version: 1,
-    type: 'atto-market-controller-approval-request',
-    profileId: 'market-browser',
+    type: 'marketplace-controller-approval-request',
+    profileId: 'marketplace-browser',
     handoffId: 'e'.repeat(32),
-    marketOrigin: market,
+    marketplaceOrigin: marketplace,
     transport: 'BROWSER',
     proofOrigin: proof,
     audience,
@@ -89,19 +89,19 @@ test('a provisioned browser origin is accepted for the connected API and is the 
   const action = { kind: 'login', network: 'ATTO', address: authorizingAddress };
   const login = request({ action, purpose: 'login', account: null, identity: null });
   const { preview } = createClient().inspectProofApproval(login);
-  assert.equal(preview.marketOrigin, apiOrigin);
+  assert.equal(preview.marketplaceOrigin, apiOrigin);
   assert.equal(preview.proofOrigin, browserOrigin);
   assert.equal(preview.audience, browserOrigin);
 
   const unprovisioned = request({ action, purpose: 'login', proof: 'http://localhost:5174',
     audience: 'http://localhost:5174', account: null, identity: null });
-  assert.throws(() => createClient().inspectProofApproval(unprovisioned), { code: 'MARKET_APPROVAL_MISMATCH' });
-  assert.throws(() => createClient(null).inspectProofApproval(login), { code: 'MARKET_APPROVAL_MISMATCH' });
+  assert.throws(() => createClient().inspectProofApproval(unprovisioned), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
+  assert.throws(() => createClient(null).inspectProofApproval(login), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
 
   const apiSameOrigin = request({ action, purpose: 'login', proof: apiOrigin, audience: apiOrigin,
     account: null, identity: null });
   assert.equal(createClient(null).inspectProofApproval(apiSameOrigin).preview.proofOrigin, apiOrigin);
-  assert.throws(() => createClient().inspectProofApproval(apiSameOrigin), { code: 'MARKET_APPROVAL_MISMATCH' });
+  assert.throws(() => createClient().inspectProofApproval(apiSameOrigin), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
 });
 
 test('saved browser-origin allowlists reject duplicates, wildcards, paths, and more than eight entries', () => {
@@ -111,7 +111,7 @@ test('saved browser-origin allowlists reject duplicates, wildcards, paths, and m
     ['https://site.example/path'],
     Array.from({ length: 9 }, (_, index) => `https://site${index}.example`),
   ]) {
-    assert.throws(() => createClient(origins).connection(), { code: 'MARKET_CONFIGURATION' });
+    assert.throws(() => createClient(origins).connection(), { code: 'MARKETPLACE_CONFIGURATION' });
   }
 });
 
@@ -130,15 +130,15 @@ test('two controller-link proofs bind the same account, identity pair, link ID, 
   assert.equal(preview.identityId, identityId);
 
   assert.throws(() => createClient().inspectProofApproval({ ...targetRequest,
-    action: { ...action, linkId: '00000000-0000-4000-8000-000000000199' } }), { code: 'MARKET_APPROVAL_PROTOCOL' });
+    action: { ...action, linkId: '00000000-0000-4000-8000-000000000199' } }), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
   assert.throws(() => createClient().inspectProofApproval({ ...targetRequest,
     action: { ...action, authorizingIdentityId: '00000000-0000-4000-8000-000000000198' } }));
   assert.throws(() => createClient().inspectProofApproval({ ...targetRequest,
     action: { ...action, operation: 'AUTHORIZE' } }));
   assert.throws(() => createClient().inspectProofApproval({ ...targetRequest,
-    controller: { ...targetRequest.controller, index: 0 } }), { code: 'MARKET_APPROVAL_PROTOCOL' });
+    controller: { ...targetRequest.controller, index: 0 } }), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
   assert.throws(() => createClient().inspectProofApproval({ ...targetRequest,
-    accountId: '00000000-0000-4000-8000-000000000198' }), { code: 'MARKET_APPROVAL_MISMATCH' });
+    accountId: '00000000-0000-4000-8000-000000000198' }), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
 });
 
 test('typed controller unlink requires a different active authorizer and target', () => {
@@ -147,7 +147,7 @@ test('typed controller unlink requires a different active authorizer and target'
   const valid = request({ action, purpose: 'unlink', binding });
   assert.equal(createClient().inspectProofApproval(valid).preview.purpose, 'unlink');
   assert.throws(() => createClient().inspectProofApproval({ ...valid,
-    action: { ...action, targetIdentityId: identityId } }), { code: 'MARKET_APPROVAL_PROTOCOL' });
+    action: { ...action, targetIdentityId: identityId } }), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
 });
 
 test('admin moderation uses safe integer versions and the length-prefixed UTF-8 binding contract', () => {
@@ -157,26 +157,26 @@ test('admin moderation uses safe integer versions and the length-prefixed UTF-8 
     expectedModerationVersion: 3, reason: '  café 🪙  ', idempotencyKey,
   };
   const normalizedReason = 'café 🪙';
-  const binding = lengthPrefixed(['market-admin-public-moderation-v1', accountId, identityId,
+  const binding = lengthPrefixed(['marketplace-admin-public-moderation-v1', accountId, identityId,
     'PROFILE', action.targetId, 'SUSPEND', '12', '3', normalizedReason, idempotencyKey]);
   const valid = request({ action, purpose: 'administrator public moderation', binding });
   assert.equal(createClient().inspectProofApproval(valid).preview.purpose, 'administrator public moderation');
   assert.throws(() => createClient().inspectProofApproval({ ...valid,
-    action: { ...action, expectedTargetVersion: Number.MAX_SAFE_INTEGER + 1 } }), { code: 'MARKET_APPROVAL_PROTOCOL' });
+    action: { ...action, expectedTargetVersion: Number.MAX_SAFE_INTEGER + 1 } }), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
   assert.throws(() => createClient().inspectProofApproval({ ...valid,
-    action: { ...action, expectedModerationVersion: 4 } }), { code: 'MARKET_APPROVAL_PROTOCOL' });
+    action: { ...action, expectedModerationVersion: 4 } }), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
   assert.equal(createClient().inspectProofApproval({ ...valid,
     action: { ...action, reason: 'café 🪙' } }).preview.purpose, 'administrator public moderation');
   assert.throws(() => createClient().inspectProofApproval({ ...valid,
-    accountId: '00000000-0000-4000-8000-000000000199' }), { code: 'MARKET_APPROVAL_MISMATCH' });
+    accountId: '00000000-0000-4000-8000-000000000199' }), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
   assert.throws(() => createClient().inspectProofApproval({ ...valid,
-    identityId: '00000000-0000-4000-8000-000000000199' }), { code: 'MARKET_APPROVAL_MISMATCH' });
+    identityId: '00000000-0000-4000-8000-000000000199' }), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
 });
 
 test('task close and administrator dispute approvals bind every typed field in wire order', () => {
   const close = { kind: 'adminTaskClose', taskId, action: 'CANCEL', expectedVersion: 14,
     reason: '  no longer needed  ', idempotencyKey };
-  const closeBinding = lengthPrefixed(['market-admin-task-close-v1', accountId, identityId, taskId,
+  const closeBinding = lengthPrefixed(['marketplace-admin-task-close-v1', accountId, identityId, taskId,
     'CANCEL', '14', 'no longer needed', idempotencyKey]);
   assert.equal(createClient().inspectProofApproval(request({ action: close,
     purpose: 'administrator task cancellation or expiry', binding: closeBinding })).preview.purpose,
@@ -184,7 +184,7 @@ test('task close and administrator dispute approvals bind every typed field in w
   const retiredClose={...close,kind:'adminJobClose',jobId:taskId};
   delete retiredClose.taskId;
   assert.throws(()=>createClient().inspectProofApproval(request({action:retiredClose,
-    purpose:'administrator task cancellation or expiry',binding:closeBinding})),{code:'MARKET_APPROVAL_PROTOCOL'});
+    purpose:'administrator task cancellation or expiry',binding:closeBinding})),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 
   const dispute = { kind: 'adminDisputeOpen', taskId, expectedEngagementVersion: 5,
     representedAgentId: '00000000-0000-4000-8000-000000000212', reason: 'NON_DELIVERY',
@@ -198,7 +198,7 @@ test('task close and administrator dispute approvals bind every typed field in w
   'administrator dispute opening');
   assert.throws(() => createClient().inspectProofApproval(request({ action: { ...dispute,
     evidenceUrls: ['https://evidence.example/report.pdf', 'https://evidence.example/report.pdf'] },
-    purpose: 'administrator dispute opening', binding: disputeBinding })), { code: 'MARKET_APPROVAL_PROTOCOL' });
+    purpose: 'administrator dispute opening', binding: disputeBinding })), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
 
   const resolution = { kind: 'adminDisputeResolution', disputeId: '00000000-0000-4000-8000-000000000213',
     expectedDisputeVersion: 8, outcome: 'BUYER_REFUND', rationale: 'The buyer is entitled to a refund.', idempotencyKey };
@@ -209,7 +209,7 @@ test('task close and administrator dispute approvals bind every typed field in w
   'administrator dispute resolution');
   assert.throws(() => createClient().inspectProofApproval(request({ action: { ...resolution,
     outcome: 'WORKER_AWARD' }, purpose: 'administrator dispute resolution', binding: resolutionBinding })),
-  { code: 'MARKET_APPROVAL_PROTOCOL' });
+  { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
 });
 
 test('administrator dispute text uses Kotlin whitespace trimming including controls but preserves FEFF', () => {
@@ -241,7 +241,7 @@ test('administrator dispute preview escapes terminal controls without changing t
     resolution.disputeId, '8', 'BUYER_REFUND', rationale, idempotencyKey]);
   const { preview } = createClient().inspectProofApproval(request({ action: resolution,
     purpose: 'administrator dispute resolution', binding }));
-  const rendered = formatMarketApprovalPreview(preview);
+  const rendered = formatMarketplaceApprovalPreview(preview);
   assert.doesNotMatch(rendered, /\u001b|\r/);
   assert.equal(rendered.split('\n').filter(line => line.startsWith('  Outcome:')).length, 1);
   assert.match(rendered, /Outcome: BUYER_REFUND/);
@@ -273,12 +273,12 @@ test('administrator evidence binding follows URI.toASCIIString normalization and
 test('task moderation signs the current TASK target and rejects retired target kinds',()=>{
   const action={kind:'adminModeration',targetKind:'TASK',action:'HIDE',targetId:taskId,
     expectedTargetVersion:2,expectedModerationVersion:0,reason:'reviewed',idempotencyKey};
-  const binding=lengthPrefixed(['market-admin-public-moderation-v1',accountId,identityId,'TASK',taskId,
+  const binding=lengthPrefixed(['marketplace-admin-public-moderation-v1',accountId,identityId,'TASK',taskId,
     'HIDE','2','0','reviewed',idempotencyKey]);
   const valid=request({action,purpose:'administrator public moderation',binding});
   assert.equal(createClient().inspectProofApproval(valid).preview.action.targetKind,'TASK');
   assert.throws(()=>createClient().inspectProofApproval({...valid,action:{...action,targetKind:'JOB'}}),
-    {code:'MARKET_APPROVAL_PROTOCOL'});
+    {code:'MARKETPLACE_APPROVAL_PROTOCOL'});
   assert.throws(()=>createClient().inspectProofApproval({...valid,action:{...action,action:'SUSPEND'}}),
-    {code:'MARKET_APPROVAL_PROTOCOL'});
+    {code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 });
