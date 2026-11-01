@@ -299,7 +299,7 @@ export class MarketplaceTopUpClient {
         const value = { ...cached, accessToken: refresh.accessToken,
           accessExpiresAt: instant(refresh.accessExpiresAt), refreshToken: refresh.refreshToken,
           refreshExpiresAt: instant(refresh.refreshExpiresAt) };
-        if (value.accessExpiresAt <= Date.now() || value.refreshExpiresAt <= value.accessExpiresAt) throw new Error();
+        if (value.accessExpiresAt <= Date.now() || value.refreshExpiresAt < value.accessExpiresAt) throw new Error();
         this.session = { key, value };
         return value;
       } catch (error) {
@@ -338,7 +338,7 @@ export class MarketplaceTopUpClient {
     if (value.accountId !== challenge.accountId || value.identityId !== challenge.controllerId) {
       throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned a session outside the signed controller enrollment.');
     }
-    if (value.accessExpiresAt <= Date.now() || value.refreshExpiresAt <= value.accessExpiresAt) {
+    if (value.accessExpiresAt <= Date.now() || value.refreshExpiresAt < value.accessExpiresAt) {
       throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an expired controller session.');
     }
     return value;
@@ -386,6 +386,17 @@ export class MarketplaceTopUpClient {
     let json: unknown;
     try { json = raw ? JSON.parse(raw) : null; }
     catch { throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid response.'); }
+    const serverCode = object(json)?.error;
+    if (response.status === 403 && serverCode === 'signer_request_rejected') {
+      throw new AttoError('SIGNER_REQUEST_REJECTED',
+        'The Marketplace signer rejected this request. Check the exact controller approval and signer configuration before retrying.',
+        { httpStatus: 403, serverCode });
+    }
+    if (response.status === 503 && serverCode === 'signer_unavailable') {
+      throw new AttoError('SIGNER_UNAVAILABLE',
+        'The Marketplace signer is temporarily unavailable. Retry the original request with its arguments unchanged.',
+        { httpStatus: 503, serverCode });
+    }
     return { status: response.status, headers: response.headers, json };
   }
 

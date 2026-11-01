@@ -1,9 +1,15 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { AttoMnemonic } from '@attocash/commons-core';
-import { derivedSigner } from '../dist/wallet/signing.js';
-import { MarketplaceTopUpClient, validateMarketplaceApiUrl } from '../dist/marketplace/topups.js';
+import { createRequire } from 'node:module';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const packageDirectory=process.env.ATTO_TEST_CLI_PACKAGE_DIR??join(import.meta.dirname,'..');
+const packageRequire=createRequire(join(packageDirectory,'package.json'));
+const { AttoMnemonic }=await import(pathToFileURL(packageRequire.resolve('@attocash/commons-core')).href);
+const { derivedSigner }=await import(pathToFileURL(join(packageDirectory,'dist/wallet/signing.js')).href);
+const { MarketplaceTopUpClient, validateMarketplaceApiUrl }=await import(pathToFileURL(join(packageDirectory,'dist/marketplace/topups.js')).href);
 
 const apiUrl = 'http://127.0.0.1:43210/v1/agent/topups';
 const intentId = '00000000-0000-4000-8000-000000000079';
@@ -269,4 +275,66 @@ test('MCP cannot reconfigure Marketplace origin or controller before network acc
   // Then no remote request, key read, or public connection row is created.
   assert.equal(fetches, 0);
   assert.deepEqual([...saved.keys()], ['identity']);
+});
+
+
+test('controller login preserves signer failures and accepts the final session-family expiry window', async t => {
+  // Given a local native wallet and signed controller enrollment challenge.
+  const phrase=(await AttoMnemonic.generate()).phrase;
+  const seed=await (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync();
+  const controller=await derivedSigner(seed,0);
+  const saved=new Map([['identity',{address:controller.address.value,fingerprint:'test-fingerprint'}]]);
+  const client=new MarketplaceTopUpClient({get:key=>saved.get(key),set:(key,value)=>saved.set(key,value)},
+    {settings:()=>({network:'LOCAL'}),addresses:()=>[{index:0,address:controller.address.value}],
+      seed:async()=>(await AttoMnemonic.fromPhrase(phrase)).toSeedAsync(),mcp:false});
+  const challengeId='00000000-0000-4000-8000-000000000103';
+  const issuedAt=new Date(Date.now()-1000).toISOString();
+  const expiresAt=new Date(Date.now()+120_000).toISOString();
+  const binding=createHash('sha256').update(['signer-controller-enrollment-v1',accountId,identityId].join('\n')).digest('hex');
+  const message=`Marketplace Agent Controller Proof v1\nAudience: marketplace-test\nNetwork: live\nAddress: ${controller.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nBinding Hash: ${binding}\nNonce: ${'ab'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
+  let failure;
+  let shortAccess=false;
+  let refreshCount=0;
+  const originalFetch=globalThis.fetch;
+  globalThis.fetch=async input=>{
+    const path=new URL(input).pathname;
+    if(path.endsWith('/sessions/refresh')) {
+      refreshCount++;
+      return Response.json({accessToken:'rotated-access-token-secret',accessExpiresAt:expiresAt,
+        refreshToken:'rotated-refresh-token-secret',refreshExpiresAt:expiresAt});
+    }
+    if(path.endsWith(`/topups/${intentId}`)) return Response.json(topUpStatus());
+    if(new URL(input).pathname.endsWith('/challenges')) return Response.json({challengeId,accountId,controllerId:identityId,message,issuedAt,expiresAt});
+    if(failure) return Response.json({error:failure.serverCode,message:'private-signer-diagnostic',details:{proof:'private-proof'}},{status:failure.status});
+    return Response.json({accountId,agentId,identityId,accountState:'ACTIVE',accessToken:'access-token-at-least-16',
+      accessExpiresAt:shortAccess?new Date(Date.now()+1000).toISOString():expiresAt,
+      refreshToken:'refresh-token-at-least-16',refreshExpiresAt:expiresAt});
+  };
+  t.after(()=>{globalThis.fetch=originalFetch;seed.value.fill(0);});
+  for(const scenario of [
+    {status:403,serverCode:'signer_request_rejected',expected:'SIGNER_REQUEST_REJECTED'},
+    {status:503,serverCode:'signer_unavailable',expected:'SIGNER_UNAVAILABLE'},
+  ]) {
+    // When LOGIN receives a definite signer rejection or availability failure.
+    failure=scenario;
+    await assert.rejects(client.connect({apiUrl,audience:'marketplace-test',controllerIndex:0}),error=>{
+      assert.equal(error.code,scenario.expected);
+      assert.equal(error.details.httpStatus,scenario.status);
+      assert.equal(error.details.serverCode,scenario.serverCode);
+      assert.doesNotMatch(error.message,/private-/);
+      return true;
+    });
+    // Then the exact safe error survives without a connected profile.
+    assert.equal(saved.has('marketplace.topups.connection'),false);
+  }
+  // When LOGIN and refresh return equal future access and refresh expiries.
+  failure=undefined;
+  const connection=await client.connect({apiUrl,audience:'marketplace-test',controllerIndex:0});
+  assert.equal(connection.accountId,accountId);
+  assert.equal(saved.get('marketplace.topups.connection').identityId,identityId);
+  shortAccess=true;
+  await client.connect({apiUrl,audience:'marketplace-test',controllerIndex:0});
+  assert.equal((await client.status(connection,intentId,'stable-payment-id','10','atto:local')).intentId,intentId);
+  // Then both final-window sessions remain usable without replacing the connection.
+  assert.equal(refreshCount,1);
 });

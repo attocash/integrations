@@ -152,7 +152,7 @@ try {
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'),
     join(root, 'atto-cli/test/network.test.mjs'), join(root, 'atto-cli/test/stream-idle.test.mjs'),
     join(root, 'atto-cli/test/reconciliation.test.mjs'),
-    join(root, 'atto-cli/test/payments.test.mjs'), join(root, 'atto-mcp/test/interfaces.test.mjs'), join(root, 'atto-mcp/test/onboarding.test.mjs'),
+    join(root, 'atto-cli/test/payments.test.mjs'), join(root, 'atto-cli/test/marketplace-topups.test.mjs'), join(root, 'atto-mcp/test/interfaces.test.mjs'), join(root, 'atto-mcp/test/onboarding.test.mjs'),
     join(root, 'atto-mcp/test/stream-failure.test.mjs'), join(root, 'atto-mcp/test/configuration.test.mjs'),
     join(root, 'atto-mcp/test/representative.test.mjs'),
   ], {
