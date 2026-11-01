@@ -221,12 +221,13 @@ export async function runCli(argv = process.argv): Promise<void> {
   wallet.command('configure').description('Update public settings')
     .option('--network <name>', 'LIVE, BETA, DEV, or LOCAL')
     .option('--node-url <url>', 'Node HTTP(S) URL')
+    .option('--node-batch-size <size>', 'Accounts/ranges per request (1-1000), or auto: official gateways 5, custom nodes 1000', value => value === 'auto' ? value : number(value))
     .option('--worker-url <url>', 'Work server HTTP(S) URL')
     .option('--representative <address>', 'Default representative for opening accounts; use representative change for existing accounts')
     .option('--auto-receive', 'Enable automatic receiving in receiving sessions')
     .option('--no-auto-receive', 'Disable automatic receiving')
     .option('--min-receive-raw <amount>', 'Minimum automatically received amount in RAW')
-    .action(options => call('wallet_configure', options));
+    .action(options => call('wallet_configure', { ...options, ...(options.nodeBatchSize === 'auto' ? { nodeBatchSize: null } : {}) }));
   wallet.command('create').description('Create and store a new mnemonic; display recovery words in this terminal')
     .action(async () => {
       requireTerminal();
@@ -318,13 +319,13 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option('--search <text>', 'Match addresses, names, and entity names case-insensitively')
     .option('--refresh', 'Refresh global data, bypassing freshness and retry backoff')
     .action(options => call('labels_list', options));
-  program.command('account [address]').description('Read an account by address or key index')
-    .option('--index <index>', 'Saved wallet account index (default: 0)', number).action((address, options) => call('account_get', { address, ...options }));
+  addressOptions(program.command('account [address]').description('Read full account snapshots by address, key index, or a batch of addresses'))
+    .action((address, options) => call('account_get', { address, ...options }));
   addressOptions(program.command('balances').description('Read balances and total for active wallet accounts by default'))
     .option('--all', 'Include every saved address, including inactive accounts').action(options => call('balances_get', options));
-  program.command('transaction <hash>').description('Read a network transaction').action(hash => call('transaction_get', { hash }));
-  program.command('entry <hash>').description('Read an account entry').action(hash => call('entry_get', { hash }));
-  listOptions(program.command('history [event]').description('Read wallet account entries by default; event can be entry or transaction'))
+  program.command('transaction <hash>').description('Read a raw signed protocol transaction; use entry for action history').action(hash => call('transaction_get', { hash }));
+  program.command('entry <hash>').description('Read an action entry with owner, sender/receiver or new representative, and transfer amount').action(hash => call('entry_get', { hash }));
+  listOptions(program.command('history [event]').description('Read action entries by default; choose transaction for raw signed protocol records'))
     .option('--cursor <cursor>', 'Continue a previous history page with the same filters')
     .option('--from-height <height>', 'Inclusive starting height')
     .option('--to-height <height>', 'Inclusive ending height')

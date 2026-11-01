@@ -27,6 +27,12 @@ async function fixture(t) {
   const paths = [];
   const http = createServer((request, response) => {
     paths.push(request.url);
+    if (request.method === 'POST' && request.url === '/accounts') {
+      request.resume();
+      response.setHeader('content-type', 'application/json');
+      response.end('[]');
+      return;
+    }
     response.writeHead(404);
     response.end();
   });

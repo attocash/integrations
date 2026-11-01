@@ -13,6 +13,59 @@ const { formatHumanResult } = await import(pathToFileURL(join(cliDirectory, 'dis
 const { publicModel } = await import(pathToFileURL(join(cliDirectory, 'dist/network/reader.js')));
 const execute = promisify(execFile);
 
+test('Human configuration output explains automatic and overridden batch sizes', () => {
+  // Given an official gateway with auto sizing and a custom node with an override.
+  const automatic = { nodeUrl: 'https://gatekeeper.live.application.atto.cash', nodeBatchSize: null };
+  const custom = { nodeUrl: 'http://localhost:8080', nodeBatchSize: 40 };
+
+  // When configuration results are rendered for a person.
+  const autoText = formatHumanResult(automatic, 'wallet_configure');
+  const customText = formatHumanResult(custom, 'wallet_configure');
+
+  // Then both the selected mode and effective request size are visible.
+  assert.match(autoText, /Node batch size: Automatic/);
+  assert.match(autoText, /Effective node batch size: 5/);
+  assert.match(customText, /Node batch size: 40/);
+  assert.match(customText, /Effective node batch size: 40/);
+});
+
+test('Human entry output names the action subject and preserves exact transfer amounts', () => {
+  // Given normalized action entries and a representative change without a monetary transfer.
+  const owner = 'atto://owner';
+  const subject = 'atto://subject';
+  const amount = { raw: '9007199254740993', atto: '9007199.254740993' };
+  const entry = role => ({ address: owner, blockType: role === 'representative' ? 'CHANGE' : role === 'sender' ? 'RECEIVE' : 'SEND',
+    subjectAddress: subject, subjectRole: role, ...(role === 'representative' ? {} : { amount }) });
+
+  // When entries are rendered in individual lookups and paged history.
+  const received = formatHumanResult({ entry: entry('sender') }, 'entry_get');
+  const sent = formatHumanResult({ items: [entry('receiver')], timedOut: false }, 'history_list');
+  const changed = formatHumanResult({ entry: entry('representative') }, 'entry_get');
+
+  // Then the role-specific subject and exact amount are visible, without inventing a transfer on CHANGE.
+  assert.match(received, /Sender: atto:\/\/subject/);
+  assert.match(sent, /Destination: atto:\/\/subject/);
+  assert.match(changed, /Representative: atto:\/\/subject/);
+  assert.match(received, /9007199\.254740993 ATTO \(9007199254740993 RAW\)/);
+  assert.doesNotMatch(changed, /Amount:/);
+});
+
+test('Human bulk account output keeps unopened accounts and full account snapshots distinguishable', () => {
+  // Given one open external account and one unopened account in a bulk result.
+  const result = { accounts: [{ address: 'atto://open', account: { height: '8', balance: '9007199254740993', lastTransactionHash: 'ab'.repeat(32) } },
+    { address: 'atto://unopened', account: null }] };
+
+  // When the account command is rendered for a person.
+  const output = formatHumanResult(result, 'account_get');
+
+  // Then both addresses remain visible and a null snapshot is described as unopened.
+  assert.match(output, /Address: atto:\/\/open/);
+  assert.match(output, /Address: atto:\/\/unopened/);
+  assert.match(output, /Height: 8/);
+  assert.match(output, /9007199\.254740993 ATTO/);
+  assert.match(output, /Account is not open on the network/);
+});
+
 test('Human journal output preserves payment details and leaves serialized blocks to JSON', () => {
   // Given a published payment with integers beyond IEEE precision and caller metadata.
   const hash = 'a'.repeat(64);

@@ -11,6 +11,7 @@ export interface AccountPool { indexes: number[]; consolidate: boolean }
 export interface WalletSettings {
   network: NetworkName;
   nodeUrl: string;
+  nodeBatchSize?: number | null;
   workerUrl: string;
   representative: string;
   autoReceive: boolean;

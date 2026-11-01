@@ -9,6 +9,7 @@ import {
 import { amountOutput, amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
 import { NodeReader, parseAddress, publicModel } from '../network/reader.js';
+import { resolveNodeBatchSize } from '../network/batching.js';
 import type { SendRetry } from '../network/retry.js';
 import { OsSecretStore, type SecretStore } from '../storage/secrets.js';
 import { StateStore } from '../storage/state.js';
@@ -478,7 +479,7 @@ export class AttoApplication {
     const reader = this.reader();
     switch (name) {
       case 'doctor': return runDoctor({ directory: this.store.directory, access: this.mcp ? 'mcp' : undefined, signal: this.doctorAbort.signal, globalDirectory: args.globalDirectory as boolean | undefined });
-      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.background.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), messageSigningIndexes: this.ledger.messageSigningIndexes(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
+      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), effectiveNodeBatchSize: resolveNodeBatchSize(this.settings()), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.background.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), messageSigningIndexes: this.ledger.messageSigningIndexes(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
       case 'message_sign': return this.store.withWalletLock(async () => {
         this.requireMcpWrite();
         const index = args.index as number;
@@ -538,10 +539,17 @@ export class AttoApplication {
         if (this.settings().network === 'LIVE' && (args.all || args.refresh)) await this.labels.global.refresh(args.refresh as boolean | undefined);
         return this.labels.list(this.settings().network, args.all as boolean | undefined, args.search as string | undefined);
       }
-      case 'account_get': return { account: publicModel(await reader.account(args.address as string ?? this.address(args.index as number | undefined).address)) };
+      case 'account_get': {
+        if (args.addresses !== undefined) {
+          const addresses = this.selectedAddresses(args);
+          const accounts = await reader.accounts(addresses);
+          return { accounts: addresses.map((address, i) => ({ address, account: publicModel(accounts[i]) })) };
+        }
+        return { account: publicModel(await reader.account(args.address as string ?? this.address(args.index as number | undefined).address)) };
+      }
       case 'balances_get': {
         const addresses = this.selectedAddresses(args);
-        const accounts = await Promise.all(addresses.map(address => reader.account(address)));
+        const accounts = await reader.accounts(addresses);
         const raw = accounts.reduce((sum, account) => sum + BigInt(account?.balance.toString() ?? '0'), 0n).toString();
         return { balances: addresses.map((address, i) => {
           const saved = this.addresses().find(value => value.address === address);

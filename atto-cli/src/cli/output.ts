@@ -2,6 +2,8 @@ import type { ReceiveProgress } from '../wallet/auto-receive.js';
 import { modelAddress } from '../labels/presentation.js';
 import { AttoBlock } from '@attocash/commons-core';
 import { amountOutput } from '../domain/amount.js';
+import { resolveNodeBatchSize } from '../network/batching.js';
+import type { WalletSettings } from '../wallet/types.js';
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -28,14 +30,18 @@ function label(key: string): string {
 
 function transactionSummary(value: Record<string, unknown>): Record<string, unknown> {
   const block = record(value.block) ? value.block : value;
+  const subject = block.subjectAddress ?? modelAddress(block, 'subject');
   let hash = value.hash;
   if (!hash && record(value.block)) {
     try { hash = AttoBlock.fromJson(JSON.stringify(value.block)).hash.toString(); } catch { /* Partial public results can omit protocol fields. */ }
   }
   return Object.fromEntries(Object.entries({
     type: block.type ?? block.blockType, network: block.network,
-    address: modelAddress(block), destination: modelAddress(block, 'receiver'), subject: modelAddress(block, 'subject'),
-    representative: modelAddress(block, 'representative'), amount: block.amount,
+    address: block.address ?? modelAddress(block),
+    sender: block.subjectRole === 'sender' ? subject : undefined,
+    destination: block.subjectRole === 'receiver' ? subject : modelAddress(block, 'receiver'),
+    subject: block.subjectRole ? undefined : subject,
+    representative: block.subjectRole === 'representative' ? subject : modelAddress(block, 'representative'), amount: block.amount,
     balance: block.balance, previousBalance: block.previousBalance,
     height: block.height, timestamp: block.timestamp, hash, sendHash: block.sendHash,
   }).filter(([, value]) => value !== undefined));
@@ -136,6 +142,8 @@ function formatUnlabeledHumanResult(result: unknown, operation?: string): string
         representative: result.settings.representative,
         minReceiveRaw: result.settings.minReceiveRaw,
         nodeUrl: result.settings.nodeUrl,
+        nodeBatchSize: result.settings.nodeBatchSize ?? 'Automatic',
+        effectiveNodeBatchSize: result.effectiveNodeBatchSize,
         workerUrl: result.settings.workerUrl,
         addresses: Array.isArray(result.addresses) ? result.addresses.map(addressSummary) : result.addresses,
         pool: result.pool,
@@ -143,6 +151,10 @@ function formatUnlabeledHumanResult(result: unknown, operation?: string): string
       };
       const notice = operation === 'wallet_receive' ? 'Automatic receiving session. Press Ctrl+C to stop.\n' : '';
       return notice + fields(values).join('\n') + '\n';
+    }
+    if (operation === 'wallet_configure' && typeof result.nodeUrl === 'string') {
+      return fields({ ...result, nodeBatchSize: result.nodeBatchSize ?? 'Automatic',
+        effectiveNodeBatchSize: resolveNodeBatchSize(result as unknown as WalletSettings) }).join('\n') + '\n';
     }
     if (operation === 'address_list' && Array.isArray(result.addresses)) {
       if (!result.addresses.length) return 'No wallet addresses. Create or import a wallet first.\n';
@@ -167,6 +179,11 @@ function formatUnlabeledHumanResult(result: unknown, operation?: string): string
       return fields({ network: result.network, labels: Object.entries(result.addressLabels).map(([address, value]) => ({ address, ...(record(value) ? value : {}) })), directoryStatus: result.globalDirectory }).join('\n') + '\n';
     }
     if (operation === 'account_get') {
+      if (Array.isArray(result.accounts)) {
+        return fields({ accounts: result.accounts.map(value => record(value) && record(value.account)
+          ? { ...transactionSummary(value.account), address: value.address, lastTransactionHash: value.account.lastTransactionHash }
+          : { address: record(value) ? value.address : undefined, status: 'Account is not open on the network' }) }).join('\n') + '\n';
+      }
       if (!record(result.account)) return 'Account is not open on the network. Receiving funds opens an account.\n';
       return fields({ ...transactionSummary(result.account), lastTransactionHash: result.account.lastTransactionHash }).join('\n') + '\n';
     }

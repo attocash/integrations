@@ -63,6 +63,18 @@ async function updateNoticeFixture(t) {
   };
 }
 
+test('node batch configuration accepts an explicit size or automatic reset and rejects unsupported sizes', () => {
+  // Given the shared CLI/MCP configuration schema.
+  const configured = size => parseOperation('wallet_configure', { nodeBatchSize: size });
+
+  // When configuring a manual size or restoring automatic defaults.
+  assert.deepEqual(configured(1000), { nodeBatchSize: 1000 });
+  assert.deepEqual(configured(null), { nodeBatchSize: null });
+
+  // Then only whole sizes within the supported range or null are accepted.
+  for (const size of [0, -1, 1.5, 1001, 'auto']) assert.throws(() => configured(size), { code: 'INVALID_INPUT' });
+});
+
 test('shared validation rejects numeric amounts, secrets, invalid indexes, and ambiguous accounts', () => {
   // Given: shared operation schemas used by both interfaces.
   // When: callers provide invalid or ambiguous inputs.
@@ -160,6 +172,9 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   const pool = JSON.parse((await run(['pool', 'status'])).stdout).result;
   const indexed = JSON.parse((await run(['send', '--to-index', '1', '--amount', '1'])).stdout).result;
   const history = JSON.parse((await run(['history', '--index', '1'])).stdout).result;
+  const accounts = JSON.parse((await run(['account', '--addresses', 'atto_a,atto_b'])).stdout).result;
+  const batchOverride = JSON.parse((await run(['wallet', 'configure', '--node-batch-size', '1000'])).stdout).result;
+  const autoBatch = JSON.parse((await run(['wallet', 'configure', '--node-batch-size', 'auto'])).stdout).result;
   const receivables = JSON.parse((await run(['receivables', '--index', '1'])).stdout).result;
   const topup = JSON.parse((await run(['marketplace', 'topup', '1.25', '--unit', 'RAW', '--request-id', 'marketplace-funding-1', '--index', '3'])).stdout).result;
   const topupStatus = JSON.parse((await run(['marketplace', 'status', 'marketplace-funding-1'])).stdout).result;
@@ -185,6 +200,9 @@ test('Real CLI defaults to account zero, opts into pooling, and forwards metadat
   assert.equal(indexed.input.unit, 'ATTO');
   assert.match(indexed.input.requestId, /^[0-9a-f-]{36}$/);
   assert.deepEqual(history, { name: 'history_list', input: { event: 'entry', index: 1 } });
+  assert.deepEqual(accounts, { name: 'account_get', input: { addresses: ['atto_a', 'atto_b'] } });
+  assert.deepEqual(batchOverride, { name: 'wallet_configure', input: { nodeBatchSize: 1000 } });
+  assert.deepEqual(autoBatch, { name: 'wallet_configure', input: { nodeBatchSize: null } });
   assert.deepEqual(receivables, { name: 'receivables_list', input: { index: 1 } });
   assert.deepEqual(topup, { name: 'marketplace_topup', input: { amount: '1.25', unit: 'RAW', requestId: 'marketplace-funding-1', index: 3 } });
   assert.deepEqual(topupStatus, { name: 'marketplace_topup_status', input: { requestId: 'marketplace-funding-1' } });

@@ -66,6 +66,10 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.equal(result.tools.find(tool => tool.name === 'limits_get').annotations.openWorldHint, true);
   assert.equal(result.tools.some(tool => ['limits_set', 'voter_weight'].includes(tool.name)), false);
   assert.equal(result.tools.find(tool => tool.name === 'history_list').inputSchema.properties.event.default, 'entry');
+  assert.equal(result.tools.find(tool => tool.name === 'account_get').inputSchema.properties.addresses.maxItems, 100);
+  assert.ok(result.tools.find(tool => tool.name === 'wallet_configure').inputSchema.properties.nodeBatchSize);
+  assert.match(result.tools.find(tool => tool.name === 'entry_get').description, /subjectRole.*receiver.*sender.*representative/);
+  assert.match(result.tools.find(tool => tool.name === 'transaction_get').description, /raw signed protocol/);
   assert.equal(result.tools.find(tool => tool.name === 'receivables_list').inputSchema.properties.cursor, undefined);
   assert.ok(result.tools.find(tool => tool.name === 'send').inputSchema.properties.destinationIndex);
   assert.equal(result.tools.find(tool => tool.name === 'send').inputSchema.required.includes('unit'), false);

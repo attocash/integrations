@@ -94,6 +94,23 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
   await server.connect(serverTransport);
   await client.connect(clientTransport);
 
+  await t.test('MCP reads ordered full account snapshots including unopened addresses in one bulk call', async () => {
+    // Given an open genesis account and two derived addresses without an open account.
+    const addresses = [address2, address0, address1];
+
+    // When the read-only MCP session asks the real node for all snapshots together.
+    const response = await client.callTool({ name: 'account_get', arguments: { addresses } });
+
+    // Then full snapshots preserve request order and unopened addresses remain explicit.
+    assert.equal(response.isError, undefined);
+    const rows = response.structuredContent.result.accounts;
+    assert.deepEqual(rows.map(row => row.address), addresses);
+    assert.equal(rows[0].account, null);
+    assert.equal(rows[1].account.height, '1');
+    assert.equal(rows[1].account.balance, supply.toString());
+    assert.equal(rows[2].account, null);
+  });
+
   await t.test('doctor checks the real AttoNodeMock and worker without changing the genesis account', { skip: process.platform !== 'linux' }, async doctorTest => {
     // Given a local genesis wallet and a fake keyring holding only its test mnemonic.
     const fake = await fakeKeyring(doctorTest, mnemonic.phrase);
@@ -145,7 +162,12 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     assert.equal((await app.call('account_get', { index: 0 })).account.height, '2');
     assert.equal((await app.call('account_get', { index: 0 })).account.balance, (supply - 1000000001n).toString());
     assert.deepEqual((await app.call('transaction_get', { hash: send.hash })).transaction, send.transaction);
-    assert.equal((await app.call('entry_get', { hash: send.hash })).entry.hash, send.hash);
+    const sendEntry = (await app.call('entry_get', { hash: send.hash })).entry;
+    assert.equal(sendEntry.hash, send.hash);
+    assert.equal(sendEntry.address, address0);
+    assert.equal(sendEntry.subjectAddress, address1);
+    assert.equal(sendEntry.subjectRole, 'receiver');
+    assert.deepEqual(sendEntry.amount, { raw: '1000000001', atto: '1.000000001' });
     const pending = await app.call('receivables_list', { addresses: [address1], limit: 1, timeoutMs: 10_000 });
     assert.equal(pending.items[0].hash, send.hash);
     assert.equal(pending.limitReached, true);
@@ -171,6 +193,9 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     assert.equal(history.addressLabels[address1].personal.label, 'Current recipient');
     assert.equal(history.items[0].hash, received.hash);
     assert.equal(history.items[0].block, undefined, 'History defaults to entries, rather than full transactions.');
+    assert.equal(history.items[0].subjectAddress, address0);
+    assert.equal(history.items[0].subjectRole, 'sender');
+    assert.deepEqual(history.items[0].amount, { raw: '1000000001', atto: '1.000000001' });
     // Restore the local test wallet's budget for the remaining network scenarios.
     const restored = await app.call('limits_propose', { policy: { perRequest: null, rolling: [] }, access: 'read-only' });
     await app.approveLimitsProposal(restored.proposal.id);
@@ -251,6 +276,10 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     assert.equal(BigInt(account1.height), BigInt(before.height) + 1n);
     assert.equal(account1.representativePublicKey, changed.transaction.block.representativePublicKey);
     assert.equal(account1.balance, '1000000001');
+    const entry = (await app.call('entry_get', { hash: changed.hash })).entry;
+    assert.equal(entry.subjectAddress, address2);
+    assert.equal(entry.subjectRole, 'representative');
+    assert.equal(entry.amount, undefined);
     for (const event of ['entry', 'transaction']) {
       let cursor;
       const items = [];

@@ -385,8 +385,47 @@ Watch scopes are mutually exclusive: an index, explicit addresses, a hash
 entry only). Omitting these selects active wallet accounts. Watches only observe
 events; `watch_read` also reports connection state and errors when no events arrive.
 
-`history_list` defaults to account entries and supports inclusive heights and
-continuation cursors. Pass a returned cursor with the same filters to continue.
+`account_get` accepts an `addresses` array for full snapshots of up to 100
+accounts in one tool call. Results preserve address order as
+`accounts: [{address, account}]`; unopened addresses have `account: null`.
+The snapshots include height, balance, and representative, so reading each
+account separately is unnecessary. Single `address` and `index` lookups retain
+the existing `{account}` result. These three selectors are mutually exclusive.
+Account and history queries automatically use batches of five accounts/ranges
+for official Atto gatekeeper URLs and 1,000 for custom node URLs. Direct nodes
+do not impose the gateway's five-account limit. Smaller selections use one
+request.
+
+`wallet_configure.nodeBatchSize` overrides the size with an integer from 1 to
+1,000; `null` restores automatic selection. It applies to snapshots, balances,
+history, and account/receivable watches, and persists until explicitly changed.
+Entry/transaction watches retain per-account subscriptions for their replay
+checkpoints.
+Set it to five for a custom gateway or proxy with the same cap, since its service
+type cannot be inferred reliably from a custom URL. `wallet_status` returns the
+configured value in `settings.nodeBatchSize` when present and the resolved value
+in `effectiveNodeBatchSize`. Existing profiles without the property use automatic
+selection. The 100-address tool selection limit and 1,000-record history page
+limit remain unchanged.
+
+`history_list` defaults to action-oriented entries. Prefer entries for payment
+history, balance changes, and representative choices. Each entry retains its
+protocol fields and adds the account owner's `address`, a `subjectAddress`, and
+a `subjectRole`: `receiver` for `SEND`, `sender` for `OPEN`/`RECEIVE`, or
+`representative` for `CHANGE`. Transfers include exact `amount.raw` and
+`amount.atto` strings; a representative change has no transfer amount.
+`entry_get` provides the same representation for a transaction hash.
+
+Use `event: "transaction"` or `transaction_get` when you need raw signed
+protocol records, such as a receive block's `sendHash`, signatures, or work.
+Action entries do not supply that send/receive hash linkage.
+
+Supply multiple `addresses` together for history queries instead of reading
+each account separately. Results follow input address order and ascending
+height within each account. The maximum page size is 1,000 records. Inclusive
+height filters and continuation cursors are supported. Pass a returned
+`nextCursor` with the same filters to continue the frozen account ranges;
+restarting with new height queries causes avoidable account-head reads.
 `receivables_list` is a bounded pending-payment scan without cursor support.
 `timedOut` means the scan window ended; `limitReached` means the record limit was
 reached. Either can mean more payments remain. `receive_all` processes a bounded

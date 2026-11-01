@@ -5,6 +5,8 @@ import { AccountHeightSearch, HeightSearch } from '@attocash/commons-node';
 import { AttoNodeClientAsyncBuilder } from '@attocash/commons-node-remote';
 import { AttoError } from '../domain/errors.js';
 import { amountRaw } from '../domain/amount.js';
+import { publicEntry } from './entry.js';
+import { resolveNodeBatchSize } from './batching.js';
 import type { ListRequest, StreamFilter, WalletSettings } from '../wallet/types.js';
 
 // Ktor's Node engine uses require while Commons is imported as ESM.
@@ -29,9 +31,9 @@ function jsonExact(text: string): unknown {
 export function publicModel(model: unknown): unknown {
   if (model === null || model === undefined) return null;
   if (typeof model === 'object' && 'toJson' in model && typeof model.toJson === 'function') {
-    return jsonExact(model.toJson());
+    return publicEntry(jsonExact(model.toJson()));
   }
-  return jsonExact(JSON.stringify(model, (_key, value) => typeof value === 'bigint' ? value.toString() : value));
+  return publicEntry(jsonExact(JSON.stringify(model, (_key, value) => typeof value === 'bigint' ? value.toString() : value)));
 }
 
 export function parseAddress(value: string): AttoAddress {
@@ -93,11 +95,11 @@ export function eventPosition(model: unknown): { address: string; height: string
 export class NodeReader {
   constructor(public readonly settings: WalletSettings, private readonly headers: Record<string, string> = {}) {}
 
-  private async request(path: string, signal: AbortSignal, firstEvent: boolean): Promise<Response> {
+  private async request(path: string, signal: AbortSignal, firstEvent: boolean, body?: string): Promise<Response> {
     try {
       const response = await fetch(`${this.settings.nodeUrl.replace(/\/$/, '')}/${path}`, {
-        redirect: 'error', signal,
-        headers: { ...this.headers, accept: firstEvent ? 'application/x-ndjson' : 'application/json' },
+        redirect: 'error', signal, ...(body ? { method: 'POST', body } : {}),
+        headers: { ...this.headers, ...(body ? { 'content-type': 'application/json' } : {}), accept: firstEvent ? 'application/x-ndjson' : 'application/json' },
       });
       if (!response.ok) {
         await response.body?.cancel();
@@ -113,11 +115,11 @@ export class NodeReader {
 
   // Commons' Promise reads do not expose cancellation or HTTP status; finite
   // lookups retain those caller contracts here.
-  private async get<T>(path: string, parse: (text: string) => T, signal?: AbortSignal, firstEvent = false): Promise<T | null> {
+  private async get<T>(path: string, parse: (text: string) => T, signal?: AbortSignal, firstEvent = false, requestBody?: string): Promise<T | null> {
     const timeout = AbortSignal.timeout(10_000);
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     try {
-      const response = await this.request(path, combined, firstEvent);
+      const response = await this.request(path, combined, firstEvent, requestBody);
       let body = '';
       const decoder = new TextDecoder();
       let size = 0;
@@ -150,6 +152,30 @@ export class NodeReader {
     return this.get(`accounts/${parseAddress(address).publicKey}`, AttoAccount.fromJson, signal);
   }
 
+  async accounts(addresses: string[], signal?: AbortSignal): Promise<(AttoAccount | null)[]> {
+    const batchSize = resolveNodeBatchSize(this.settings);
+    const canonical = addresses.map(value => parseAddress(value).value);
+    const unique = [...new Set(canonical)];
+    const accounts = new Map<string, AttoAccount>();
+    for (let offset = 0; offset < unique.length; offset += batchSize) {
+      const batch = unique.slice(offset, offset + batchSize);
+      const result = await this.get('accounts', text => {
+        const values = jsonExact(text);
+        if (!Array.isArray(values)) throw new Error();
+        return values.map(value => AttoAccount.fromJson(JSON.stringify(value)));
+      }, signal, false, JSON.stringify({ addresses: batch }));
+      if (!result) throw new AttoError('NODE_HTTP_ERROR', 'The node returned HTTP 404.', { httpStatus: 404 });
+      for (const account of result) {
+        if (!batch.includes(account.address.value) || accounts.has(account.address.value)) {
+          throw new AttoError('INVALID_NODE_RESPONSE', 'The node returned an unexpected account.');
+        }
+        accounts.set(account.address.value, account);
+      }
+    }
+    if (signal?.aborted) throw new AttoError('CANCELLED', 'The network request was cancelled.');
+    return canonical.map(address => accounts.get(address) ?? null);
+  }
+
   async now(signal?: AbortSignal): Promise<AttoInstant> {
     const requested = AttoInstant.Companion.now().toString();
     const result = await this.get(`instants/${encodeURIComponent(requested)}`, text => {
@@ -176,6 +202,24 @@ export class NodeReader {
 
   async stream(filter: StreamFilter, onEvent: (model: Model) => void, signal: AbortSignal): Promise<void> {
     const normalized = normalizeFilter(filter);
+    const batchSize = resolveNodeBatchSize(this.settings);
+    if (!normalized.addresses || normalized.addresses.length <= batchSize) {
+      return this.subscription(normalized, onEvent, signal);
+    }
+    const stopped = new AbortController();
+    const combined = AbortSignal.any([signal, stopped.signal]);
+    const subscriptions: Promise<void>[] = [];
+    for (let offset = 0; offset < normalized.addresses.length; offset += batchSize) {
+      subscriptions.push(this.subscription({ ...normalized, addresses: normalized.addresses.slice(offset, offset + batchSize) }, onEvent, combined));
+    }
+    try { await Promise.all(subscriptions); }
+    finally {
+      stopped.abort();
+      await Promise.allSettled(subscriptions);
+    }
+  }
+
+  private async subscription(normalized: StreamFilter, onEvent: (model: Model) => void, signal: AbortSignal, ranges?: AccountHeightSearch[]): Promise<void> {
     if (signal.aborted) return;
     const builder = new AttoNodeClientAsyncBuilder(this.settings.nodeUrl);
     for (const [name, value] of Object.entries(this.headers)) builder.header(name, value);
@@ -217,15 +261,16 @@ export class NodeReader {
         } else {
           const from = toAttoHeight(normalized.fromHeight ?? '1');
           const to = normalized.toHeight ? toAttoHeight(normalized.toHeight) : undefined;
-          const search = addresses && !one ? HeightSearch.Companion.fromArray(addresses.map(address => new AccountHeightSearch(address, from, to))) : undefined;
+          const search = ranges ? HeightSearch.Companion.fromArray(ranges)
+            : addresses && !one ? HeightSearch.Companion.fromArray(addresses.map(address => new AccountHeightSearch(address, from, to))) : undefined;
           if (normalized.event === 'entry') {
             job = hash ? client.onAccountEntryByHash(hash, emit, complete)
-              : one ? client.onAccountEntryByPublicKey(one.publicKey, from, to, emit, complete)
+              : one && !ranges ? client.onAccountEntryByPublicKey(one.publicKey, from, to, emit, complete)
               : search ? client.onAccountEntryByHeightSearch(search, emit, complete)
               : client.onAccountEntryAll(emit, complete);
           } else {
             job = hash ? client.onTransactionByHash(hash, emit, complete)
-              : one ? client.onTransactionByPublicKey(one.publicKey, from, to, emit, complete)
+              : one && !ranges ? client.onTransactionByPublicKey(one.publicKey, from, to, emit, complete)
               : search ? client.onTransactionByHeightSearch(search, emit, complete)
               : client.onTransactionAll(emit, complete);
           }
@@ -246,6 +291,7 @@ export class NodeReader {
 
   async list(request: ListRequest, signal?: AbortSignal): Promise<{ items: unknown[]; nextCursor?: string; timedOut: boolean; limitReached?: boolean }> {
     const filter = normalizeFilter(request);
+    const batchSize = resolveNodeBatchSize(this.settings);
     const limit = request.limit ?? 100;
     const timeoutMs = request.timeoutMs ?? 3_000;
     if (!Number.isInteger(limit) || limit < 1 || limit > 1000 || !Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60_000) {
@@ -275,31 +321,65 @@ export class NodeReader {
       } catch { throw new AttoError('INVALID_CURSOR', 'The continuation cursor is invalid or belongs to a different query.'); }
     }
     try {
-      while (cursor.addressIndex < addresses.length && !combined.aborted) {
-        const index = cursor.addressIndex;
-        const address = addresses[index]!;
-        if (cursor.upper[index] === null) {
-          const current = await this.account(address, combined);
-          const currentHeight = current ? BigInt(String(current.height)) : 0n;
-          cursor.upper[index] = (filter.toHeight && BigInt(filter.toHeight) < currentHeight ? BigInt(filter.toHeight) : currentHeight).toString();
-        }
-        const upper = cursor.upper[index]!;
-        if (BigInt(cursor.nextHeight) <= BigInt(upper)) {
-          await this.stream({ ...filter, addresses: [address], fromHeight: cursor.nextHeight, toHeight: upper }, model => {
-            const position = eventPosition(model);
-            if (!position || position.address !== address || BigInt(position.height) > BigInt(upper)) throw new AttoError('INVALID_NODE_RESPONSE', 'The node returned an event outside the requested account range.');
-            if (BigInt(position.height) < BigInt(cursor.nextHeight)) return;
-            // Each account stream is height ordered. Never advance over a missing block.
-            if (position.height !== cursor.nextHeight) throw new AttoError('HISTORY_GAP', 'The node returned a gap in account history. Retry with a fully synchronized node.');
-            items.push(publicModel(model));
-            cursor.nextHeight = (BigInt(position.height) + 1n).toString();
-            if (items.length === limit) done.abort();
-          }, combined);
-        }
-        if (BigInt(cursor.nextHeight) > BigInt(upper)) {
+      const advance = () => {
+        while (cursor.addressIndex < addresses.length && cursor.upper[cursor.addressIndex] !== null && BigInt(cursor.nextHeight) > BigInt(cursor.upper[cursor.addressIndex]!)) {
           cursor.addressIndex++;
           cursor.nextHeight = filter.fromHeight!;
-        } else if (!combined.aborted) {
+        }
+      };
+      advance();
+      while (cursor.addressIndex < addresses.length && !combined.aborted) {
+        if (cursor.upper[cursor.addressIndex] === null) {
+          // Persist each nearby batch before requesting more heads. A small page
+          // need not read every selected account, and a timeout keeps prior work.
+          const unresolved = addresses.slice(cursor.addressIndex, cursor.addressIndex + batchSize)
+            .map((address, offset) => ({ address, index: cursor.addressIndex + offset }))
+            .filter(({ index }) => cursor.upper[index] === null);
+          const heads = await this.accounts(unresolved.map(({ address }) => address), combined);
+          heads.forEach((account, offset) => {
+            const currentHeight = account ? BigInt(String(account.height)) : 0n;
+            cursor.upper[unresolved[offset]!.index] = (filter.toHeight && BigInt(filter.toHeight) < currentHeight ? BigInt(filter.toHeight) : currentHeight).toString();
+          });
+          advance();
+          if (cursor.addressIndex === addresses.length) break;
+          if (cursor.upper[cursor.addressIndex] === null) continue;
+        }
+        let capacity = limit - items.length;
+        const planned: Array<{ index: number; from: bigint; to: bigint; next: bigint; pending: Map<string, Model> }> = [];
+        for (let index = cursor.addressIndex; index < addresses.length && capacity > 0 && planned.length < batchSize; index++) {
+          if (cursor.upper[index] === null) break;
+          const from = BigInt(index === cursor.addressIndex ? cursor.nextHeight : filter.fromHeight!);
+          const upper = BigInt(cursor.upper[index]!);
+          if (from > upper) continue;
+          const count = upper - from + 1n < BigInt(capacity) ? upper - from + 1n : BigInt(capacity);
+          planned.push({ index, from, to: from + count - 1n, next: from, pending: new Map() });
+          capacity -= Number(count);
+        }
+        const ranges = planned.map(range => new AccountHeightSearch(parseAddress(addresses[range.index]!), toAttoHeight(range.from.toString()), toAttoHeight(range.to.toString())));
+        await this.subscription(filter, model => {
+          const position = eventPosition(model);
+          const range = position && planned.find(range => addresses[range.index] === position.address);
+          if (!position || !range || BigInt(position.height) < range.from || BigInt(position.height) > range.to) {
+            throw new AttoError('INVALID_NODE_RESPONSE', 'The node returned an event outside the requested account range.');
+          }
+          if (BigInt(position.height) < range.next) return;
+          if (BigInt(position.height) !== range.next) throw new AttoError('HISTORY_GAP', 'The node returned a gap in account history. Retry with a fully synchronized node.');
+          range.next++;
+          range.pending.set(position.height, model);
+          // Commit only the contiguous address-ordered prefix. Later-address
+          // records remain uncommitted and are safely replayed after a timeout.
+          while (cursor.addressIndex < addresses.length) {
+            const current = planned.find(range => range.index === cursor.addressIndex);
+            const next = current?.pending.get(cursor.nextHeight);
+            if (!next) break;
+            current!.pending.delete(cursor.nextHeight);
+            items.push(publicModel(next));
+            cursor.nextHeight = (BigInt(cursor.nextHeight) + 1n).toString();
+            advance();
+            if (items.length === limit) { done.abort(); break; }
+          }
+        }, combined, ranges);
+        if (!combined.aborted && planned.some(range => range.next <= range.to)) {
           throw new AttoError('HISTORY_GAP', 'The node closed the stream before the requested history was complete.');
         }
       }

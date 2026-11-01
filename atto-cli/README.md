@@ -292,7 +292,49 @@ A USD send fixes its Atto amount for that request ID, so retries do not reprice
 the payment. Budget consumption always uses the resulting Atto amount. Reading
 metrics and previewing a quote do not require accepting terms.
 
-`history` defaults to account entries; use `history transaction` for transactions.
+`history` defaults to action-oriented account entries; use `history transaction`
+when you need raw signed protocol records, including receive-block `sendHash`
+linkage. Entries include the account owner's `address`, `subjectAddress`, and
+`subjectRole`:
+
+| Entry action | Subject role | Subject address |
+|---|---|---|
+| `SEND` | `receiver` | Payment destination |
+| `OPEN`, `RECEIVE` | `sender` | Account that sent the payment |
+| `CHANGE` | `representative` | Newly selected voter |
+
+Transfers also include an exact `amount` with `raw` and `atto` decimal strings,
+calculated from the entry's balance change. Representative changes have no
+transfer amount. Existing protocol fields remain available.
+
+Use `atto account --addresses <address-a>,<address-b>` for full account snapshots
+including height, balance, and representative. JSON results contain
+`accounts: [{address, account}]`, with `account: null` for an unopened address.
+The existing `atto account <address>` and `atto account --index 0` forms retain
+their single `account` result.
+
+Node requests automatically use batches of **5** for the official
+`gatekeeper.<network>.application.atto.cash` URLs (`live`, `beta`, or `dev`),
+and **1,000** for other node URLs. A smaller selection is sent in one
+request. This is a client query setting; direct nodes do not impose the
+gateway's five-account limit.
+
+Override it for a custom gateway or node, or restore automatic selection:
+
+```sh
+atto wallet configure --node-batch-size 5
+atto wallet configure --node-batch-size 1000
+atto wallet configure --node-batch-size auto
+```
+
+The override is saved in this profile and applies to account snapshots, balances,
+history, and account/receivable watches. Entry/transaction watches retain
+per-account subscriptions for their replay checkpoints. Custom gateways and
+proxies require an explicit override when their limit differs from the
+custom-node default.
+`wallet status` shows the override and effective size. The tool's existing
+100-address selection limit and 1,000-record history page limit still apply.
+
 History, receivables, balances, and watches default to active wallet addresses.
 Use `--index N` or `--addresses <address,...>` to select saved or external accounts;
 these selectors cannot be combined. Watches also accept `--network-wide` for
