@@ -61,6 +61,7 @@ function request({ action, purpose, address = authorizingAddress, index = 0, bin
   const challengeId = '00000000-0000-4000-8000-000000000301';
   const issuedAt = new Date(Date.now() - 1000).toISOString();
   const expiresAt = new Date(Date.now() + 120_000).toISOString();
+  binding ??= purpose === 'login' ? sha256(['signer-controller-enrollment-v1', account, identity].join('\n')) : undefined;
   const lines = [
     'Marketplace Agent Controller Proof v1', `Audience: ${audience}`, 'Network: live',
     `Address: ${address}`, `Purpose: ${purpose}`, `Request ID: ${challengeId}`,
@@ -87,21 +88,33 @@ function request({ action, purpose, address = authorizingAddress, index = 0, bin
 
 test('a provisioned browser origin is accepted for the connected API and is the exact proof audience', () => {
   const action = { kind: 'login', network: 'ATTO', address: authorizingAddress };
-  const login = request({ action, purpose: 'login', account: null, identity: null });
+  const login = request({ action, purpose: 'login' });
   const { preview } = createClient().inspectProofApproval(login);
   assert.equal(preview.marketplaceOrigin, apiOrigin);
   assert.equal(preview.proofOrigin, browserOrigin);
   assert.equal(preview.audience, browserOrigin);
 
   const unprovisioned = request({ action, purpose: 'login', proof: 'http://localhost:5174',
-    audience: 'http://localhost:5174', account: null, identity: null });
+    audience: 'http://localhost:5174' });
   assert.throws(() => createClient().inspectProofApproval(unprovisioned), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
   assert.throws(() => createClient(null).inspectProofApproval(login), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
 
-  const apiSameOrigin = request({ action, purpose: 'login', proof: apiOrigin, audience: apiOrigin,
-    account: null, identity: null });
+  const apiSameOrigin = request({ action, purpose: 'login', proof: apiOrigin, audience: apiOrigin, });
   assert.equal(createClient(null).inspectProofApproval(apiSameOrigin).preview.proofOrigin, apiOrigin);
   assert.throws(() => createClient().inspectProofApproval(apiSameOrigin), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
+});
+
+test('login enrollment rejects missing tuple metadata, altered bindings and a different saved account', () => {
+  const valid = request({ action: { kind: 'login', network: 'ATTO', address: authorizingAddress }, purpose: 'login' });
+  for (const field of ['accountId', 'identityId']) {
+    const missing = structuredClone(valid); delete missing[field];
+    assert.throws(() => createClient().inspectProofApproval(missing), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
+  }
+  const changed = structuredClone(valid);
+  changed.challenge.message = changed.challenge.message.replace(/Binding Hash: [a-f0-9]{64}/, `Binding Hash: ${'0'.repeat(64)}`);
+  assert.throws(() => createClient().inspectProofApproval(changed), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
+  const wrongTuple = request({ action: valid.action, purpose: 'login', account: '00000000-0000-4000-8000-000000000999' });
+  assert.throws(() => createClient().inspectProofApproval(wrongTuple), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
 });
 
 test('saved browser-origin allowlists reject duplicates, wildcards, paths, and more than eight entries', () => {

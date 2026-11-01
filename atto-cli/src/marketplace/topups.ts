@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { derivedSigner } from '../wallet/signing.js';
 import type { WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
 import type { StateStore } from '../storage/state.js';
@@ -72,6 +73,8 @@ interface MarketplaceSession {
 }
 
 interface ProofChallenge {
+  accountId: string;
+  controllerId: string;
   challengeId: string;
   message: string;
   issuedAt: string;
@@ -313,7 +316,7 @@ export class MarketplaceTopUpClient {
     return value;
   }
 
-  private async login(connection: Pick<MarketplaceConnection, 'apiUrl' | 'audience' | 'controllerIndex' | 'controllerAddress'>): Promise<MarketplaceSession> {
+  private async login(connection: Pick<MarketplaceConnection, 'apiUrl' | 'audience' | 'controllerIndex' | 'controllerAddress'> & Partial<Pick<MarketplaceConnection, 'accountId' | 'identityId'>>): Promise<MarketplaceSession> {
     const networkForAddress = 'ATTO';
     const response = await this.fetchJson(connection.apiUrl, this.authUrl(connection.apiUrl, 'challenges'),
       'POST', undefined, { network: networkForAddress, address: connection.controllerAddress });
@@ -332,6 +335,9 @@ export class MarketplaceTopUpClient {
       'POST', undefined, { challengeId: challenge.challengeId, message: challenge.message, signature });
     if (sessionResponse.status !== 200) throw this.httpFailure(sessionResponse.status);
     const value = parseSession(sessionResponse.json);
+    if (value.accountId !== challenge.accountId || value.identityId !== challenge.controllerId) {
+      throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned a session outside the signed controller enrollment.');
+    }
     if (value.accessExpiresAt <= Date.now() || value.refreshExpiresAt <= value.accessExpiresAt) {
       throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an expired controller session.');
     }
@@ -470,15 +476,18 @@ function parseTopUpStatus(input: unknown): MarketplaceTopUpStatus {
   return value as unknown as MarketplaceTopUpStatus;
 }
 
-function parseProofChallenge(input: unknown, connection: Pick<MarketplaceConnection, 'audience' | 'controllerAddress'>): ProofChallenge {
+function parseProofChallenge(input: unknown, connection: Pick<MarketplaceConnection, 'audience' | 'controllerAddress'> & Partial<Pick<MarketplaceConnection, 'accountId' | 'identityId'>>): ProofChallenge {
   const value = object(input);
-  if (!value || !uuid(value.challengeId) || typeof value.message !== 'string'
+  if (!value || !uuid(value.challengeId) || !uuid(value.accountId) || !uuid(value.controllerId) || typeof value.message !== 'string'
     || typeof value.issuedAt !== 'string' || typeof value.expiresAt !== 'string') {
     throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid controller proof challenge.');
   }
-  const match = /^Marketplace Agent Controller Proof v1\nAudience: ([^\n]+)\nNetwork: live\nAddress: (atto:\/\/[a-z2-7]{61})\nPurpose: login\nRequest ID: ([0-9a-f-]{36})\nNonce: ([0-9a-f]{64})\nIssued At: ([^\n]+)\nExpiration Time: ([^\n]+)$/.exec(value.message);
+  const match = /^Marketplace Agent Controller Proof v1\nAudience: ([^\n]+)\nNetwork: live\nAddress: (atto:\/\/[a-z2-7]{61})\nPurpose: login\nRequest ID: ([0-9a-f-]{36})\nBinding Hash: ([0-9a-f]{64})\nNonce: ([0-9a-f]{64})\nIssued At: ([^\n]+)\nExpiration Time: ([^\n]+)$/.exec(value.message);
   if (!match || match[1] !== connection.audience || match[2] !== connection.controllerAddress
-    || match[3] !== value.challengeId || match[5] !== value.issuedAt || match[6] !== value.expiresAt) {
+    || match[3] !== value.challengeId || match[4] !== createHash('sha256').update(['signer-controller-enrollment-v1', value.accountId, value.controllerId].join('\n'), 'utf8').digest('hex')
+    || match[6] !== value.issuedAt || match[7] !== value.expiresAt
+    || (connection.accountId !== undefined && value.accountId !== connection.accountId)
+    || (connection.identityId !== undefined && value.controllerId !== connection.identityId)) {
     throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned a controller proof outside the configured audience or identity.');
   }
   const issuedAt = instant(value.issuedAt);

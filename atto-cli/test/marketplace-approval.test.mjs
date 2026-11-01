@@ -132,9 +132,9 @@ test('browser proof approval preserves an exact browser-origin audience', async 
   const issuedAt=new Date(Date.now()-1000).toISOString();
   const expiresAt=new Date(Date.now()+120_000).toISOString();
   const challengeId='00000000-0000-4000-8000-000000000204';
-  const message=`Marketplace Agent Controller Proof v1\nAudience: ${origin}\nNetwork: live\nAddress: ${signer.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nNonce: ${'cd'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
+  const message=`Marketplace Agent Controller Proof v1\nAudience: ${origin}\nNetwork: live\nAddress: ${signer.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nBinding Hash: ${createHash('sha256').update(['signer-controller-enrollment-v1',accountId,identityId].join('\n')).digest('hex')}\nNonce: ${'cd'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
   const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'b'.repeat(32),
-    marketplaceOrigin:origin,transport:'BROWSER',proofOrigin:origin,audience:origin,
+    marketplaceOrigin:origin,transport:'BROWSER',proofOrigin:origin,audience:origin,accountId,identityId,
     controller:{network:'ATTO',address:signer.address.value,index:0},purpose:'login',action:{kind:'login',network:'ATTO',address:signer.address.value},
     challenge:{challengeId,message,issuedAt,expiresAt}};
   t.after(()=>seed.value.fill(0));

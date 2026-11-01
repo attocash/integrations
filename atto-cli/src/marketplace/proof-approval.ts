@@ -106,9 +106,12 @@ export function inspectMarketplaceProofApproval(input: unknown, connection: Mark
       throw new AttoError('MARKETPLACE_APPROVAL_MISMATCH', 'A new-controller proof must be paired with the connected account authorizer.');
     }
     if (request.transport === 'AGENT_API' && request.audience !== connection.audience) throw new AttoError('MARKETPLACE_APPROVAL_MISMATCH', 'This approval uses a different Agent API audience.');
-  } else if (request.accountId !== undefined || request.identityId !== undefined) {
+  } else if (!uuid(request.accountId) || !uuid(request.identityId)) {
     throw protocolFailure();
-  } else if (connection && origin !== new URL(connection.apiUrl).origin) {
+  } else if (connection && (origin !== new URL(connection.apiUrl).origin
+    || request.accountId !== connection.accountId || request.identityId !== connection.identityId
+    || request.controller.address !== connection.controllerAddress || request.controller.index !== connection.controllerIndex
+    || (request.transport === 'AGENT_API' && request.audience !== connection.audience))) {
     throw new AttoError('MARKETPLACE_APPROVAL_MISMATCH', 'This login request is for a different connected Marketplace origin.');
   }
 
@@ -262,8 +265,9 @@ function validActionKeys(action: Record<string, unknown>): boolean {
 function bindingHash(request: MarketplaceProofApprovalRequest): string | undefined {
   const action = request.action;
   if (action.kind === 'login') {
-    if (action.network !== 'ATTO' || action.address !== request.controller.address) throw protocolFailure();
-    return undefined;
+    if (action.network !== 'ATTO' || action.address !== request.controller.address
+      || !uuid(request.accountId) || !uuid(request.identityId)) throw protocolFailure();
+    return sha256(['signer-controller-enrollment-v1', request.accountId!, request.identityId!].join('\n'));
   }
   if (!request.accountId || !request.identityId) throw protocolFailure();
   if (action.kind === 'productPurchase') {

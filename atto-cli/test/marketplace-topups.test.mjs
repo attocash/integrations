@@ -55,7 +55,7 @@ test('configured Marketplace client signs its controller proof and sends a bodyl
   const challengeId = '00000000-0000-4000-8000-000000000103';
   const issuedAt = new Date(Date.now() - 1000).toISOString();
   const expiresAt = new Date(Date.now() + 120_000).toISOString();
-  const proofMessage = `Marketplace Agent Controller Proof v1\nAudience: marketplace-test\nNetwork: live\nAddress: ${controller.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nNonce: ${'ab'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
+  const proofMessage = `Marketplace Agent Controller Proof v1\nAudience: marketplace-test\nNetwork: live\nAddress: ${controller.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nBinding Hash: ${createHash('sha256').update(['signer-controller-enrollment-v1',accountId,identityId].join('\n')).digest('hex')}\nNonce: ${'ab'.repeat(32)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
   const paymentIdentifier = 'account-scoped-payment-079';
   let sessionAgentId = agentId;
   const paymentSignature = Buffer.from('opaque exact signed payment bytes').toString('base64');
@@ -75,7 +75,7 @@ test('configured Marketplace client signs its controller proof and sends a bodyl
     if (url.pathname === '/v1/agent/auth/challenges') {
       assert.equal(init.method, 'POST');
       assert.deepEqual(JSON.parse(init.body), { network: 'ATTO', address: controller.address.value });
-      return new Response(JSON.stringify({ challengeId, message: proofMessage, issuedAt, expiresAt }), { status: 200 });
+      return new Response(JSON.stringify({ challengeId, accountId, controllerId: identityId, message: proofMessage, issuedAt, expiresAt }), { status: 200 });
     }
     if (url.pathname === '/v1/agent/auth/sessions') {
       const body = JSON.parse(init.body);
@@ -213,6 +213,43 @@ test('configured Marketplace client signs its controller proof and sends a bodyl
   sessionAgentId = '00000000-0000-4000-8000-000000000104';
   client.session.value.accessExpiresAt = 0;
   await assert.rejects(client.status(connection, intentId, paymentIdentifier, '10', 'atto:local'), { code: 'MARKETPLACE_IDENTITY_CHANGED' });
+});
+
+test('raw login rejects altered enrollment metadata before reading keys and mismatched sessions before saving', async t => {
+  const phrase=(await AttoMnemonic.generate()).phrase;
+  const seed=await (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync();
+  const signer=await derivedSigner(seed,0);
+  const fingerprint=createHash('sha256').update(signer.publicKey.toString()).digest('hex');
+  const challengeId='00000000-0000-4000-8000-000000000103';
+  const issuedAt=new Date(Date.now()-1000).toISOString(), expiresAt=new Date(Date.now()+120_000).toISOString();
+  const binding=createHash('sha256').update(['signer-controller-enrollment-v1',accountId,identityId].join('\n')).digest('hex');
+  const message=`Marketplace Agent Controller Proof v1\nAudience: marketplace-test\nNetwork: live\nAddress: ${signer.address.value}\nPurpose: login\nRequest ID: ${challengeId}\nBinding Hash: ${binding}\nNonce: ${'a'.repeat(64)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
+  const valid={challengeId,accountId,controllerId:identityId,message,issuedAt,expiresAt};
+  let challenge=valid, keyReads=0, sessions=0;
+  const saved=new Map([['identity',{address:signer.address.value,fingerprint}]]);
+  const previous=globalThis.fetch;
+  globalThis.fetch=async input=>{
+    if(new URL(input).pathname.endsWith('/challenges')) return new Response(JSON.stringify(challenge),{status:200});
+    sessions++;
+    return new Response(JSON.stringify({accountId,agentId,identityId:'00000000-0000-4000-8000-000000000999',accountState:'ACTIVE',
+      accessToken:'access-token-at-least-16',accessExpiresAt:expiresAt,refreshToken:'refresh-token-at-least-16',
+      refreshExpiresAt:new Date(Date.now()+600_000).toISOString()}),{status:200});
+  };
+  t.after(()=>{globalThis.fetch=previous;seed.value.fill(0);});
+  const client=new MarketplaceTopUpClient({get:key=>saved.get(key),set:(key,value)=>saved.set(key,value)}, {
+    settings:()=>({network:'LOCAL'}),addresses:()=>[{index:0,address:signer.address.value,publicKey:signer.publicKey.toString(),active:true}],
+    seed:async()=>{keyReads++;return (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync();},mcp:false});
+  for(const mutated of [{...valid,accountId:undefined},{...valid,controllerId:'not-a-uuid'},
+    {...valid,accountId:'00000000-0000-4000-8000-000000000999'},
+    {...valid,message:message.replace(/Binding Hash: [0-9a-f]{64}\n/,'')}]) {
+    challenge=mutated;
+    await assert.rejects(client.connect({apiUrl,audience:'marketplace-test',controllerIndex:0}),{code:'MARKETPLACE_PROTOCOL'});
+  }
+  assert.equal(keyReads,0); assert.equal(sessions,0);
+  challenge=valid;
+  await assert.rejects(client.connect({apiUrl,audience:'marketplace-test',controllerIndex:0}),{code:'MARKETPLACE_PROTOCOL'});
+  assert.equal(keyReads,1); assert.equal(sessions,1);
+  assert.equal(saved.has('marketplace.topups.connection'),false);
 });
 
 test('MCP cannot reconfigure Marketplace origin or controller before network access', async t => {
