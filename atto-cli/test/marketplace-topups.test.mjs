@@ -102,7 +102,7 @@ test('configured Marketplace client signs its controller proof and sends a bodyl
       assert.equal(init.body, undefined, 'Marketplace continuation has no JSON request body.');
       assert.equal(headers.get('payment-signature'), paymentSignature);
       return new Response(JSON.stringify(continuationStatus), {
-        status: continuationHttpStatus, headers: { 'PAYMENT-RESPONSE': paymentResponse },
+        status: continuationHttpStatus, headers: paymentResponse === null ? {} : { 'PAYMENT-RESPONSE': paymentResponse },
       });
     }
     if (url.pathname === '/v1/agent/topups' && init.method === 'POST') {
@@ -121,9 +121,10 @@ test('configured Marketplace client signs its controller proof and sends a bodyl
   };
   t.after(() => { globalThis.fetch = originalFetch; seed.value.fill(0); });
 
-  const client = new MarketplaceTopUpClient(store, { settings: () => ({ network: 'LOCAL' }),
+  const wallet = { settings: () => ({ network: 'LOCAL' }),
     addresses: () => [{ index: 0, address: controller.address.value, publicKey: controller.publicKey.toString(), active: true }],
-    seed: async () => (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync(), mcp: false });
+    seed: async () => (await AttoMnemonic.fromPhrase(phrase)).toSeedAsync(), mcp: false };
+  const client = new MarketplaceTopUpClient(store, wallet);
 
   // When the local owner connects, requests the challenge, submits a payment, and reads its status.
   const connection = await client.connect({ apiUrl, audience: 'marketplace-test', controllerIndex: 0 });
@@ -149,6 +150,31 @@ test('configured Marketplace client signs its controller proof and sends a bodyl
   assert.ok(calls.every(call => call.redirect === 'error'));
   assert.deepEqual([...saved.keys()].sort(), ['identity', 'marketplace.topups.connection']);
   assert.doesNotMatch(JSON.stringify([...saved.entries()]), /access-token-at-least-16|refresh-token-at-least-16|PAYMENT-SIGNATURE/);
+
+  // An admitted payment may be pending before a native settlement receipt exists.
+  paymentResponse = null;
+  const retryClient = new MarketplaceTopUpClient(store, wallet);
+  const expectedPayment = { hash: 'A'.repeat(64), network: 'atto:local', payer: controller.address.value };
+  assert.equal((await retryClient.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
+    expectedPayment, async () => {})).state, 'PENDING');
+  for (const changes of [
+    { intentId: '00000000-0000-4000-8000-000000000105' }, { sendHash: 'B'.repeat(64) },
+    { payer: recipient.address.value }, { sendHash: null }, { payer: null }, { amountAtomic: '11' },
+    { asset: 'XNO' }, { network: 'atto:beta' }, { paymentState: null }, { paymentState: 'ACCEPTED' },
+    { state: 'ACCEPTED', paymentState: 'ACCEPTED' }, { state: 'REJECTED', paymentState: 'REJECTED' },
+  ]) {
+    continuationStatus = topUpStatus({ sendHash: expectedPayment.hash, payer: expectedPayment.payer,
+      paymentState: 'PENDING', ...changes });
+    await assert.rejects(retryClient.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
+      expectedPayment, async () => {}), { code: 'MARKETPLACE_PROTOCOL' });
+  }
+  for (const [httpStatus, state] of [[200, 'PENDING'], [200, 'ACCEPTED'], [409, 'REJECTED']]) {
+    continuationHttpStatus = httpStatus;
+    continuationStatus = topUpStatus({ sendHash: expectedPayment.hash, payer: expectedPayment.payer,
+      state, paymentState: state });
+    await assert.rejects(retryClient.pay(connection, challenge.status, paymentIdentifier, paymentSignature,
+      expectedPayment, async () => {}), { code: 'MARKETPLACE_PROTOCOL' });
+  }
 
   // Both confirmed SEND and later RECEIVE states are successful; HTTP 200 must carry a matching successful receipt.
   continuationStatus = topUpStatus({ state: 'ACCEPTED', sendHash: 'A'.repeat(64),

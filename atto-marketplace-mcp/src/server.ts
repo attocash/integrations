@@ -1943,10 +1943,9 @@ async function submitFundingPayment(store:MarketplaceProfileStore,profile:Market
     validateFundingStatus(status,profile,journal.asset,journal.amountAtomic,journal.intentId,journal.network);
     const receipt=result.headers.get('payment-response');
     const settlement=journal.asset==='XNO'
-      ? (receipt?validatePaymentReceipt(receipt,status,journal.xnoResponse!,result.status):undefined)
-      : (receipt?validateAttoPaymentReceipt(receipt,status,journal.attoPayment!,result.status):undefined);
-    if (!receipt) throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace did not return an exact native payment receipt for this intent.');
-    settledState=settlement??'PENDING';
+      ? validatePaymentReceipt(receipt,status,journal.xnoResponse!,result.status)
+      : validateAttoPaymentReceipt(receipt,status,journal.attoPayment!,result.status);
+    settledState=settlement;
     const nextState=fundingFailed(status)?'FAILED':fundingUsable(status)?String(status.state):'PENDING';
     saved={...journal,state:nextState,lastStatus:status};
     saveFundingJournal(store,profile.id,handle,saved,nextState);
@@ -2174,7 +2173,8 @@ function assertAttoPaymentBinding(payment:AttoIntentPayment,journal:MarketplaceF
   }
 }
 
-function validateAttoPaymentReceipt(header:string,status:Record<string,unknown>,payment:AttoIntentPayment,httpStatus:number):'PENDING'|'ACCEPTED'|'SETTLED'|'REJECTED' {
+function validateAttoPaymentReceipt(header:string|null,status:Record<string,unknown>,payment:AttoIntentPayment,httpStatus:number):'PENDING'|'ACCEPTED'|'SETTLED'|'REJECTED' {
+  if (header===null) return validatePendingPaymentStatus(status,payment.hash,payment.payer,payment.network,httpStatus);
   const receipt=decodeHeader(header);
   if (receipt.network!==payment.network || typeof receipt.transaction!=='string'
     || receipt.transaction.toUpperCase()!==payment.hash.toUpperCase() || status.sendHash?.toString().toUpperCase()!==payment.hash.toUpperCase()
@@ -2347,7 +2347,15 @@ function decodeHeader(header: string): Record<string,unknown> {
   catch { throw new MarketplaceApiError('PAYMENT_PROTOCOL','Marketplace returned an invalid payment requirement body.'); }
 }
 
-function validatePaymentReceipt(header:string,status:Record<string,unknown>,response:XnoPaymentResponse,httpStatus:number):'PENDING'|'ACCEPTED'|'SETTLED'|'REJECTED' {
+function validatePendingPaymentStatus(status:Record<string,unknown>,hash:string,payer:string,network:string,httpStatus:number):'PENDING' {
+  if (httpStatus===202 && status.state==='PENDING' && status.paymentState==='PENDING'
+    && status.network===network && typeof status.sendHash==='string'
+    && status.sendHash.toUpperCase()===hash.toUpperCase() && status.payer===payer) return 'PENDING';
+  throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace omitted the native payment receipt without an exact pending payment status.');
+}
+
+function validatePaymentReceipt(header:string|null,status:Record<string,unknown>,response:XnoPaymentResponse,httpStatus:number):'PENDING'|'ACCEPTED'|'SETTLED'|'REJECTED' {
+  if (header===null) return validatePendingPaymentStatus(status,response.sendHash,response.payer,response.network,httpStatus);
   const receipt=decodeHeader(header);
   if (receipt.network!==response.network || typeof receipt.transaction!=='string'
     || receipt.transaction.toUpperCase()!==response.sendHash || String(status.sendHash).toUpperCase()!==response.sendHash

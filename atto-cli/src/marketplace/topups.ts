@@ -255,7 +255,10 @@ export class MarketplaceTopUpClient {
     });
     if (![200, 202, 409].includes(response.status)) throw this.httpFailure(response.status);
     const paymentResponse = response.headers.get('payment-response');
-    if (!paymentResponse) throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace omitted the payment receipt.');
+    if (paymentResponse === null) {
+      if (response.status === 202 && updated.state === 'PENDING' && updated.paymentState === 'PENDING') return updated;
+      throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace omitted the payment receipt without an exact pending payment status.');
+    }
     const receipt = this.decodeObject(paymentResponse);
     const paymentApplied = updated.state === 'ACCEPTED' || updated.state === 'SETTLED';
     const pending = updated.state === 'PENDING';

@@ -347,7 +347,6 @@ test('unified XNO funding recovers a lost submit response from its saved payer h
 });
 
 for (const scenario of [
-  { reason:'settlement_pending',state:'PENDING',httpStatus:202 },
   { reason:'error_block_awaiting_confirmation',state:'PENDING',httpStatus:202 },
   { reason:'error_timeout_expired',state:'PENDING',httpStatus:202 },
   { reason:'error_block_already_confirmed',state:'ACCEPTED',httpStatus:200 },
@@ -623,6 +622,88 @@ test('successful ATTO credit triggers best-effort wallet status reconciliation',
 });
 
 for (const asset of ['ATTO','XNO']) {
+  for (const scenario of [
+    {name:'exact pending',httpStatus:202},
+    {name:'changed hash',httpStatus:202,changes:{sendHash:'B'.repeat(64)}},
+    {name:'missing hash',httpStatus:202,changes:{sendHash:null}},
+    {name:'changed payer',httpStatus:202,changes:{payer:'different-payer'}},
+    {name:'missing payer',httpStatus:202,changes:{payer:null}},
+    {name:'changed intent',httpStatus:202,changes:{intentId:'66666666-6666-4666-8666-666666666666'}},
+    {name:'changed amount',httpStatus:202,changes:{amountAtomic:'701'}},
+    {name:'changed asset',httpStatus:202,changes:{asset:asset==='ATTO'?'XNO':'ATTO'}},
+    {name:'changed network',httpStatus:202,changes:{network:asset==='ATTO'?'atto:beta':'nano:mainnet'}},
+    {name:'missing payment state',httpStatus:202,changes:{paymentState:null}},
+    {name:'changed payment state',httpStatus:202,changes:{paymentState:'ACCEPTED'}},
+    {name:'relabelled success',httpStatus:202,changes:{state:'ACCEPTED',paymentState:'ACCEPTED'}},
+    {name:'pending HTTP 200',httpStatus:200},
+    {name:'success without receipt',httpStatus:200,changes:{state:'ACCEPTED',paymentState:'ACCEPTED'}},
+    {name:'rejection without receipt',httpStatus:409,changes:{state:'REJECTED',paymentState:'REJECTED'}},
+  ]) test(`${asset} unsigned admission ${scenario.name} keeps the exact payment binding`, async () => {
+    const home=await mkdtemp(join(tmpdir(),`atto-marketplace-mcp-unsigned-${asset.toLowerCase()}-`));
+    const amountAtomic='700',network=asset==='ATTO'?'atto:local':'nano:dev';
+    const paymentPayer=asset==='ATTO'?payer:nanoPayer;
+    const directory=join(home,'handoffs'); await mkdir(directory,{mode:0o700});
+    const wallet=asset==='ATTO'?await fakeAttoWallet(home):undefined;
+    const command=asset==='XNO'?await fakeNanoPayer(home):wallet.command;
+    const env={...process.env,MARKETPLACE_MCP_WALLET_HOST_COMMAND:command,MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:directory,
+      ...(wallet?{MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:wallet.dataDirectory}:{})};
+    const intent={intentId,asset,network,amountAtomic,state:'PENDING',expiresAt:new Date(Date.now()+120000).toISOString(),
+      sendHash:null,payer:null,paymentState:null,receiveStatus:null};
+    const pending={...intent,sendHash:'A'.repeat(64),payer:paymentPayer,paymentState:'PENDING'};
+    const calls={create:0,signatures:[]};
+    const http=await listen(async(req,res)=>{
+      const body=await readBody(req);
+      if(req.url==='/v1/agent/topups'&&req.method==='POST') {
+        calls.create++;
+        const challenge=asset==='ATTO'?'bWFya2V0LWNoYWxsZW5nZQ=='
+          :Buffer.from(JSON.stringify(xnoChallenge(`${http.origin}/v1/agent/topups/${intentId}`,amountAtomic,body.paymentIdentifier))).toString('base64');
+        res.writeHead(402,{'content-type':'application/json','payment-required':challenge});
+        return res.end(JSON.stringify(intent));
+      }
+      // A stale status read after restart must retry the original signed bytes.
+      if(req.url===`/v1/agent/topups/${intentId}`&&req.method==='GET') return json(res,200,calls.signatures.length<2?intent:pending);
+      if(req.url===`/v1/agent/topups/${intentId}`&&req.method==='POST') {
+        calls.signatures.push(req.headers['payment-signature']);
+        res.writeHead(scenario.httpStatus,{'content-type':'application/json',location:`/v1/agent/topups/${intentId}`});
+        return res.end(JSON.stringify({...pending,...scenario.changes}));
+      }
+      if(req.url==='/v1/agent/balances') return json(res,200,{[asset.toLowerCase()]:{availableAtomic:'0',reservedAtomic:'0'}});
+      return json(res,404,{});
+    });
+    await createProfile(home,http.origin,'controller-session');
+    let client=await openMarketplace(home,http.origin,env,directory);
+    try {
+      const args={asset,amountAtomic,requestId,network,expectedMarketplaceOrigin:http.origin,expectedAccountId:accountId};
+      const result=await client.callTool({name:'marketplace_fund',arguments:args});
+      assert.equal(calls.create,1); assert.equal(calls.signatures.length,1);
+      if(scenario.name!=='exact pending') {
+        assert.equal(result.isError,true,JSON.stringify(result.structuredContent));
+        assert.ok(['PAYMENT_BINDING','FUNDING_BINDING'].includes(result.structuredContent.error.code));
+        const store=await MarketplaceProfileStore.open(home);
+        try {
+          const mutation=store.getMutationByRequestId('agent',requestId);
+          assert.equal(mutation.state,'PENDING');
+          assert.equal(store.getHandoff('agent',mutation.resultIdentity).state,'UNKNOWN');
+        } finally {store.close();}
+      } else {
+        assert.notEqual(result.isError,true,JSON.stringify(result.structuredContent));
+        assert.equal(result.structuredContent.result.settlementState,'PENDING');
+        assert.equal(result.structuredContent.result.status.sendHash,pending.sendHash);
+        assert.equal(result.structuredContent.result.status.payer,paymentPayer);
+        await client.close(); client=await openMarketplace(home,http.origin,env,directory);
+        const retry=await client.callTool({name:'marketplace_fund',arguments:args});
+        assert.notEqual(retry.isError,true,JSON.stringify(retry.structuredContent));
+        assert.equal(retry.structuredContent.result.settlementState,'PENDING');
+        assert.equal(calls.create,1); assert.equal(calls.signatures.length,2);
+        assert.equal(calls.signatures[1],calls.signatures[0]);
+        const replay=await client.callTool({name:'marketplace_fund',arguments:args});
+        assert.equal(replay.structuredContent.result.status.state,'PENDING');
+        assert.equal(calls.signatures.length,2);
+        if(wallet) assert.equal((await wallet.calls()).payments,1);
+      }
+    } finally {await client.close();http.close();await rm(home,{recursive:true,force:true});}
+  });
+
   test(`${asset} submit handles Marketplace's immediate 409 native failure without replaying payment`, async () => {
     const home=await mkdtemp(join(tmpdir(),`atto-marketplace-mcp-submit-failed-${asset.toLowerCase()}-`));
     const amountAtomic='700';
