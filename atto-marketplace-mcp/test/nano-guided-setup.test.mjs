@@ -58,22 +58,23 @@ async function terminal(action) {
   }
 }
 
-function interaction(responses, check) {
+function interaction(responses, check, workUrl = '') {
   const questions = [];
   return { questions, prompt: async question => {
     questions.push(question);
     await check?.(question);
     if(question.startsWith('Recovery wallet directory'))return '';
+    if(question.startsWith('Nano work URL'))return workUrl;
     assert.ok(responses.length, `Unexpected prompt: ${question}`);
     return responses.shift();
   } };
 }
 
-async function existing(home, grants = { marketplaceFunding: true, externalTransfers: false, controllerPurposes: initialPurposes }) {
+async function existing(home, grants = { marketplaceFunding: true, externalTransfers: false, controllerPurposes: initialPurposes }, workUrl) {
   const directory = join(home, 'existing');
   const seedFile=join(home,'existing-seed.hex');
   await writeFile(seedFile,'42'.repeat(32)+'\n',{mode:0o600});
-  await provisionNanoWallet({ seedFile, dataDir: directory, derivationIndex: 7, network: 'nano:dev', rpcUrl: 'http://localhost:17076',
+  await provisionNanoWallet({ seedFile, dataDir: directory, derivationIndex: 7, network: 'nano:dev', rpcUrl: 'http://localhost:17076', ...(workUrl ? { workUrl } : {}),
     origin, audience, handoffDirectory: join(home, 'handoffs'), grants,
     limits: { maxPaymentAtomic: '1000000000000000000000000000000', rolling24hAtomic: '10000000000000000000000000000000' }, terminalConfirmed: true });
   const config = JSON.parse(await readFile(join(directory, 'wallet.json'), 'utf8'));
@@ -130,6 +131,63 @@ test('dedicated Nano creation asks usable defaults and keeps funding and transfe
   assert.equal(responses.length, 0);
 }));
 
+for (const { name, network, answer, rpcUrl } of [
+  { name: 'mainnet blank RPC uses Nano.to', network: 'nano:mainnet', answer: '', rpcUrl: 'https://rpc.nano.to' },
+  { name: 'development blank RPC uses loopback', network: 'nano:dev', answer: '', rpcUrl: 'http://localhost:17076' },
+  { name: 'mainnet explicit RPC keeps the custom provider', network: 'nano:mainnet', answer: 'https://nano.example/rpc', rpcUrl: 'https://nano.example/rpc' },
+]) {
+  test(`guided Nano creation ${name} in its review and saved profile`, async t => terminal(async () => {
+    // Given a private recovery wallet and no existing Nano profile.
+    const home = await homeFor(t), before = await snapshot(home);
+    const responses = ['', '', network, answer, '', '', '', '', 'APPROVE'];
+    const script = interaction(responses, async question => {
+      if (question.startsWith('Review Nano wallet setup:')) {
+        assert.deepEqual(await snapshot(home), before, 'The reviewed profile must not exist before consent');
+        assert.ok(question.includes(`Network: ${network}\nRPC: ${rpcUrl}\nWork: ${rpcUrl}\n`));
+      }
+    });
+    // When the user reviews the resolved RPC and approves creation.
+    const result = await setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt });
+    // Then the saved connection matches exactly the provider shown before approval.
+    const config = JSON.parse(await readFile(join(result.directory, 'wallet.json'), 'utf8'));
+    assert.equal(config.network, network);
+    assert.equal(config.rpcUrl, rpcUrl);
+    assert.equal(Object.hasOwn(config, 'workUrl'), false);
+    assert.equal(config.sourceAddress, result.address);
+    assert.equal(responses.length, 0);
+    assert.ok(script.questions.at(-1).includes(`RPC: ${rpcUrl}\n`));
+  }));
+}
+
+test('guided Nano creation reviews and persists a separate work provider', async t => terminal(async () => {
+  // Given a private recovery wallet and a user-selected work endpoint.
+  const home = await homeFor(t), before = await snapshot(home), workUrl = 'https://work.nano.example/generate';
+  const script = interaction(['', '', 'nano:mainnet', '', '', '', '', '', 'APPROVE'], async question => {
+    if (question.startsWith('Review Nano wallet setup:')) {
+      assert.deepEqual(await snapshot(home), before);
+      assert.ok(question.includes(`RPC: https://rpc.nano.to\nWork: ${workUrl}\n`));
+    }
+  }, workUrl);
+  // When the user approves the reviewed RPC and separate work provider.
+  const result = await setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt });
+  // Then the new profile keeps both choices separately.
+  const config = JSON.parse(await readFile(join(result.directory, 'wallet.json'), 'utf8'));
+  assert.equal(config.rpcUrl, 'https://rpc.nano.to');
+  assert.equal(config.workUrl, workUrl);
+}));
+
+test('guided Nano creation rejects invalid work providers without publishing state', async t => terminal(async () => {
+  for (const workUrl of ['not-a-url', 'http://work.nano.example', 'https://user:secret@work.nano.example']) {
+    // Given a private recovery wallet and an invalid work URL.
+    const home = await homeFor(t), before = await snapshot(home);
+    const script = interaction(['', '', 'nano:mainnet', ''], undefined, workUrl);
+    // When setup validates the separate work URL.
+    await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt }), { code: 'SETUP_USAGE' });
+    // Then no profile or other local state has been published.
+    assert.deepEqual(await snapshot(home), before);
+  }
+}));
+
 test('human XNO ceilings use exact 30-place arithmetic and independent transfer consent', async t => terminal(async () => {
   const home = await homeFor(t);
   const script = interaction(['', '', 'nano:dev', '', '2147483647', 'no', 'yes',
@@ -157,14 +215,18 @@ test('invalid precision, ceiling order, and native overflow fail before creating
 }));
 
 test('selected existing Nano profile defaults to reuse and preserves policy, seed and journal byte for byte', async t => terminal(async () => {
-  const home = await homeFor(t), { directory, config } = await existing(home);
+  // Given an existing profile with a separate work provider and a retained native journal.
+  const home = await homeFor(t), workUrl = 'https://work.nano.example/existing', { directory, config } = await existing(home, undefined, workUrl);
   const before = await snapshot(home);
   const script = interaction(['', '', '', '', 'APPROVE'], async () => {
     assert.deepEqual(await snapshot(home), before, 'Reuse preview changed existing state');
   });
+  // When the user accepts reuse without replacing connection settings or policy.
   const result = await setupNanoWalletInteractive({ home, env: { MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: directory },
     origin, audience, prompt: script.prompt });
+  // Then the review retains its work provider and every existing byte remains unchanged.
   assert.match(script.questions[0], /\[reuse\]/);
+  assert.ok(script.questions.at(-1).includes(`Work: ${workUrl}\n`));
   assert.deepEqual(result, { directory, address: config.sourceAddress, index: 7, network: 'nano:dev' });
   assert.deepEqual(await snapshot(home), before);
 }));

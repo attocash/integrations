@@ -196,7 +196,17 @@ atto-marketplace-mcp wallet setup --asset XNO --network nano:dev \
   --rolling-24h-atomic 10000000000000000000000000000000
 ```
 
-Use `nano:mainnet` and your mainnet RPC and Marketplace origin for mainnet. Amounts
+For `nano:mainnet`, new profiles default to `https://rpc.nano.to`; use
+`--rpc-url` or the interactive RPC prompt to select another provider. New
+`nano:dev` profiles default to `http://localhost:17076`. Reusing a profile keeps
+its saved RPC and work URL when those options are omitted. Set `--work-url` or
+answer the optional interactive work URL prompt to use a separate PoW provider.
+Otherwise work uses the selected RPC. Only `work_generate` requests go to the
+work provider; chain queries and broadcasting stay on the RPC. Returned work is
+verified locally, and signing keys stay local. An explicit work provider failure
+does not switch providers automatically. Work requests have a 90-second timeout;
+Nano.to's public service has availability and usage limits. Select your mainnet
+Marketplace origin for mainnet. Amounts
 above are raw atomic units (one XNO is 10^30 raw). Setup shows every permission
 and asks for terminal approval. New profiles deny funding, external transfers and
 controller purposes unless explicitly selected. Add `--allow-external-transfers`

@@ -14,6 +14,7 @@ interface NanoWalletSettings {
     derivationIndex: number;
     network: NanoNetwork;
     rpcUrl: string;
+    workUrl?: string;
     sourceAddress: string;
     handoffDirectory: string;
     origin: string;
@@ -112,7 +113,9 @@ export function defaultDataDirectory(env: NodeJS.ProcessEnv = process.env): stri
     return absolutePath(env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR ?? join(homedir(), 'wallets', 'nano'));
 }
 export function validateConfiguration(value: unknown): NanoWalletConfiguration {
-    const raw = exactKeys(value, ['version', 'keySource', 'derivationIndex', 'network', 'rpcUrl', 'sourceAddress', 'handoffDirectory', 'origin', 'audience', 'grants', 'limits']);
+    const supplied = object(value);
+    const raw = exactKeys(supplied, ['version', 'keySource', 'derivationIndex', 'network', 'rpcUrl', 'sourceAddress', 'handoffDirectory', 'origin', 'audience', 'grants', 'limits',
+        ...(Object.hasOwn(supplied, 'workUrl') ? ['workUrl'] : [])]);
     if (raw.version !== 1 ||
         !Number.isInteger(raw.derivationIndex) ||
         raw.derivationIndex < 0 ||
@@ -139,20 +142,24 @@ export function validateConfiguration(value: unknown): NanoWalletConfiguration {
     const audience = text(raw.audience, 255);
     if (audience.trim() !== audience || /[\r\n\x00-\x1f\x7f]/.test(audience))
         fail('WALLET_CONFIGURATION');
-    let url: URL;
-    try {
-        url = new URL(text(raw.rpcUrl, 2048));
+    for (const endpoint of [raw.rpcUrl, ...(Object.hasOwn(raw, 'workUrl') ? [raw.workUrl] : [])]) {
+        let url: URL;
+        try {
+            const value = text(endpoint, 2048);
+            if (/[\x00-\x20\x7f]/.test(value)) fail('WALLET_CONFIGURATION');
+            url = new URL(value);
+        }
+        catch {
+            return fail('WALLET_CONFIGURATION');
+        }
+        if (url.username ||
+            url.password ||
+            url.hash ||
+            !['https:', 'http:'].includes(url.protocol) ||
+            (url.protocol === 'http:' &&
+            !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
+            fail('WALLET_CONFIGURATION');
     }
-    catch {
-        return fail('WALLET_CONFIGURATION');
-    }
-    if (url.username ||
-        url.password ||
-        url.hash ||
-        !['https:', 'http:'].includes(url.protocol) ||
-        (url.protocol === 'http:' &&
-        !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
-        fail('WALLET_CONFIGURATION');
     exactKeys(raw.grants, ['marketplaceFunding', 'externalTransfers', 'controllerPurposes']);
     if (typeof raw.grants.marketplaceFunding !== 'boolean' ||
         typeof raw.grants.externalTransfers !== 'boolean' ||
@@ -275,7 +282,7 @@ export async function provisionNanoWallet(options:ProvisionNanoWalletOptions):Pr
         address=identity.address;
     }
     const config=validateConfiguration({version:1,keySource,derivationIndex:options.derivationIndex,
-        network:options.network,rpcUrl:options.rpcUrl,sourceAddress:address,handoffDirectory:options.handoffDirectory,
+        network:options.network,rpcUrl:options.rpcUrl,...(options.workUrl===undefined?{}:{workUrl:options.workUrl}),sourceAddress:address,handoffDirectory:options.handoffDirectory,
         origin:options.origin,audience:options.audience,
         grants:{marketplaceFunding:options.grants?.marketplaceFunding??false,externalTransfers:options.grants?.externalTransfers??false,controllerPurposes:options.grants?.controllerPurposes??[]},
         limits:options.limits??{maxPaymentAtomic:'0',rolling24hAtomic:'0'}});

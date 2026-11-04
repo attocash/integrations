@@ -3,7 +3,7 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import { addressFromPublicKey, hexBytes, NanoStateBlock, publicKey, sign, upperHex, validWork, ZERO_HASH } from '../dist/protocol.js';
-import { DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, epochLink, MAIN_GENESIS_HASH, NanoRpcClient,
+import { DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, epochLink, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, NanoRpcClient,
   parseJsonObject, requireConfirmedFrontier } from '../dist/rpc.js';
 
 const SOURCE_KEY = new Uint8Array(32).fill(1);
@@ -12,6 +12,14 @@ const DEV_KEY = hexBytes('34F0A37AAD20F4A260F0A5B3CB3D7FB50673212263E58A380BC104
 const ROOT = 'D1E6C3C6B7DF4485B9324AB4DE023B71B5E0CA9AC20616A6F6E80D15AD4CFAC6';
 const BLOCK = NanoStateBlock.signed(SOURCE_KEY, ROOT, SOURCE, 100n, 'A'.repeat(64), '0'.repeat(16));
 const rpcError = { code: 'RPC_UNAVAILABLE' };
+const MAIN_GENESIS_OPEN = {
+  type: 'open',
+  source: 'E89208DD038FBB269987689621D52292AE9C35941A7484756ECCED92A65093BA',
+  representative: MAIN_GENESIS_ACCOUNT,
+  account: MAIN_GENESIS_ACCOUNT,
+  work: '62f05417dd3fb691',
+  signature: '9F0C933C8ADE004D808EA1985FA746A7E95BA2A38F867640F53EC8F180BDFE9E2C1268DEAD7C2664F356E37ABA362BC58E46DBA03E523A7B5A19E4B6EB12BB02',
+};
 
 async function serverFixture(t, reply) {
   const requests = [];
@@ -29,7 +37,8 @@ async function serverFixture(t, reply) {
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => { server.closeAllConnections(); return new Promise(resolve => server.close(resolve)); });
-  return { client: new NanoRpcClient(`http://127.0.0.1:${server.address().port}`, 'nano:dev'), requests };
+  const url = `http://127.0.0.1:${server.address().port}`;
+  return { client: new NanoRpcClient(url, 'nano:dev'), url, requests };
 }
 
 function snapshot(overrides = {}) {
@@ -72,6 +81,94 @@ test('network pin requires both exact Nano network name and genesis identifier',
   await assert.rejects(client.requirePinnedNetwork(), rpcError);
   version = { network: 'dev', network_identifier: MAIN_GENESIS_HASH };
   await assert.rejects(client.requirePinnedNetwork(), rpcError);
+});
+
+test('mainnet version without an identifier is anchored to the signed native genesis on the chain RPC', async t => {
+  // Given a public mainnet RPC declares live but omits network_identifier.
+  let contents = MAIN_GENESIS_OPEN, confirmed = 'true';
+  const rpc = await serverFixture(t, body => body.action === 'version'
+    ? { network: 'live', node_vendor: 'Nano V28.2' }
+    : { confirmed, block_account: MAIN_GENESIS_ACCOUNT, height: '1', contents });
+  const work = await serverFixture(t, () => assert.fail('Genesis evidence must never be requested from the work provider'));
+  const client = new NanoRpcClient(rpc.url, 'nano:mainnet', work.url);
+  // When native genesis contents arrive as either an object or a strict JSON string.
+  await client.requirePinnedNetwork();
+  contents = JSON.stringify(MAIN_GENESIS_OPEN);
+  confirmed = true;
+  await client.requirePinnedNetwork();
+  // Then the exact native genesis hash is independently recomputed and its signature verified through chain RPC only.
+  assert.deepEqual(rpc.requests, [
+    { action: 'version' }, { action: 'block_info', hash: MAIN_GENESIS_HASH, json_block: 'true' },
+    { action: 'version' }, { action: 'block_info', hash: MAIN_GENESIS_HASH, json_block: 'true' },
+  ]);
+  assert.deepEqual(work.requests, []);
+});
+
+test('mainnet genesis fallback rejects altered confirmation, metadata, native identity, signature and malformed contents', async t => {
+  // Given only a missing version identifier permits the native-genesis fallback.
+  const valid = { confirmed: 'true', block_account: MAIN_GENESIS_ACCOUNT, height: '1', contents: MAIN_GENESIS_OPEN };
+  let anchor = valid;
+  const rpc = await serverFixture(t, body => body.action === 'version' ? { network: 'live' } : anchor);
+  const client = new NanoRpcClient(rpc.url, 'nano:mainnet');
+  // When the endpoint supplies tampered metadata or bytes despite claiming the expected hash.
+  const cases = [
+    { ...valid, confirmed: false }, { ...valid, confirmed: 'TRUE' }, { ...valid, confirmed: undefined },
+    { ...valid, block_account: SOURCE }, { ...valid, height: '2' }, { ...valid, height: 1 }, { ...valid, height: '01' },
+    ...[{ type: 'state' }, { source: ROOT }, { representative: SOURCE }, { account: SOURCE },
+      { signature: '0'.repeat(128) }, { signature: MAIN_GENESIS_OPEN.signature.slice(2) }].map(fields =>
+      ({ ...valid, hash: MAIN_GENESIS_HASH, contents: { ...MAIN_GENESIS_OPEN, ...fields } })),
+    { ...valid, contents: '{"type":"open","type":"open"}' },
+    { ...valid, contents: JSON.stringify(MAIN_GENESIS_OPEN) + ' {}' },
+    { ...valid, contents: [] }, { ...valid, contents: null },
+    { error: 'Block not found' },
+  ];
+  for (const value of cases) {
+    anchor = value;
+    await assert.rejects(client.requirePinnedNetwork(), rpcError);
+  }
+  // Then every attempted fallback used the exact mainnet genesis query and every altered response failed closed.
+  assert.equal(rpc.requests.length, cases.length * 2);
+  assert.equal(rpc.requests.filter(request => request.action === 'block_info')
+    .every(request => request.hash === MAIN_GENESIS_HASH && request.json_block === 'true'), true);
+});
+
+test('present invalid identifiers, wrong network declarations and missing dev identifiers never trigger a genesis fallback', async t => {
+  // Given a provider that could otherwise return a valid native genesis block.
+  let version;
+  const rpc = await serverFixture(t, body => body.action === 'version' ? version : assert.fail('Unexpected fallback'));
+  const mainnet = new NanoRpcClient(rpc.url, 'nano:mainnet'), dev = new NanoRpcClient(rpc.url, 'nano:dev');
+  // When an identifier is present but wrong, empty, null, malformed or of the wrong type.
+  for (const network_identifier of [DEV_GENESIS_HASH, '', null, false, 123, 'invalid']) {
+    version = { network: 'live', network_identifier };
+    await assert.rejects(mainnet.requirePinnedNetwork(), rpcError);
+  }
+  version = { network: 'dev' };
+  await assert.rejects(mainnet.requirePinnedNetwork(), rpcError);
+  await assert.rejects(dev.requirePinnedNetwork(), rpcError);
+  version = { network: 'live', network_identifier: MAIN_GENESIS_HASH };
+  await assert.rejects(dev.requirePinnedNetwork(), rpcError);
+  // Then a valid present mainnet identifier succeeds directly and no case queried genesis.
+  await mainnet.requirePinnedNetwork();
+  assert.equal(rpc.requests.length, 10);
+  assert.equal(rpc.requests.every(request => request.action === 'version'), true);
+});
+
+test('version transport and remote errors never trigger a mainnet genesis fallback', async t => {
+  // Given version fails before any network declaration can be trusted.
+  let status = 200, reply = { error: 'Version unavailable' };
+  const rpc = await serverFixture(t, (_body, response) => {
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(reply));
+  });
+  const client = new NanoRpcClient(rpc.url, 'nano:mainnet');
+  // When version returns a remote error, malformed response or HTTP error.
+  await assert.rejects(client.requirePinnedNetwork(), rpcError);
+  reply = [];
+  await assert.rejects(client.requirePinnedNetwork(), rpcError);
+  status = 503;
+  await assert.rejects(client.requirePinnedNetwork(), rpcError);
+  // Then each failure stops after version without trying an anchor read.
+  assert.deepEqual(rpc.requests, [{ action: 'version' }, { action: 'version' }, { action: 'version' }]);
 });
 
 test('confirmed account RPC preserves bigint amounts and confirms frontier, balance and representative', async t => {
@@ -135,8 +232,10 @@ test('block-not-found accepts only the exact absence error; malformed confirmati
 });
 
 test('work generation sends only the public root and exact epoch threshold and checks returned work', async t => {
+  // Given work has no separate endpoint and uses the configured RPC by default.
   let work = '8e8206e47e15b74b';
   const { client, requests } = await serverFixture(t, () => ({ work }));
+  // When SEND and receive work are requested and a provider returns insufficient work.
   assert.equal(await client.generateWork(ROOT, 2), '8E8206E47E15B74B');
   assert.deepEqual(requests[0], { action: 'work_generate', hash: ROOT, difficulty: 'FFC0000000000000' });
   work = 'be46b2e52b34f535';
@@ -146,6 +245,121 @@ test('work generation sends only the public root and exact epoch threshold and c
   assert.equal(requests.at(-1).difficulty, 'F000000000000000');
   await client.generateOpenWork(ROOT);
   assert.equal(requests.at(-1).difficulty, 'FE00000000000000');
+  // Then every work request reached that same RPC endpoint.
+  assert.equal(client.workUrl.href, client.rpcUrl.href);
+  assert.equal(requests.length, 4);
+  assert.equal(requests.every(request => request.action === 'work_generate'), true);
+});
+
+test('a separate work endpoint receives only public send and receive roots while chain and publish actions stay on RPC', async t => {
+  // Given independent RPC and work providers with observable HTTP requests.
+  const rpc = await serverFixture(t, body => {
+    switch (body.action) {
+      case 'version': return { network: 'dev', network_identifier: DEV_GENESIS_HASH };
+      case 'account_info': return snapshot();
+      case 'block_info': return evidence();
+      case 'blocks_info': return { blocks: { [BLOCK.hash]: { ...evidence(), pending: '1' } } };
+      case 'receivable': return { blocks: { [BLOCK.hash]: { amount: '10', source: SOURCE } } };
+      case 'process': return { hash: BLOCK.hash };
+      default: assert.fail(`Unexpected RPC action: ${body.action}`);
+    }
+  });
+  const work = await serverFixture(t, body => {
+    assert.equal(body.action, 'work_generate');
+    return { work: '8e8206e47e15b74b' };
+  });
+  const client = new NanoRpcClient(new URL(rpc.url), 'nano:dev', new URL(work.url));
+  // When SEND, receive and open work are requested alongside chain checks and publication.
+  await client.requirePinnedNetwork();
+  await client.confirmedAccount(SOURCE);
+  await client.blockInfo(BLOCK.hash);
+  await client.receivableExists(BLOCK.hash);
+  await client.receivable(SOURCE);
+  assert.equal(await client.generateWork(ROOT, 2), '8E8206E47E15B74B');
+  assert.equal(await client.generateWork(ROOT, 2, true), '8E8206E47E15B74B');
+  assert.equal(await client.generateOpenWork(ROOT), '8E8206E47E15B74B');
+  await client.process(BLOCK, 'send');
+  await client.process(BLOCK, 'receive');
+  // Then the work provider sees no account, block, signature, publication or version request.
+  assert.deepEqual(work.requests, [
+    { action: 'work_generate', hash: ROOT, difficulty: 'FFC0000000000000' },
+    { action: 'work_generate', hash: ROOT, difficulty: 'F000000000000000' },
+    { action: 'work_generate', hash: ROOT, difficulty: 'FE00000000000000' },
+  ]);
+  assert.deepEqual(rpc.requests.map(request => request.action),
+    ['version', 'account_info', 'block_info', 'blocks_info', 'receivable', 'process', 'process']);
+});
+
+test('invalid work and remote errors from an explicit provider reject without retrying the chain RPC', async t => {
+  // Given a working chain RPC and an explicitly selected but untrusted work provider.
+  const rpc = await serverFixture(t, () => ({ network: 'dev', network_identifier: DEV_GENESIS_HASH }));
+  let reply;
+  const work = await serverFixture(t, () => reply);
+  const client = new NanoRpcClient(rpc.url, 'nano:dev', work.url);
+  // When the provider returns insufficient or malformed proof, malformed JSON, or a remote error.
+  for (const response of [{ work: 'be46b2e52b34f535' }, { work: 'not-work' }, { work: 123 },
+    { error: 'Work generation is disabled' }, '{"work":"8e8206e47e15b74b","work":"8e8206e47e15b74b"}']) {
+    reply = response;
+    await assert.rejects(client.generateWork(ROOT, 2), rpcError);
+  }
+  reply = { work: 'not-work' };
+  await assert.rejects(client.generateOpenWork(ROOT), rpcError);
+  // Then all failures remain at the work endpoint with no fallback; chain verification still works.
+  assert.equal(work.requests.length, 6);
+  assert.equal(rpc.requests.length, 0);
+  await client.requirePinnedNetwork();
+  assert.deepEqual(rpc.requests, [{ action: 'version' }]);
+});
+
+test('an explicit work provider cannot redirect requests or fail over after an HTTP error', async t => {
+  // Given the work provider points a redirect at the separate chain RPC.
+  const rpc = await serverFixture(t, () => ({ work: '8e8206e47e15b74b' }));
+  let status = 307;
+  const work = await serverFixture(t, (_body, response) => {
+    response.writeHead(status, { Location: rpc.url });
+    response.end('{}');
+  });
+  const client = new NanoRpcClient(rpc.url, 'nano:dev', work.url);
+  // When the provider redirects or returns an HTTP error.
+  await assert.rejects(client.generateWork(ROOT, 2), rpcError);
+  status = 503;
+  await assert.rejects(client.generateOpenWork(ROOT), rpcError);
+  // Then no redirect or fallback reaches the chain RPC.
+  assert.equal(work.requests.length, 2);
+  assert.equal(rpc.requests.length, 0);
+});
+
+test('an explicit work provider timeout rejects without fallback and retains the work and chain timeout budgets', async t => {
+  // Given a work provider that accepts a request but never returns a response.
+  const rpc = await serverFixture(t, () => ({ network: 'dev', network_identifier: DEV_GENESIS_HASH }));
+  const work = await serverFixture(t, () => undefined);
+  const client = new NanoRpcClient(rpc.url, 'nano:dev', work.url);
+  const timeout = AbortSignal.timeout.bind(AbortSignal), budgets = [];
+  t.mock.method(AbortSignal, 'timeout', milliseconds => {
+    budgets.push(milliseconds);
+    return timeout(milliseconds === 90_000 ? 250 : milliseconds);
+  });
+  // When the real HTTP work request reaches its shortened test deadline.
+  await assert.rejects(client.generateWork(ROOT, 2), rpcError);
+  // Then the production budget remains 90 seconds, with no retry on the working chain RPC.
+  assert.equal(work.requests.length, 1);
+  assert.equal(rpc.requests.length, 0);
+  await client.requirePinnedNetwork();
+  assert.deepEqual(budgets, [90_000, 15_000]);
+  assert.deepEqual(rpc.requests, [{ action: 'version' }]);
+});
+
+test('separate work endpoint validation rejects credentials, fragments and non-HTTP schemes', () => {
+  // Given a valid chain endpoint, the work endpoint must satisfy the same URL constraints.
+  for (const url of ['https://user:password@work.example', 'https://work.example/#fragment',
+    'file:///tmp/work', 'ftp://work.example']) {
+    // When an invalid work endpoint is supplied, construction fails before any request.
+    assert.throws(() => new NanoRpcClient('https://rpc.example', 'nano:mainnet', url), rpcError);
+  }
+  // Then accepted work URLs retain their path and query without changing the RPC URL.
+  const client = new NanoRpcClient('https://rpc.example/rpc', 'nano:mainnet', 'https://work.example/work?key=test');
+  assert.equal(client.workUrl.href, 'https://work.example/work?key=test');
+  assert.equal(client.rpcUrl.href, 'https://rpc.example/rpc');
 });
 
 test('process publishes only a valid locally signed block and requires the exact returned hash', async t => {

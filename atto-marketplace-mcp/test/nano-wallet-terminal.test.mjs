@@ -28,6 +28,86 @@ function binding(fields) {
   for(const field of fields){const bytes=Buffer.from(field),size=Buffer.alloc(4);size.writeUInt32BE(bytes.length);hash.update(size);hash.update(bytes);}
   return hash.digest('hex');
 }
+
+for (const { name, network, rpcOption, rpcUrl, workUrl } of [
+  { name: 'mainnet omitted RPC uses Nano.to', network: 'nano:mainnet', rpcOption: [], rpcUrl: 'https://rpc.nano.to' },
+  { name: 'development omitted RPC uses loopback', network: 'nano:dev', rpcOption: [], rpcUrl: 'http://localhost:17076' },
+  { name: 'mainnet explicit RPC keeps the custom provider', network: 'nano:mainnet', rpcOption: ['--rpc-url', 'https://nano.example/rpc'], rpcUrl: 'https://nano.example/rpc' },
+  { name: 'mainnet separate work URL keeps the RPC default', network: 'nano:mainnet', rpcOption: [], rpcUrl: 'https://rpc.nano.to', workUrl: 'https://work.nano.example/generate' },
+]) {
+  test(`Nano terminal setup ${name} in its preview and saved profile`, {skip:process.platform==='win32'}, async t=>{
+    // Given an offline private seed import and no existing Nano profile.
+    const home=await mkdtemp(join(tmpdir(),'marketplace-nano-rpc-default-'));
+    t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);
+    const seedFile=join(home,'import.hex'),seed='42'.repeat(32)+'\n';
+    await writeFile(seedFile,seed,{mode:0o600});
+    const expected=await inspectNanoSeed(seedFile,1);
+    const args=['setup','--asset','XNO','--network',network,...rpcOption,...(workUrl?['--work-url',workUrl]:[]),
+      '--origin','http://localhost:8080','--audience','terminal-rpc-test','--seed-file',seedFile];
+    // When the user approves setup through the real terminal without contacting the RPC.
+    const result=await terminal(args,{MARKETPLACE_MCP_HOME:home});
+    // Then the reviewed provider and imported identity are persisted without exposing the seed.
+    assert.equal(result.exitCode,0);assert.equal(result.promptAnswered,true);
+    const rpcOffset=result.transcript.indexOf(`RPC: ${rpcUrl}\n`);
+    assert.ok(rpcOffset>=0);assert.ok(rpcOffset<result.transcript.indexOf('Type APPROVE to confirm: '));
+    const workOffset=result.transcript.indexOf(`Work: ${workUrl??rpcUrl}\n`);
+    assert.ok(workOffset>=0);assert.ok(workOffset<result.transcript.indexOf('Type APPROVE to confirm: '));
+    const config=JSON.parse(await readFile(join(home,'wallets','nano','wallet.json'),'utf8'));
+    assert.equal(config.network,network);assert.equal(config.rpcUrl,rpcUrl);
+    assert.equal(config.workUrl,workUrl);assert.equal(Object.hasOwn(config,'workUrl'),workUrl!==undefined);
+    assert.equal(config.sourceAddress,expected.address);assert.equal(config.keySource.seedFile,seedFile);
+    assert.equal(await readFile(seedFile,'utf8'),seed);assert.equal(result.transcript.includes(seed.trim()),false);
+  });
+}
+
+for (const network of ['nano:mainnet','nano:dev']) {
+  test(`Nano terminal setup without RPC or work URL reuses the existing custom ${network} providers and journal`, {skip:process.platform==='win32'}, async t=>{
+    // Given an existing profile pinned to custom RPC and work providers and its retained native journal.
+    const home=await mkdtemp(join(tmpdir(),'marketplace-nano-rpc-reuse-'));
+    t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);
+    const directory=join(home,'wallets','nano'),seedFile=join(home,'import.hex'),seed='42'.repeat(32)+'\n';
+    await writeFile(seedFile,seed,{mode:0o600});
+    const rpcUrl='https://nano.example/custom-rpc',workUrl='https://work.nano.example/existing',origin='http://localhost:8080',audience='terminal-rpc-reuse';
+    await provisionNanoWallet({seedFile,dataDir:directory,derivationIndex:7,network,rpcUrl,workUrl,origin,audience,
+      handoffDirectory:join(home,'payment-handoffs'),terminalConfirmed:true});
+    const configPath=join(directory,'wallet.json'),before=await readFile(configPath);
+    const journalPath=join(directory,'nano-wallet.sqlite3'),journal='retained original native journal bytes';
+    await writeFile(journalPath,journal,{mode:0o600});
+    // When setup is approved again with the RPC and work URL options omitted.
+    const result=await terminal(['setup','--asset','XNO','--network',network,'--origin',origin,'--audience',audience],
+      {MARKETPLACE_MCP_HOME:home});
+    // Then consent shows the existing provider and preserves the exact profile, identity, seed and journal.
+    assert.equal(result.exitCode,0);assert.equal(result.promptAnswered,true);
+    const rpcOffset=result.transcript.indexOf(`RPC: ${rpcUrl}\n`);
+    assert.ok(rpcOffset>=0);assert.ok(rpcOffset<result.transcript.indexOf('Type APPROVE to confirm: '));
+    const workOffset=result.transcript.indexOf(`Work: ${workUrl}\n`);
+    assert.ok(workOffset>=0);assert.ok(workOffset<result.transcript.indexOf('Type APPROVE to confirm: '));
+    assert.deepEqual(await readFile(configPath),before);
+    assert.equal(await readFile(journalPath,'utf8'),journal);
+    assert.equal(await readFile(seedFile,'utf8'),seed);
+    assert.equal(result.transcript.includes(seed.trim()),false);
+  });
+}
+
+test('Nano terminal setup rejects invalid work URLs without publishing a profile', {skip:process.platform==='win32'}, async t=>{
+  for(const workUrl of ['not-a-url','http://work.nano.example','https://user:secret@work.nano.example']) {
+    // Given an offline private seed import with an invalid work endpoint.
+    const home=await mkdtemp(join(tmpdir(),'marketplace-nano-invalid-work-'));
+    t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);
+    const seedFile=join(home,'import.hex'),seed='42'.repeat(32)+'\n';
+    await writeFile(seedFile,seed,{mode:0o600});
+    // When the user runs setup with that explicit work URL.
+    const result=await terminal(['setup','--asset','XNO','--network','nano:mainnet','--work-url',workUrl,
+      '--origin','http://localhost:8080','--audience','invalid-work-test','--seed-file',seedFile],{MARKETPLACE_MCP_HOME:home});
+    // Then setup fails without a new profile, handoffs, or altered seed.
+    assert.notEqual(result.exitCode,0);
+    await assert.rejects(stat(join(home,'wallets','nano','wallet.json')),{code:'ENOENT'});
+    await assert.rejects(stat(join(home,'payment-handoffs')),{code:'ENOENT'});
+    assert.equal(await readFile(seedFile,'utf8'),seed);
+    assert.equal(result.transcript.includes(seed.trim()),false);
+  }
+});
+
 test('Nano seed import, separate transfer policy and profile-pinned Shop proof approval use the real terminal', {skip:process.platform==='win32'},async t=>{
   const home=await mkdtemp(join(tmpdir(),'marketplace-nano-terminal-'));
   t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);

@@ -51,7 +51,8 @@ seed file) and the entire journal together; restoring an old journal can lose kn
 already issued. Fence writes and reconcile against the native chain before
 resuming after a restore. Never use the same source key with independent journals.
 
-The single current `wallet.json` schema has `version: 1` and an explicit
+The single current `wallet.json` schema has `version: 1`, a chain `rpcUrl`, an
+optional separate `workUrl`, and an explicit
 `keySource`: `shared-recovery` pins its original recovery source and SLIP-0010
 version; `native-seed` references an explicitly imported existing seed file and
 its native Blake2b derivation. Old flat configuration shapes are rejected.
@@ -63,9 +64,19 @@ The exported adapter API is for trusted local code. No raw signing operation is
 exposed through public MCP tools. See the Marketplace MCP README for configuration,
 exact request-id retry rules and explicit Atto wallet-profile reuse.
 
-The configured Nano RPC must expose pinned `version` evidence, `account_info`,
-`block_info`, `blocks_info` with its `pending` option, `receivable`, `work_generate`
-and `process`. Exact receipt checks use one-hash `blocks_info` pending evidence,
+The configured chain RPC must expose pinned `version` evidence, `account_info`,
+`block_info`, `blocks_info` with its `pending` option, `receivable` and `process`.
+`work_generate` uses `workUrl` when supplied, otherwise `rpcUrl`. Only the work
+root and required difficulty are sent to that endpoint. The adapter validates
+returned work locally; signing keys remain local. Work calls have a 90-second
+timeout and an explicit provider failure does not fall back to another endpoint.
+A mainnet gateway that omits `version.network_identifier` must return the
+canonical genesis OPEN block: its native hash and signature are verified locally.
+A present incorrect identifier still rejects the gateway. Both URLs require
+HTTPS or loopback HTTP, without embedded credentials or a fragment. Omitting `workUrl` preserves the single-endpoint behavior and existing
+profiles are not rewritten by setup defaults.
+
+Exact receipt checks use one-hash `blocks_info` pending evidence,
 plus independently verified confirmed SEND and predecessor balances; a truncated
 account receivables list cannot establish absence. Missing pending evidence fails
 closed. Receipt listing remains separately bounded to 1–100 results.

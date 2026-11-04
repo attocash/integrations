@@ -88,7 +88,7 @@ export class NanoWallet {
     private constructor(options: NanoWalletOpenOptions) {
         this.dataDir = options.dataDir ?? defaultDataDirectory();
         this.configuration = loadConfiguration(this.dataDir);
-        this.rpc = options.rpc ?? new NanoRpcClient(this.configuration.rpcUrl, this.configuration.network);
+        this.rpc = options.rpc ?? new NanoRpcClient(this.configuration.rpcUrl, this.configuration.network, this.configuration.workUrl);
         this.now = options.now ?? Date.now;
         this.journal = new NanoJournal(this.dataDir);
     }

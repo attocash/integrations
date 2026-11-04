@@ -1,5 +1,5 @@
 import {
-  addressPublicKey, canonicalAddress, canonicalHash, hexBytes, NanoStateBlock,
+  addressPublicKey, blake2bHash, canonicalAddress, canonicalHash, hexBytes, NanoStateBlock,
   rawAmount, requiredDifficulty, strictReceiveDifficulty, upperHex, validWork,
   verify, ZERO_HASH, type NanoNetwork,
 } from './protocol.js';
@@ -137,20 +137,51 @@ export function epochLink(epoch: number): string {
 
 export class NanoRpcClient {
   readonly rpcUrl: URL;
+  readonly workUrl: URL;
 
-  constructor(url: string | URL, readonly network: NanoNetwork) {
+  constructor(url: string | URL, readonly network: NanoNetwork, workUrl?: string | URL) {
     this.rpcUrl = new URL(url);
-    if (!['http:', 'https:'].includes(this.rpcUrl.protocol) || this.rpcUrl.username || this.rpcUrl.password ||
-        this.rpcUrl.hash || !['nano:dev', 'nano:mainnet'].includes(network)) throw new NanoRpcError();
+    this.workUrl = new URL(workUrl ?? this.rpcUrl);
+    if (!['nano:dev', 'nano:mainnet'].includes(network)) throw new NanoRpcError();
+    for (const endpoint of [this.rpcUrl, this.workUrl]) {
+      if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password ||
+          endpoint.hash) throw new NanoRpcError();
+    }
   }
 
   async requirePinnedNetwork(): Promise<void> {
     const response = await this.call('version');
     const name = this.network === 'nano:dev' ? 'dev' : 'live';
     const genesis = this.network === 'nano:dev' ? DEV_GENESIS_HASH : MAIN_GENESIS_HASH;
-    if (response.network !== name || canonicalHash(textField(response, 'network_identifier')) !== genesis) {
-      throw new NanoRpcError();
+    if (response.network !== name) throw new NanoRpcError();
+    if (Object.hasOwn(response, 'network_identifier')) {
+      try {
+        if (canonicalHash(textField(response, 'network_identifier')) !== genesis) throw new NanoRpcError();
+      } catch { throw new NanoRpcError(); }
+      return;
     }
+    if (this.network !== 'nano:mainnet') throw new NanoRpcError();
+    await this.requireMainnetGenesis();
+  }
+
+  private async requireMainnetGenesis(): Promise<void> {
+    // Some public mainnet RPCs omit version.network_identifier. Anchor that
+    // declaration to the signed native OPEN block, independently of state blocks.
+    const response = await this.call('block_info', { hash: MAIN_GENESIS_HASH, json_block: 'true' });
+    try {
+      if (!(response.confirmed === true || response.confirmed === 'true') ||
+          response.block_account !== MAIN_GENESIS_ACCOUNT || response.height !== '1') throw new NanoRpcError();
+      const block = typeof response.contents === 'string' ? parseJsonObject(response.contents) : objectValue(response.contents);
+      const source = canonicalHash(textField(block, 'source'));
+      const representative = canonicalAddress(textField(block, 'representative'));
+      const account = canonicalAddress(textField(block, 'account'));
+      const genesisKey = addressPublicKey(MAIN_GENESIS_ACCOUNT);
+      if (block.type !== 'open' || account !== MAIN_GENESIS_ACCOUNT || representative !== MAIN_GENESIS_ACCOUNT ||
+          source !== upperHex(genesisKey)) throw new NanoRpcError();
+      const hash = blake2bHash(32, hexBytes(source, 32), addressPublicKey(representative), addressPublicKey(account));
+      if (upperHex(hash) !== MAIN_GENESIS_HASH ||
+          !verify(genesisKey, hash, hexBytes(textField(block, 'signature'), 64))) throw new NanoRpcError();
+    } catch { throw new NanoRpcError(); }
   }
 
   async accountSnapshot(address: string): Promise<NanoAccountSnapshot> {
@@ -336,7 +367,7 @@ export class NanoRpcClient {
   private async response(action: string, fields: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
     if (!['version', 'account_info', 'block_info', 'work_generate', 'process', 'receivable', 'blocks_info'].includes(action)) throw new NanoRpcError();
     try {
-      const response = await fetch(this.rpcUrl, { method: 'POST', redirect: 'error',
+      const response = await fetch(action === 'work_generate' ? this.workUrl : this.rpcUrl, { method: 'POST', redirect: 'error',
         signal: AbortSignal.timeout(action === 'work_generate' ? 90_000 : 15_000),
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...fields }) });
       if (response.status !== 200 || response.body === null) {

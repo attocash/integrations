@@ -32,6 +32,10 @@ export interface NanoInteractiveSetupResult {
 type Policy = Pick<NanoWalletConfiguration, 'grants' | 'limits'>;
 type SetupMode = 'create' | 'reuse' | 'import';
 
+export function defaultNanoRpcUrl(network: NanoNetwork): string {
+  return network === 'nano:mainnet' ? 'https://rpc.nano.to' : 'http://localhost:17076';
+}
+
 /** Terminal-only setup; every prompt and public review precedes wallet mutation. */
 export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOptions): Promise<NanoInteractiveSetupResult> {
   requireTerminal();
@@ -43,7 +47,9 @@ export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOp
 
   requireEmptyTarget(directory);
   const network = await choice(options, 'Nano network (nano:mainnet/nano:dev)', ['nano:mainnet', 'nano:dev'], 'nano:mainnet');
-  const rpcUrl = rpc(await answer(options, 'Nano RPC URL', network === 'nano:dev' ? 'http://localhost:17076' : undefined));
+  const rpcUrl = validateNanoRpcUrl(await answer(options, 'Nano RPC URL', defaultNanoRpcUrl(network)));
+  const selectedWorkUrl = await answer(options, 'Nano work URL (optional; Enter uses the Nano RPC)', '');
+  const workUrl = selectedWorkUrl ? validateNanoRpcUrl(selectedWorkUrl) : undefined;
   const origin = marketplaceOrigin(options.origin ?? await answer(options, 'Marketplace origin (for example https://marketplace.example)'));
   const audience = audienceText(options.audience ?? await answer(options, 'Exact Marketplace Agent API audience'));
   const index = derivationIndex(await answer(options, 'Nano derivation index', mode === 'create' ? '0' : '1'));
@@ -67,7 +73,7 @@ export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOp
   const seedDescription = seedFile
     ? `Existing private seed file: ${seedFile}`
     : `Recovery phrase: OS password store for ${recoveryWalletDirectory}; Nano derivation m/44'/165'/${index}'. No separate seed file.`;
-  await approve(options, review({ mode, directory, address: importedAddress ?? recovery?.address, network, rpcUrl, origin, audience,
+  await approve(options, review({ mode, directory, address: importedAddress ?? recovery?.address, network, rpcUrl, workUrl, origin, audience,
     index, handoffDirectory, policy, seedDescription }));
 
   // Recheck after consent: imported seed disappearance must never create a new identity.
@@ -83,7 +89,7 @@ export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOp
     if (recovery && JSON.stringify(current) !== JSON.stringify(recovery)) throw failure('WALLET_KEY_MISMATCH', 'The recovery wallet changed during review.');
     expectedAddress = current.address;
   }
-  const result = await provisionNanoWallet({ dataDir: directory, derivationIndex: index, network, rpcUrl, origin, audience,
+  const result = await provisionNanoWallet({ dataDir: directory, derivationIndex: index, network, rpcUrl, ...(workUrl ? { workUrl } : {}), origin, audience,
     handoffDirectory, ...(seedFile ? { seedFile, expectedAddress: importedAddress! } : {}),
     ...(recoveryWalletDirectory ? { recoveryWalletDirectory, expectedAddress: expectedAddress! } : {}), ...policy, terminalConfirmed: true });
   if (recoveryWalletDirectory) await saveWalletSelection(home, { attoDirectory: selectedAttoDirectory ?? recoveryWalletDirectory });
@@ -114,7 +120,7 @@ async function reuseWallet(options: NanoInteractiveSetupOptions, directory: stri
     policy.grants.controllerPurposes.push('login');
   }
   await approve(options, review({ mode: 'reuse', directory, address: config.sourceAddress, network: config.network,
-    rpcUrl: config.rpcUrl, origin: config.origin, audience: config.audience, index: config.derivationIndex,
+    rpcUrl: config.rpcUrl, workUrl: config.workUrl, origin: config.origin, audience: config.audience, index: config.derivationIndex,
     handoffDirectory: config.handoffDirectory, policy, seedDescription: config.keySource.type === 'shared-recovery' ? `Recovery phrase: OS password store for ${config.keySource.recoverySource.directory}; ${config.keySource.derivationVersion}` : `Existing private seed file: ${config.keySource.seedFile}` }));
 
   const current = await inspectNanoWallet(directory);
@@ -140,7 +146,7 @@ async function policyQuestions(options: NanoInteractiveSetupOptions, current?: P
 }
 
 function review(input: {
-  mode: SetupMode; directory: string; address: string | undefined; network: NanoNetwork; rpcUrl: string;
+  mode: SetupMode; directory: string; address: string | undefined; network: NanoNetwork; rpcUrl: string; workUrl: string | undefined;
   origin: string; audience: string; index: number; handoffDirectory: string; policy: Policy; seedDescription: string;
 }): string {
   return [
@@ -151,6 +157,7 @@ function review(input: {
     `Derivation index: ${input.index}`,
     `Network: ${input.network}`,
     `RPC: ${input.rpcUrl}`,
+    `Work: ${input.workUrl ?? input.rpcUrl}`,
     `Marketplace origin: ${input.origin}`,
     `Audience: ${input.audience}`,
     `Payment handoff directory: ${input.handoffDirectory}`,
@@ -171,7 +178,7 @@ async function approve(options: NanoInteractiveSetupOptions, preview: string): P
 }
 
 async function answer(options: NanoInteractiveSetupOptions, question: string, fallback?: string): Promise<string> {
-  const value = (await options.prompt(`${question}${fallback === undefined ? '' : ` [${fallback}]`}: `)).trim();
+  const value = (await options.prompt(`${question}${fallback ? ` [${fallback}]` : ''}: `)).trim();
   if (/\x00|\r|\n/.test(value) || value.length > 4096) throw failure('SETUP_USAGE', 'Use one bounded line for each setup answer.');
   if (!value && fallback === undefined) throw failure('SETUP_USAGE', 'A required Nano setup answer was empty.');
   return value || fallback!;
@@ -215,7 +222,7 @@ function marketplaceOrigin(value: string): string {
   return value;
 }
 
-function rpc(value: string): string {
+export function validateNanoRpcUrl(value: string): string {
   webUrl(value, false);
   return value;
 }
