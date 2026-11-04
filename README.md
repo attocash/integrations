@@ -9,6 +9,10 @@ Send payments by a name you recognize, follow your wallet activity, and give
 an MCP client access with spending limits you choose. Both packages are
 available as an initial beta.
 
+This workspace also contains a separate Marketplace MCP for Marketplace account
+workflows. It is built and smoke-tested here, but the current npm release still
+publishes only the CLI and wallet MCP packages.
+
 [Get started](#get-started) · [What you can do](#what-you-can-do) ·
 [CLI guide](atto-cli/README.md) · [MCP guide](atto-mcp/README.md)
 
@@ -124,6 +128,7 @@ MCP tools; other programs running as your OS user retain their normal access.
 | --- | --- | --- |
 | [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | `atto` | [Wallet setup, payments, labels, and recovery](atto-cli/README.md) |
 | [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | `atto-mcp` | [Client setup, prompts, and all 40 public tools](atto-mcp/README.md) |
+| Marketplace MCP workspace | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
 
 Use `atto --help` or `atto-mcp --help` to explore commands. For updates, rerun
 the npm installation command; npx with `@latest` selects the current published

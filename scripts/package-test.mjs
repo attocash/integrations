@@ -18,10 +18,14 @@ const manifest = async directory => JSON.parse(await readFile(join(directory, 'p
 const rootManifest = await manifest(root);
 const cliManifest = await manifest(join(root, 'atto-cli'));
 const mcpManifest = await manifest(join(root, 'atto-mcp'));
+const marketplaceManifest = await manifest(join(root, 'atto-marketplace-mcp'));
+const nanoManifest = await manifest(join(root, 'atto-marketplace-nano-adapter'));
 const tarball = entry => join(artifacts, `${entry.name.replace(/^@/, '').replace('/', '-')}-${entry.version}.tgz`);
 const cliArtifact = tarball(cliManifest);
 const mcpArtifact = tarball(mcpManifest);
-await Promise.all([cliArtifact, mcpArtifact].map(async path => assert.ok((await stat(path)).isFile(), `Missing artifact: ${path}`)));
+const marketplaceArtifact = tarball(marketplaceManifest);
+const nanoArtifact = tarball(nanoManifest);
+await Promise.all([cliArtifact, mcpArtifact, nanoArtifact, marketplaceArtifact].map(async path => assert.ok((await stat(path)).isFile(), `Missing artifact: ${path}`)));
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'atto package verification-')));
 
 async function runNpm(args, cwd) {
@@ -39,16 +43,35 @@ async function verifySourceInstall() {
   const source = join(temporary, 'source');
   await mkdir(source);
   for (const file of ['package.json', 'package-lock.json']) await cp(join(root, file), join(source, file));
-  for (const workspace of ['atto-cli', 'atto-mcp']) {
+  for (const workspace of ['atto-cli', 'atto-mcp', 'atto-marketplace-mcp', 'atto-marketplace-nano-adapter']) {
     await mkdir(join(source, workspace));
     await cp(join(root, workspace, 'package.json'), join(source, workspace, 'package.json'));
   }
   // This checks the source lockfile independently of the working node_modules.
   await runNpm(['ci', '--prefer-offline', '--no-audit', '--no-fund'], source);
-  for (const workspace of ['cli', 'mcp']) {
-    assert.equal(await realpath(join(source, 'node_modules', '@attocash', workspace)), join(source, `atto-${workspace}`));
+  for (const [packageName, directory] of [
+    ['cli', 'atto-cli'],
+    ['mcp', 'atto-mcp'],
+    ['atto-marketplace-mcp', 'atto-marketplace-mcp'],
+    ['atto-marketplace-nano-adapter', 'atto-marketplace-nano-adapter'],
+  ]) {
+    assert.equal(await realpath(join(source, 'node_modules', '@attocash', packageName)), join(source, directory));
   }
   process.stdout.write('Clean source npm ci passed.\n');
+}
+
+async function verifyMarketplace(directory) {
+  const published = await manifest(directory);
+  assert.equal(published.name, '@attocash/atto-marketplace-mcp');
+  assert.equal(published.dependencies['@attocash/cli'], cliManifest.version);
+  assert.equal(published.dependencies['@attocash/atto-marketplace-nano-adapter'], nanoManifest.version);
+  assert.equal(published.dependencies['@attocash/commons-core'], '8.0.2');
+  assert.deepEqual(published.bin, { 'atto-marketplace-mcp': 'dist/main.js' });
+  assert.equal(published.scripts, undefined);
+  assert.equal(published.devDependencies, undefined);
+  assert.equal(published.bundleDependencies, undefined);
+  assert.equal(Object.values(published.dependencies).some(value => /^(?:file:|workspace:|link:)/.test(value)), false);
+  for (const file of ['dist/main.js', 'README.md', 'LICENSE']) await stat(join(directory, file));
 }
 
 async function verifyCli(directory, prefix, noMcp) {
@@ -131,10 +154,12 @@ try {
   process.stdout.write('CLI-only artifact passed: isolated public engine and no MCP SDK.\n');
 
   const pairPrefix = join(temporary, 'pair');
-  const pairModules = await install(pairPrefix, [cliArtifact, mcpArtifact]);
+  const pairModules = await install(pairPrefix, [cliArtifact, mcpArtifact, nanoArtifact, marketplaceArtifact]);
   const cliDirectory = join(pairModules, '@attocash', 'cli');
   const mcpDirectory = join(pairModules, '@attocash', 'mcp');
+  const marketplaceDirectory = join(pairModules, '@attocash', 'atto-marketplace-mcp');
   await verifyCli(cliDirectory, pairPrefix, false);
+  await verifyMarketplace(marketplaceDirectory);
   const mcp = await manifest(mcpDirectory);
   assert.equal(mcp.dependencies['@attocash/cli'], cliManifest.version);
   assert.equal(mcp.bundleDependencies, undefined);
@@ -148,6 +173,8 @@ try {
     join(root, 'atto-cli/test/usability.test.mjs'), join(root, 'atto-cli/test/labels.test.mjs'), join(root, 'atto-cli/test/approvals.test.mjs'),
     join(root, 'atto-cli/test/doctor.test.mjs'), join(root, 'atto-mcp/test/doctor.test.mjs'),
     join(root, 'atto-cli/test/message-signing.test.mjs'),
+    join(root, 'atto-cli/test/marketplace-wallet-setup.test.mjs'),
+    join(root, 'atto-cli/test/marketplace-private-recovery.test.mjs'),
     join(root, 'atto-cli/test/auto-receive.test.mjs'), join(root, 'atto-cli/test/receive-lookup.test.mjs'), join(root, 'atto-cli/test/receive-progress.test.mjs'),
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'),
     join(root, 'atto-cli/test/network.test.mjs'), join(root, 'atto-cli/test/stream-idle.test.mjs'),
@@ -160,9 +187,27 @@ try {
     env: { ...process.env, ATTO_TEST_CLI_PACKAGE_DIR: cliDirectory, ATTO_TEST_MCP_PACKAGE_DIR: mcpDirectory },
   });
   process.stdout.write(tests.stdout);
-  process.stdout.write('Installed pair passed: stdio tools, CLI parity, signing and payment journal.\n');
-  // npm exec is the npx runner. Both unpublished artifacts are supplied together
-  // here; after publication users only need the MCP package and its exact dependency.
+  const marketplaceTests = await execute(process.execPath, ['--test', '--test-concurrency=1',
+    join(root, 'atto-marketplace-mcp/test/marketplace-api-signer.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/node-wallet-host.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/wallet-results.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/wallet-access.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/nano-wallet-terminal.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/setup.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/guided-onboarding.integration.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/atto-private-recovery.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/stdio-profile.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/unified-approval-native.integration.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/shared-recovery-onboarding.integration.test.mjs'),
+  ], {
+    cwd: temporary, timeout: 180_000, maxBuffer: 8 * 1024 * 1024,
+    env: { ...process.env, ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR: marketplaceDirectory, ATTO_TEST_CLI_PACKAGE_DIR: cliDirectory,
+      ...(process.platform !== 'win32' ? { ATTO_TEST_MARKETPLACE_MCP_BIN: join(pairModules, '.bin', 'atto-marketplace-mcp') } : {}) },
+  });
+  process.stdout.write(marketplaceTests.stdout);
+  process.stdout.write('Installed Atto pair and Marketplace MCP passed: stdio tools, controller setup, signer failures, refresh recovery, signing, and payment journals.\n');
+  // npm exec is the npx runner. The private Marketplace artifact is tested beside
+  // the matching Atto artifacts but remains outside the trusted npm publisher.
   const npxHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'setup', '--help'], temporary);
   assert.match(npxHelp.stdout, /Choose a wallet and approve MCP access/);
   const doctorHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'doctor', '--help'], temporary);
@@ -175,6 +220,9 @@ try {
   assert.match(labelsHelp.stdout, /--search/);
   const nameSchema = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto', '--json', 'operations', 'send'], temporary);
   assert.equal(JSON.parse(nameSchema.stdout).result.inputSchema.properties.destinationLabel.type, 'string');
+  const marketplaceHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact,
+    '--package', nanoArtifact, '--package', marketplaceArtifact, '--', 'atto-marketplace-mcp', '--help'], temporary);
+  assert.match(marketplaceHelp.stdout, /Usage: atto-marketplace-mcp/);
   process.stdout.write('npx runner passed: artifact setup and no noninteractive approval bypass.\n');
   if (process.env.ATTO_TEST_PACKAGE_INTEGRATION === '1') {
     const integration = await execute(process.execPath, ['--test', join(root, 'test/integration.test.mjs')], {
@@ -185,7 +233,7 @@ try {
     process.stdout.write('Installed pair passed real Commons node/worker integration.\n');
   }
 
-  const globalModules = await install(join(temporary, 'global'), [cliArtifact, mcpArtifact], true);
+  const globalModules = await install(join(temporary, 'global'), [cliArtifact, mcpArtifact, nanoArtifact, marketplaceArtifact], true);
   const resolution = await execute(process.execPath, ['--input-type=module', '-e', `
     import { fileURLToPath } from 'node:url';
     const core = await import('@attocash/cli/core');
@@ -197,6 +245,8 @@ try {
   const mcpVersion = await execute(process.execPath, [join(globalModules, '@attocash/mcp/dist/main.js'), '--version'], { cwd: temporary, timeout: 15_000 });
   assert.equal(cli.stdout.trim(), cliManifest.version);
   assert.equal(mcpVersion.stdout.trim(), mcpManifest.version);
+  const marketplaceHelpGlobal = await execute(process.execPath, [join(globalModules, '@attocash/atto-marketplace-mcp/dist/main.js'), '--help'], { cwd: temporary, timeout: 15_000 });
+  assert.match(marketplaceHelpGlobal.stdout, /Usage: atto-marketplace-mcp/);
   const detached = await execute(process.execPath, ['--test', '--test-concurrency=1', '--test-name-pattern=detached|background|stop retains|unavailable credentials|dead owner|real CLI send|lost receive|startup acknowledges',
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'), join(root, 'atto-cli/test/payments.test.mjs'),
   ], { cwd: temporary, timeout: 120_000, maxBuffer: 4 * 1024 * 1024,

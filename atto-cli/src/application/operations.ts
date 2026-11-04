@@ -57,13 +57,14 @@ export interface Operation {
   description: string;
   schema: z.ZodObject;
   readOnly: boolean;
+  internalOnly?: boolean;
 }
 
 export const operations: readonly Operation[] = [
   { name: 'doctor', description: 'Diagnose this process environment, profile, keyring credential access, node APIs and streaming, worker proof of work, and wallet readiness. Full checks can take up to 60 seconds and may trigger an OS keyring prompt. Returns structured checks and actionable remediation, never recovery material. Does not repair settings, grant access, sign, publish, receive, or modify wallet state. Available in read-only sessions. Rerun after an authorized repair; client environment changes require restarting the MCP connection.', schema: z.strictObject({ globalDirectory: z.boolean().optional() }), readOnly: true },
   { name: 'wallet_status', description: 'Read public wallet configuration, readiness, network, and auto-receive status. Never returns recovery material.', schema: z.strictObject({}), readOnly: true },
   { name: 'message_sign', description: 'Sign exact message bytes using the ATTO Signed Message v1 framing. Requires an existing address index granted by a locally approved messageSigningIndexes setting and normal MCP spend access. Handles any challenge like a credential: do not sign untrusted requests. Input is exact UTF-8 text or even-length hex (including empty bytes), capped at 64 KiB.', schema: signingMessage, readOnly: false },
-  { name: 'message_verify', description: 'Verify an ATTO Signed Message v1 signature over exact UTF-8 text or hex bytes using an ATTO address or public key. Public data only; never reads wallet credentials. Input is capped at 64 KiB.', schema: verificationMessage, readOnly: true },
+  { name: 'message_verify', description: 'Verify an ATTO Signed Message v1 signature over exact UTF-8 text or hex bytes using an Atto address or public key. Public data only; never reads wallet credentials. Input is capped at 64 KiB.', schema: verificationMessage, readOnly: true },
   { name: 'wallet_configure', description: 'Update the supplied wallet settings, preserving omitted settings. nodeBatchSize overrides the accounts/ranges per node request (1-1000); null selects automatic defaults: 5 for official Atto gatekeeper URLs, 1000 for custom nodes. Custom gateways can explicitly select 5. Representative is the default for opening accounts; use representative_change for an existing account. Changes apply to this shared wallet.', schema: z.strictObject({ network: z.enum(['LIVE', 'BETA', 'DEV', 'LOCAL']).optional(), nodeUrl: endpoint.optional(), nodeBatchSize: z.number().int().min(1).max(1000).nullable().optional(), workerUrl: endpoint.optional(), representative: address.optional(), autoReceive: z.boolean().optional(), minReceiveRaw: integer.optional() }).refine(value => Object.values(value).some(value => value !== undefined), 'Supply at least one setting.'), readOnly: false },
   { name: 'address_add', description: 'Add and activate the next wallet address after the highest saved index. Includes it in default balances and automatic receiving. Does not open an account on the network. Each call adds a different address.', schema: z.strictObject({}), readOnly: false },
   { name: 'address_derive', description: 'Derive an address at a mnemonic key index and save its public metadata. Does not open an account on the network.', schema: z.strictObject({ index: index.default(0) }), readOnly: false },
@@ -102,8 +103,13 @@ export const operations: readonly Operation[] = [
   { name: 'watch_stop', description: 'Stop a watch owned by this process and cancel its network subscription.', schema: z.strictObject({ id: z.string().min(1).max(128) }), readOnly: false },
 ];
 
+export const internalOperations: readonly Operation[] = [
+  { name: 'marketplace_pay_intent', description: 'Private Marketplace-child operation. Sign one existing exact ATTO x402 intent supplied by the configured Marketplace process. Requires the matching locally configured API origin/audience/network and approved wallet spend access and pool. Persists the exact challenge and signature for same-request recovery. Never creates an intent or submits the payment.', schema: z.strictObject({ requestId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/), intentId: z.string().uuid(), amountAtomic: integer, paymentIdentifier: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/), paymentRequired: z.string().min(1).max(90_000), apiUrl: z.string().min(1).max(2048), audience: z.string().min(1).max(255), resourceUrl: z.string().min(1).max(2048), expiresAt: z.string().min(1).max(128), index: index.optional() }), readOnly: false, internalOnly: true },
+  { name: 'marketplace_pay_intent_status', description: 'Private Marketplace-child operation. Reconcile the saved block against the configured native chain and return its binding. Recover the exact saved signature while unresolved or published; native rejection returns terminal FAILED without a signature. Never re-sign or replace the saved challenge.', schema: z.strictObject({ requestId: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/) }), readOnly: true, internalOnly: true },
+];
+
 export function operationFor(name: string): Operation | undefined {
-  return operations.find(operation => operation.name === name);
+  return [...operations, ...internalOperations].find(operation => operation.name === name);
 }
 
 export function parseOperation(name: string, input: unknown = {}): Record<string, unknown> {

@@ -1,7 +1,8 @@
 import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
-import { Command, CommanderError } from 'commander';
+import { Command, CommanderError, Option } from 'commander';
 import { createApplication, errorResult, runDoctor } from '@attocash/cli/core';
+import { createInternalMarketplacePaymentApplication } from '@attocash/cli/internal-marketplace';
 import { dedicatedMcpDirectory } from '@attocash/cli/profiles';
 import { approveLimitsProposal, rejectLimitsProposal, setupMcp, formatHumanResult, configureHelp, commandErrorMessage } from '@attocash/cli/terminal';
 import { createMcpServer } from './server.js';
@@ -11,6 +12,9 @@ export async function runMcp(argv = process.argv): Promise<void> {
   const program = new Command().name('atto-mcp').description('Local Atto MCP server over stdio')
     .option('--data-dir <directory>', 'Public wallet state directory')
     .option('--json', 'Print JSON for terminal command results; server mode always uses JSON-RPC')
+    .addOption(new Option('--internal-marketplace-payment').hideHelp())
+    .addOption(new Option('--marketplace-api-url <url>').hideHelp())
+    .addOption(new Option('--marketplace-audience <audience>').hideHelp())
     .version(version)
     .configureOutput({ writeErr: () => {} })
     .exitOverride();
@@ -19,7 +23,21 @@ export async function runMcp(argv = process.argv): Promise<void> {
   const output = (value: unknown, operation?: string): void => {
     process.stdout.write(program.opts().json ? `${JSON.stringify({ result: value })}\n` : formatHumanResult(value, operation));
   };
-  program.action(() => { serving = true; return serve(directory() ?? dedicatedMcpDirectory()); });
+  program.action(() => {
+    const options = program.opts();
+    const hasPrivateBinding = options.marketplaceApiUrl !== undefined || options.marketplaceAudience !== undefined;
+    if (options.internalMarketplacePayment) {
+      if (typeof options.marketplaceApiUrl !== 'string' || typeof options.marketplaceAudience !== 'string') {
+        throw new Error('Private Marketplace wallet mode requires its locally configured API URL and audience.');
+      }
+    } else if (hasPrivateBinding) {
+      throw new Error('Marketplace payment binding options require private Marketplace wallet mode.');
+    }
+    const internalMarketplacePayment = options.internalMarketplacePayment
+      ? { apiUrl: options.marketplaceApiUrl as string, audience: options.marketplaceAudience as string } : undefined;
+    serving = true;
+    return serve(directory() ?? dedicatedMcpDirectory(), internalMarketplacePayment);
+  });
   program.command('doctor').description('Check this launch environment, profile, keyring, node, and worker without repairs (up to 60s)')
     .option('--global-directory', 'Also check the public LIVE address directory without updating its cache')
     .action(async options => {
@@ -71,9 +89,11 @@ export async function runMcp(argv = process.argv): Promise<void> {
   }
 }
 
-async function serve(directory: string): Promise<void> {
-  const application = createApplication({ directory, access: 'mcp' });
-  const server = createMcpServer(application);
+async function serve(directory: string, internalMarketplacePayment?: { apiUrl: string; audience: string }): Promise<void> {
+  const application = internalMarketplacePayment
+    ? createInternalMarketplacePaymentApplication({ directory, internalMarketplacePayment })
+    : createApplication({ directory, access: 'mcp' });
+  const server = createMcpServer(application, { internalMarketplacePayment: Boolean(internalMarketplacePayment) });
   const transport = new StdioServerTransport();
   let closing: Promise<void> | undefined;
   const close = () => closing ??= (async () => {

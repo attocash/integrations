@@ -1,0 +1,294 @@
+import assert from 'node:assert/strict';
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import test, {before,after} from 'node:test';
+import { provisionNanoWallet, inspectNanoRecoveryWallet } from '@attocash/atto-marketplace-nano-adapter';
+import {AttoApplication} from '../../atto-cli/dist/application/app.js';
+import { setupNanoWalletInteractive } from '../dist/nano-setup.js';
+import {readWalletSelection,saveWalletSelection} from '../dist/wallet-preferences.js';
+
+const phrase = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
+let keyringDirectory, originalPath;
+before(async()=>{
+  keyringDirectory=await mkdtemp(join(tmpdir(),'nano-guided-keyring-'));
+  await writeFile(join(keyringDirectory,'secret-tool'),`#!/bin/sh\nif [ "$1" = lookup ]; then printf '%s\\n' '${phrase}'; else exit 77; fi\n`,{mode:0o700});
+  originalPath=process.env.PATH;process.env.PATH=keyringDirectory+':'+originalPath;
+});
+after(async()=>{process.env.PATH=originalPath;await rm(keyringDirectory,{recursive:true,force:true});});
+const origin = 'http://localhost:8080';
+const audience = 'guided-nano-test';
+const initialPurposes = ['link authorizer'];
+
+async function homeFor(t) {
+  const home = await mkdtemp(join(tmpdir(), 'nano-guided-setup-'));
+  await chmod(home, 0o700);
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const source=join(home,'wallets','atto');
+  const wallet=new AttoApplication({directory:source,secrets:{get:async()=>phrase,set:async()=>{}}});
+  try{await wallet.createWallet(phrase);}finally{await wallet.close();}
+  await inspectNanoRecoveryWallet(source,0);
+  return home;
+}
+
+async function snapshot(directory) {
+  const entries = {};
+  async function walk(path, relative = '') {
+    for (const name of (await readdir(path)).sort()) {
+      if (/^(state|lifecycle)\.sqlite-(wal|shm)$/.test(name)) continue;
+      const child = join(path, name), key = relative ? `${relative}/${name}` : name, st = await lstat(child);
+      entries[key] = { mode: st.mode & 0o777, size: st.isDirectory() ? null : st.size,
+        content: st.isFile() ? (await readFile(child)).toString('base64') : null };
+      if (st.isDirectory()) await walk(child, key);
+    }
+  }
+  await walk(directory);
+  return entries;
+}
+
+async function terminal(action) {
+  const stdin = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const stderr = Object.getOwnPropertyDescriptor(process.stderr, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: true });
+  Object.defineProperty(process.stderr, 'isTTY', { configurable: true, value: true });
+  try { return await action(); }
+  finally {
+    if (stdin) Object.defineProperty(process.stdin, 'isTTY', stdin); else delete process.stdin.isTTY;
+    if (stderr) Object.defineProperty(process.stderr, 'isTTY', stderr); else delete process.stderr.isTTY;
+  }
+}
+
+function interaction(responses, check) {
+  const questions = [];
+  return { questions, prompt: async question => {
+    questions.push(question);
+    await check?.(question);
+    if(question.startsWith('Recovery wallet directory'))return '';
+    assert.ok(responses.length, `Unexpected prompt: ${question}`);
+    return responses.shift();
+  } };
+}
+
+async function existing(home, grants = { marketplaceFunding: true, externalTransfers: false, controllerPurposes: initialPurposes }) {
+  const directory = join(home, 'existing');
+  const seedFile=join(home,'existing-seed.hex');
+  await writeFile(seedFile,'42'.repeat(32)+'\n',{mode:0o600});
+  await provisionNanoWallet({ seedFile, dataDir: directory, derivationIndex: 7, network: 'nano:dev', rpcUrl: 'http://localhost:17076',
+    origin, audience, handoffDirectory: join(home, 'handoffs'), grants,
+    limits: { maxPaymentAtomic: '1000000000000000000000000000000', rolling24hAtomic: '10000000000000000000000000000000' }, terminalConfirmed: true });
+  const config = JSON.parse(await readFile(join(directory, 'wallet.json'), 'utf8'));
+  // A retained journal must not be opened, recreated, or edited by configuration setup.
+  await writeFile(join(directory, 'nano-wallet.sqlite3'), 'retained native journal bytes', { mode: 0o600 });
+  return { directory, config };
+}
+
+test('guided Nano setup enforces its local terminal before prompting or creating state', async t => {
+  const home = await homeFor(t), before = await snapshot(home);
+  const stdin = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  Object.defineProperty(process.stdin, 'isTTY', { configurable: true, value: false });
+  try {
+    await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience,
+      prompt: async () => assert.fail('Nonterminal setup prompted') }), { code: 'TERMINAL_REQUIRED' });
+  } finally {
+    if (stdin) Object.defineProperty(process.stdin, 'isTTY', stdin); else delete process.stdin.isTTY;
+  }
+  assert.deepEqual(await snapshot(home), before);
+});
+
+test('cancelled Nano creation preserves all state and never displays recovery material', async t => terminal(async () => {
+  const home = await homeFor(t);
+  await writeFile(join(home, 'selection.json'), '{"nano":"retained"}', { mode: 0o600 });
+  const before = await snapshot(home);
+  const script = interaction(['', '', 'nano:dev', '', '', '', '', '', 'cancel'], async () => {
+    assert.deepEqual(await snapshot(home), before, 'Setup changed files before final consent');
+  });
+  await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt }), { code: 'APPROVAL_DECLINED' });
+  assert.deepEqual(await snapshot(home), before);
+  assert.match(script.questions.at(-1), /Marketplace funding: denied\nExternal transfers: denied/);
+  assert.match(script.questions.at(-1), /Controller purposes: none/);
+}));
+
+test('dedicated Nano creation asks usable defaults and keeps funding and transfers denied', async t => terminal(async () => {
+  const home = await homeFor(t);
+  const responses = ['', '', 'nano:dev', '', origin, audience, '', '', '', '', 'APPROVE'];
+  const script = interaction(responses);
+  const result = await setupNanoWalletInteractive({ home, env: {}, prompt: script.prompt });
+  assert.equal(result.directory, join(home, 'wallets', 'nano'));
+  assert.equal(result.index, 0);
+  assert.equal(result.network, 'nano:dev');
+  const config = JSON.parse(await readFile(join(result.directory, 'wallet.json'), 'utf8'));
+  assert.equal(result.address, config.sourceAddress);
+  assert.deepEqual(config.grants, { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] });
+  assert.deepEqual(config.limits, { maxPaymentAtomic: '0', rolling24hAtomic: '0' });
+  assert.equal(config.version,1);
+  assert.equal(config.keySource.recoverySource.directory,join(home,'wallets','atto'));
+  assert.equal(config.keySource.derivationVersion,'bip39-ed25519-slip10-nano-v1');
+  assert.equal(config.keySource.seedFile,undefined);
+  await assert.rejects(lstat(join(result.directory,'seed.hex')),{code:'ENOENT'});
+  assert.equal(script.questions.join('\n').includes(phrase),false);
+  assert.match(script.questions.at(-1),/Recovery phrase: OS password store/);
+  assert.equal(responses.length, 0);
+}));
+
+test('human XNO ceilings use exact 30-place arithmetic and independent transfer consent', async t => terminal(async () => {
+  const home = await homeFor(t);
+  const script = interaction(['', '', 'nano:dev', '', '2147483647', 'no', 'yes',
+    '0.000000000000000000000000000001', '1.234567890123456789012345678901', 'no', 'APPROVE']);
+  const result = await setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt });
+  const config = JSON.parse(await readFile(join(result.directory, 'wallet.json'), 'utf8'));
+  assert.deepEqual(config.grants, { marketplaceFunding: false, externalTransfers: true, controllerPurposes: [] });
+  assert.equal(config.derivationIndex, 2147483647);
+  assert.deepEqual(config.limits, { maxPaymentAtomic: '1', rolling24hAtomic: '1234567890123456789012345678901' });
+  assert.match(script.questions.at(-1), /0\.000000000000000000000000000001 XNO \(1 raw\)/);
+}));
+
+test('invalid precision, ceiling order, and native overflow fail before creating directories', async t => terminal(async () => {
+  for (const amounts of [
+    ['0.0000000000000000000000000000001'],
+    ['340282367'],
+    ['2', '1'],
+    ['1e-30'],
+  ]) {
+    const home = await homeFor(t), before = await snapshot(home);
+    const script = interaction(['', '', 'nano:dev', '', '', 'yes', 'no', ...amounts]);
+    await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt }), { code: 'INVALID_AMOUNT' });
+    assert.deepEqual(await snapshot(home), before);
+  }
+}));
+
+test('selected existing Nano profile defaults to reuse and preserves policy, seed and journal byte for byte', async t => terminal(async () => {
+  const home = await homeFor(t), { directory, config } = await existing(home);
+  const before = await snapshot(home);
+  const script = interaction(['', '', '', '', 'APPROVE'], async () => {
+    assert.deepEqual(await snapshot(home), before, 'Reuse preview changed existing state');
+  });
+  const result = await setupNanoWalletInteractive({ home, env: { MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: directory },
+    origin, audience, prompt: script.prompt });
+  assert.match(script.questions[0], /\[reuse\]/);
+  assert.deepEqual(result, { directory, address: config.sourceAddress, index: 7, network: 'nano:dev' });
+  assert.deepEqual(await snapshot(home), before);
+}));
+
+test('explicit Nano policy replacement retains all unrelated purpose grants and immutable profile settings', async t => terminal(async () => {
+  const home = await homeFor(t), { directory, config } = await existing(home);
+  const seed = await readFile(config.keySource.seedFile), journal = await readFile(join(directory, 'nano-wallet.sqlite3'));
+  const script = interaction(['reuse', directory, 'replace', 'no', 'yes', '0.5', '2.5', 'yes', 'APPROVE']);
+  await setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt });
+  const after = JSON.parse(await readFile(join(directory, 'wallet.json'), 'utf8'));
+  assert.deepEqual({ ...after, grants: config.grants, limits: config.limits }, config);
+  assert.deepEqual(after.grants, { marketplaceFunding: false, externalTransfers: true, controllerPurposes: [...initialPurposes, 'login'] });
+  assert.deepEqual(after.limits, { maxPaymentAtomic: '500000000000000000000000000000', rolling24hAtomic: '2500000000000000000000000000000' });
+  assert.deepEqual(await readFile(config.keySource.seedFile), seed);
+  assert.deepEqual(await readFile(join(directory, 'nano-wallet.sqlite3')), journal);
+}));
+
+test('adding login while keeping Nano transfer policy persists only the explicitly reviewed purpose', async t => terminal(async () => {
+  const home = await homeFor(t), { directory, config } = await existing(home);
+  const script = interaction(['reuse', directory, 'keep', 'yes', 'APPROVE']);
+  await setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt });
+  const after = JSON.parse(await readFile(join(directory, 'wallet.json'), 'utf8'));
+  assert.deepEqual(after, { ...config, grants: { ...config.grants, controllerPurposes: [...initialPurposes, 'login'] } });
+}));
+
+test('cancelled existing-profile policy changes preserve wallet, selection and native journal', async t => terminal(async () => {
+  const home = await homeFor(t), { directory } = await existing(home);
+  await writeFile(join(home, 'selection.json'), '{"nano":"retained"}', { mode: 0o600 });
+  const before = await snapshot(home);
+  const script = interaction(['reuse', directory, 'replace', 'no', 'yes', '1', '2', 'yes', 'NO'], async () => {
+    assert.deepEqual(await snapshot(home), before);
+  });
+  await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt }), { code: 'APPROVAL_DECLINED' });
+  assert.deepEqual(await snapshot(home), before);
+}));
+
+test('existing Nano profile missing a seed or using another connection never falls back to generation', async t => terminal(async () => {
+  const home = await homeFor(t), { directory, config } = await existing(home);
+  await rm(config.keySource.seedFile);
+  const before = await snapshot(home);
+  const script = interaction(['', '']);
+  await assert.rejects(setupNanoWalletInteractive({ home, env: { MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: directory },
+    origin, audience, prompt: script.prompt }), { code: 'PRIVATE_FILE' });
+  assert.deepEqual(await snapshot(home), before);
+  const second = await homeFor(t), wallet = await existing(second), prior = await snapshot(second);
+  await assert.rejects(setupNanoWalletInteractive({ home: second, env: {}, origin: 'http://localhost:9999', audience,
+    prompt: interaction(['reuse', wallet.directory]).prompt }), { code: 'WALLET_CONFIGURATION' });
+  assert.deepEqual(await snapshot(second), prior);
+}));
+
+test('private standalone seed import reviews its public address and retains the original private file', async t => terminal(async () => {
+  const home = await homeFor(t), seedDirectory = join(home, 'backup');
+  await mkdir(seedDirectory, { mode: 0o700 });
+  const seedFile = join(seedDirectory, 'seed.hex'), seed = `${'ab'.repeat(32)}\n`;
+  await writeFile(seedFile, seed, { mode: 0o600 });
+  const before = await snapshot(home);
+  const script = interaction(['import', '', 'nano:dev', '', '2', seedFile, '', '', 'no', 'APPROVE'], async () => {
+    assert.deepEqual(await snapshot(home), before);
+  });
+  const result = await setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt });
+  const config = JSON.parse(await readFile(join(result.directory, 'wallet.json'), 'utf8'));
+  assert.equal(config.keySource.seedFile, seedFile);
+  assert.equal(await readFile(seedFile, 'utf8'), seed);
+  assert.match(script.questions.at(-1), new RegExp(`Address: ${result.address}`));
+  assert.equal(script.questions.join('\n').includes(seed.trim()), false);
+  await assert.rejects(lstat(join(result.directory, 'seed.hex')), { code: 'ENOENT' });
+}));
+
+test('managed, missing, permissive and symlink seed imports fail without new wallet state', async t => terminal(async () => {
+  const home = await homeFor(t), { config } = await existing(home);
+  const outside = join(home, 'standalone');
+  await mkdir(outside, { mode: 0o700 });
+  const permissive = join(outside, 'public.hex'), link = join(outside, 'link.hex');
+  await writeFile(permissive, `${'cd'.repeat(32)}\n`, { mode: 0o644 });
+  await symlink(permissive, link);
+  for (const seedFile of [config.keySource.seedFile, join(outside, 'missing.hex'), permissive, link]) {
+    const before = await snapshot(home);
+    const script = interaction(['import', '', 'nano:dev', '', '', seedFile]);
+    await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt }));
+    assert.deepEqual(await snapshot(home), before);
+  }
+}));
+
+test('an imported seed changed during approval cannot configure an unreviewed Nano identity', async t => terminal(async () => {
+  const home = await homeFor(t), source = join(home, 'backup');
+  await mkdir(source, { mode: 0o700 });
+  const seedFile = join(source, 'seed.hex');
+  await writeFile(seedFile, `${'ef'.repeat(32)}\n`, { mode: 0o600 });
+  const script = interaction(['import', '', 'nano:dev', '', '', seedFile, '', '', 'no', 'APPROVE'], async question => {
+    if (question.startsWith('Review Nano wallet setup:')) await writeFile(seedFile, `${'12'.repeat(32)}\n`, { mode: 0o600 });
+  });
+  await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt }), { code: 'WALLET_KEY_MISMATCH' });
+  await assert.rejects(lstat(join(home, 'wallets', 'nano')), { code: 'ENOENT' });
+  assert.equal(await readFile(seedFile, 'utf8'), `${'12'.repeat(32)}\n`);
+}));
+
+test('reuse validates the stored public address and never recreates a missing handoff directory', async t => terminal(async () => {
+  const home = await homeFor(t), { directory, config } = await existing(home);
+  await writeFile(config.keySource.seedFile, `${'34'.repeat(32)}\n`, { mode: 0o600 });
+  let before = await snapshot(home);
+  await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience,
+    prompt: interaction(['reuse', directory]).prompt }), { code: 'WALLET_KEY_MISMATCH' });
+  assert.deepEqual(await snapshot(home), before);
+  await rm(config.handoffDirectory, { recursive: true });
+  before = await snapshot(home);
+  await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience,
+    prompt: interaction(['reuse', directory]).prompt }), { code: 'PRIVATE_FILE' });
+  assert.deepEqual(await snapshot(home), before);
+}));
+
+
+test('choosing a Nano recovery source preserves an independently selected Atto wallet',async t=>terminal(async()=>{
+  // Given the existing Atto wallet and another explicitly selected recovery source.
+  const home=await homeFor(t),original=join(home,'wallets','atto'),source=join(home,'other-recovery');
+  const wallet=new AttoApplication({directory:source,secrets:{get:async()=>phrase,set:async()=>{}}});
+  try{await wallet.createWallet(phrase);}finally{await wallet.close();}
+  await saveWalletSelection(home,{attoDirectory:original});
+  const script=interaction(['','','nano:dev','','','','','','APPROVE']);
+  // When Nano setup explicitly chooses the second source.
+  const result=await setupNanoWalletInteractive({home,env:{MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:original},origin,audience,
+    prompt:question=>question.startsWith('Recovery wallet directory')?Promise.resolve(source):script.prompt(question)});
+  // Then Nano pins that source while the existing Atto wallet remains selected after restart.
+  const config=JSON.parse(await readFile(join(result.directory,'wallet.json'),'utf8'));
+  assert.equal(config.keySource.recoverySource.directory,source);
+  assert.equal(readWalletSelection(home).attoDirectory,original);
+  assert.equal(script.questions.join('\n').includes(phrase),false);
+}));

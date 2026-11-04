@@ -38,6 +38,45 @@ export interface MarketplaceProofApprovalRequest {
   challenge: { challengeId: string; message: string; issuedAt: string; expiresAt: string };
 }
 
+/** Internal Marketplace owner contract; the standalone CLI remains Atto-only. */
+export type MarketplaceUserProofApprovalRequest = Omit<MarketplaceProofApprovalRequest, 'controller'> & {
+  controller: { network: 'ATTO' | 'NANO'; address: string; index: number };
+};
+
+/** Exact typed validation shared by Marketplace's terminal and native signers. */
+export function validateMarketplaceUserProofApproval(input: unknown, options: {
+  network: 'ATTO' | 'NANO'; nativeNetwork: string; now?: number; allowExpired?: boolean;
+}): MarketplaceUserProofApprovalRequest {
+  const request = parseRequest(input, options.network);
+  const purposes = new Set(['login', 'API-key creation', 'API-key rotation', 'API-key revocation',
+    'link authorizer', 'link new identity', 'unlink', 'payout address enrollment', 'payout address selection',
+    'payout address disablement', 'withdrawal creation', 'product purchase', 'product refund']);
+  const atto = options.network === 'ATTO';
+  if (!purposes.has(request.purpose) || (request.action.authority !== undefined && request.action.authority !== 'SELLER')
+    || request.controller.network !== options.network || !Number.isSafeInteger(request.controller.index)
+    || request.controller.index < 0 || request.controller.index > (atto ? 0x7fff_ffff : 0xffff_ffff)
+    || !(atto ? /^atto:\/\/[a-z2-7]{61}$/.test(request.controller.address)
+      : /^nano_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(request.controller.address))
+    || !uuid(request.accountId) || !uuid(request.identityId)
+    || parseOrigin(request.marketplaceOrigin) !== request.marketplaceOrigin
+    || request.transport !== 'AGENT_API' || request.proofOrigin !== null
+    || !/^[^\r\n\0]{1,255}$/.test(request.audience) || request.audience.trim() !== request.audience
+    || (atto ? options.nativeNetwork !== 'live' : !['nano:mainnet','nano:dev'].includes(options.nativeNetwork))) throw protocolFailure();
+  if (request.action.kind === 'credential' && record(request.action.command).operation !== request.action.operation) throw protocolFailure();
+  const message = parseProofMessage(request, atto ? 'Marketplace Agent Controller Proof v1' : 'Nano Marketplace Agent Controller Proof v1');
+  if (message.purpose !== request.purpose || expectedPurpose(request.action) !== request.purpose
+    || message.audience !== request.audience || message.address !== request.controller.address
+    || message.network !== options.nativeNetwork || message.challengeId !== request.challenge.challengeId
+    || message.issuedAt !== request.challenge.issuedAt || message.expiresAt !== request.challenge.expiresAt
+    || message.bindingHash !== bindingHash(request)) throw protocolFailure();
+  const issued = millis(request.challenge.issuedAt), expires = millis(request.challenge.expiresAt);
+  if (expires <= issued || expires - issued > 300_000 || issued > (options.now ?? Date.now()) + 30_000
+    || (!options.allowExpired && expires <= (options.now ?? Date.now()))) {
+    throw new AttoError('MARKETPLACE_APPROVAL_EXPIRED', 'The Marketplace approval challenge has expired or is outside its five-minute lifetime. Request a new challenge.');
+  }
+  return request;
+}
+
 export interface MarketplaceProofApprovalResponse {
   version: 1;
   type: 'marketplace-controller-approval-response';
@@ -74,6 +113,8 @@ export function inspectMarketplaceProofApproval(input: unknown, connection: Mark
   const origin = parseOrigin(request.marketplaceOrigin);
   if (origin !== request.marketplaceOrigin) throw protocolFailure();
   const login = request.purpose === 'login';
+  if (request.action.kind === 'identity-link'
+    && (![request.action.authorizingAddress, request.action.newIdentityAddress].every(address => typeof address === 'string' && /^atto:\/\/[a-z2-7]{61}$/.test(address)))) throw protocolFailure();
   const newIdentityApproval = request.action.kind === 'identity-link' && request.action.operation === 'NEW_IDENTITY';
   if (!PURPOSES.has(request.purpose) || request.controller.network !== 'ATTO'
     || !Number.isSafeInteger(request.controller.index) || request.controller.index < 0 || request.controller.index > 0x7fff_ffff
@@ -133,12 +174,12 @@ export function inspectMarketplaceProofApproval(input: unknown, connection: Mark
   const preview: MarketplaceProofApprovalPreview = {
     profileId: request.profileId, handoffId: request.handoffId, marketplaceOrigin: request.marketplaceOrigin,
     transport: request.transport, proofOrigin: request.proofOrigin, audience: request.audience,
-    controller: request.controller, purpose: request.purpose, challengeId: request.challenge.challengeId,
+    controller: request.controller as MarketplaceProofApprovalRequest['controller'], purpose: request.purpose, challengeId: request.challenge.challengeId,
     issuedAt: request.challenge.issuedAt, expiresAt: request.challenge.expiresAt, action: request.action,
     ...(request.accountId ? { accountId: request.accountId } : {}),
     ...(request.identityId ? { identityId: request.identityId } : {}),
   };
-  return { request, preview };
+  return { request: request as MarketplaceProofApprovalRequest, preview };
 }
 
 export function approvalRequestDigest(request: MarketplaceProofApprovalRequest): string {
@@ -160,7 +201,7 @@ export function canonicalJson(value: unknown): string {
   return `{${Object.keys(record).sort().map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
 }
 
-function parseRequest(input: unknown): MarketplaceProofApprovalRequest {
+function parseRequest(input: unknown, network: 'ATTO' | 'NANO' = 'ATTO'): MarketplaceUserProofApprovalRequest {
   const value = record(input);
   if (!onlyKeys(value, ['version','type','profileId','handoffId','marketplaceOrigin','transport','proofOrigin','audience','accountId','identityId','controller','purpose','action','challenge'])
     || value.version !== 1 || value.type !== 'marketplace-controller-approval-request'
@@ -173,19 +214,19 @@ function parseRequest(input: unknown): MarketplaceProofApprovalRequest {
   const action = value.action as Record<string, unknown>;
   const challenge = value.challenge as Record<string, unknown>;
   if (!onlyKeys(controller, ['network','address','index']) || !onlyKeys(challenge, ['challengeId','message','issuedAt','expiresAt'])
-    || !validActionKeys(action) || controller.network !== 'ATTO' || typeof controller.address !== 'string' || typeof controller.index !== 'number'
+    || !validActionKeys(action) || controller.network !== network || typeof controller.address !== 'string' || typeof controller.index !== 'number'
     || typeof challenge.challengeId !== 'string' || !uuid(challenge.challengeId) || typeof challenge.message !== 'string' || challenge.message.length > 4096
     || typeof challenge.issuedAt !== 'string' || typeof challenge.expiresAt !== 'string'
     || !(value.proofOrigin === null || typeof value.proofOrigin === 'string')
     || !(value.accountId === undefined || typeof value.accountId === 'string')
     || !(value.identityId === undefined || typeof value.identityId === 'string')) throw protocolFailure();
-  return value as unknown as MarketplaceProofApprovalRequest;
+  return value as unknown as MarketplaceUserProofApprovalRequest;
 }
 
-function parseProofMessage(request: MarketplaceProofApprovalRequest): { audience: string; network: string; address: string; purpose: string; challengeId: string; bindingHash?: string; issuedAt: string; expiresAt: string } {
+function parseProofMessage(request: MarketplaceUserProofApprovalRequest, header = 'Marketplace Agent Controller Proof v1'): { audience: string; network: string; address: string; purpose: string; challengeId: string; bindingHash?: string; issuedAt: string; expiresAt: string } {
   const lines = request.challenge.message.split('\n');
   if (lines.length !== 9 && lines.length !== 10) throw protocolFailure();
-  if (lines[0] !== 'Marketplace Agent Controller Proof v1' || !lines[1]?.startsWith('Audience: ')
+  if (lines[0] !== header || !lines[1]?.startsWith('Audience: ')
     || !lines[2]?.startsWith('Network: ') || !lines[3]?.startsWith('Address: ')
     || !lines[4]?.startsWith('Purpose: ') || !lines[5]?.startsWith('Request ID: ')) throw protocolFailure();
   const hasBinding = lines[6]?.startsWith('Binding Hash: ') === true;
@@ -262,10 +303,10 @@ function validActionKeys(action: Record<string, unknown>): boolean {
   return false;
 }
 
-function bindingHash(request: MarketplaceProofApprovalRequest): string | undefined {
+function bindingHash(request: MarketplaceUserProofApprovalRequest): string | undefined {
   const action = request.action;
   if (action.kind === 'login') {
-    if (action.network !== 'ATTO' || action.address !== request.controller.address
+    if (action.network !== request.controller.network || action.address !== request.controller.address
       || !uuid(request.accountId) || !uuid(request.identityId)) throw protocolFailure();
     return sha256(['signer-controller-enrollment-v1', request.accountId!, request.identityId!].join('\n'));
   }
@@ -301,13 +342,13 @@ function bindingHash(request: MarketplaceProofApprovalRequest): string | undefin
     const newIdentityAddress = action.newIdentityAddress;
     if (!['AUTHORIZE','NEW_IDENTITY'].includes(String(operation)) || !linkId
       || !authorizingIdentityId || authorizingIdentityId !== request.identityId
-      || typeof authorizingAddress !== 'string' || !/^atto:\/\/[a-z2-7]{61}$/.test(authorizingAddress)
-      || typeof newIdentityAddress !== 'string' || !/^atto:\/\/[a-z2-7]{61}$/.test(newIdentityAddress)
+      || typeof authorizingAddress !== 'string' || !identityNetwork(authorizingAddress)
+      || typeof newIdentityAddress !== 'string' || !identityNetwork(newIdentityAddress)
       || authorizingAddress === newIdentityAddress
       || (operation === 'AUTHORIZE' && request.controller.address !== authorizingAddress)
       || (operation === 'NEW_IDENTITY' && request.controller.address !== newIdentityAddress)) throw protocolFailure();
-    return sha256([request.accountId, linkId, `atto:live:${authorizingAddress}`,
-      `atto:live:${newIdentityAddress}`].join('\n'));
+    return sha256([request.accountId, linkId, `${identityNetwork(authorizingAddress)}:${authorizingAddress}`,
+      `${identityNetwork(newIdentityAddress)}:${newIdentityAddress}`].join('\n'));
   }
   if (action.kind === 'identity-unlink') {
     const targetIdentityId = uuid(action.targetIdentityId);
@@ -646,3 +687,9 @@ function millis(value: string): number {
 function javaTrim(value: string): string { return value.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, ''); }
 function sha256(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
 function protocolFailure(): AttoError { return new AttoError('MARKETPLACE_APPROVAL_PROTOCOL', 'This typed Marketplace wallet-approval request is invalid. Request a fresh approval file from Marketplace.'); }
+
+function identityNetwork(address: string): 'atto:live' | 'nano:mainnet' | undefined {
+  if (/^atto:\/\/[a-z2-7]{61}$/.test(address)) return 'atto:live';
+  if (/^nano_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(address)) return 'nano:mainnet';
+  return undefined;
+}

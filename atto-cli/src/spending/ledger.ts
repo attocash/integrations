@@ -1,3 +1,4 @@
+import { paymentTransactionMatches, type AttoPaymentNetwork } from './atto-x402.js';
 import { validateDestinationBinding, type DestinationBinding } from './destination.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -35,7 +36,7 @@ export interface ExternalPaymentRecord {
   kind: 'marketplace-topup' | 'marketplace-intent';
   version: 1;
   paymentIdentifier: string;
-  network: 'atto:live' | 'atto:local';
+  network: AttoPaymentNetwork;
   intentId: string;
   resourceUrl: string;
   requirementHash: string;
@@ -298,6 +299,57 @@ export class SpendLedger {
     });
   }
 
+  /** Commit a Marketplace intent reservation and its exact owner/challenge binding together. */
+  reserveExternalChallenge(request: SendReservation, requirementJson: string,
+    owner: Omit<ExternalPaymentSecrets, 'requirementJson' | 'transactionJson' | 'paymentJson' | 'paymentSignature' | 'paymentKind'>): SendRecord {
+    if (!request.external || request.external.kind !== 'marketplace-intent'
+      || typeof requirementJson !== 'string' || Buffer.byteLength(requirementJson, 'utf8') < 1
+      || Buffer.byteLength(requirementJson, 'utf8') > 65_536
+      || createHashHex(requirementJson) !== request.external.requirementHash) {
+      throw new AttoError('SEND_STATE', 'The existing Marketplace intent challenge is invalid.');
+    }
+    if (typeof request.id !== 'string' || request.id.length === 0 || request.id.length > 200
+      || !Number.isSafeInteger(request.index) || request.index < 0 || request.index > 0x7fff_ffff
+      || typeof request.destination !== 'string' || !request.destination
+      || !Number.isSafeInteger(request.createdAt) || request.createdAt < 0) {
+      throw new AttoError('INVALID_REQUEST', 'Send requests require an ID, address index, destination, and timestamp.');
+    }
+    const raw = amountRaw(request.raw, 'RAW');
+    try {
+      this.validateDetails(request);
+      if (request.plan?.steps.some(step => step.status !== 'planned' || step.hash !== undefined)) throw new Error();
+    } catch {
+      throw new AttoError('INVALID_REQUEST', 'The payment metadata, source, or consolidation plan is invalid.');
+    }
+    return this.store.transaction(() => {
+      const records = this.records();
+      const existing = records.find(record => record.id === request.id);
+      if (existing && (existing.index !== request.index || existing.destination !== request.destination || existing.raw !== raw
+        || ['sourceAddress', 'network', 'metadata', 'quote', 'selection'].some(key => {
+          const field = key as 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection';
+          return request[field] !== undefined && !isDeepStrictEqual(request[field], existing[field]);
+        }) || (request.plan !== undefined && !isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)))
+        || !isDeepStrictEqual(this.externalDefinition(request.external), this.externalDefinition(existing.external)))) {
+        throw new AttoError('REQUEST_CONFLICT', 'This request ID already belongs to a different payment.');
+      }
+      const record = existing ?? { ...request, raw, status: 'reserved' as const };
+      if (!existing) {
+        this.assertAllowance(raw, request.createdAt, records);
+        records.push(record);
+        this.store.set(RECORDS_KEY, records);
+      }
+      const secrets = this.externalSecrets();
+      const current = secrets[request.id];
+      const boundOwner = { ...owner, paymentKind: 'marketplace-intent' as const };
+      if (current && (current.requirementJson !== requirementJson || !isDeepStrictEqual(this.ownerDefinition(current), boundOwner))) {
+        throw new AttoError('REQUEST_CONFLICT', 'This payment ID received a different x402 requirement or Marketplace binding.');
+      }
+      if (!current) secrets[request.id] = { ...boundOwner, requirementJson };
+      this.store.set(EXTERNAL_SECRETS_KEY, secrets);
+      return record;
+    });
+  }
+
   get(id: string): SendRecord | undefined { return this.records().find((record) => record.id === id); }
 
   journalGet(requestId: string): SendRecord | undefined { return this.get(requestId); }
@@ -390,7 +442,7 @@ export class SpendLedger {
         || block.amount.toString() !== record.raw || block.receiverAddress.value !== record.destination
         || (record.sourceAddress && block.address.value !== record.sourceAddress)
         || block.network.name !== record.network
-        || !input.paymentJson.includes(input.transactionJson)) {
+        || !paymentTransactionMatches(input.paymentJson, transaction)) {
         throw new AttoError('SEND_STATE', 'The signed x402 transaction does not match its request or payment envelope.');
       }
       const payloadBytes = Buffer.from(input.paymentSignature, 'base64');
@@ -442,6 +494,29 @@ export class SpendLedger {
       return { ...record, status: 'failed', result,
         external: { ...record.external, nativeState: 'rejected',
           ...(record.external.kind === 'marketplace-intent' ? { paymentState: 'FAILED' as const } : {}) } };
+    });
+  }
+
+  /** Account and wallet locks must be held: only a never-signed expired challenge can release its reservation. */
+  expireExternalChallenge(id: string, now: number): boolean {
+    return this.store.transaction(() => {
+      const records = this.records();
+      const index = records.findIndex(record => record.id === id);
+      const record = records[index];
+      const external = record?.external;
+      if (!record || !external || external.kind !== 'marketplace-intent' || record.status !== 'reserved'
+        || record.hash !== undefined || record.blockJson !== undefined || record.plan?.steps.some(step => step.hash !== undefined || step.blockJson !== undefined)
+        || external.nativeState !== 'challenged' || external.paymentState !== null || external.attemptedAt !== undefined
+        || !Number.isSafeInteger(now) || Date.parse(external.intentExpiresAt) > now) return false;
+      const secrets = this.externalSecretsFor(id);
+      if (!secrets || secrets.paymentKind !== 'marketplace-intent' || secrets.transactionJson !== undefined
+        || secrets.paymentJson !== undefined || secrets.paymentSignature !== undefined) return false;
+      records[index] = { ...record, status: 'failed',
+        result: { status: 'failed', reason: 'MARKETPLACE_CHALLENGE_EXPIRED' },
+        external: { ...external, marketplaceState: 'EXPIRED', paymentState: 'FAILED' } };
+      this.validateDetails(records[index]!);
+      this.store.set(RECORDS_KEY, records);
+      return true;
     });
   }
 
@@ -653,7 +728,7 @@ export class SpendLedger {
 
     if (!external || !['marketplace-topup', 'marketplace-intent'].includes(external.kind) || external.version !== 1
       || !/^[A-Za-z0-9_-]{16,128}$/.test(external.paymentIdentifier)
-      || !['atto:live', 'atto:local'].includes(external.network)
+      || !['atto:live', 'atto:beta', 'atto:dev', 'atto:local'].includes(external.network)
       || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(external.intentId)
       || typeof external.resourceUrl !== 'string' || external.resourceUrl.length > 2048
       || !/^[a-f0-9]{64}$/.test(external.requirementHash)

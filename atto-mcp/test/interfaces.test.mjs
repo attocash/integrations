@@ -34,9 +34,12 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   // When
   const result = await client.listTools();
   // Then
-  const publicOperations = operations;
+  const publicOperations = operations.filter(operation => !operation.internalOnly);
   assert.deepEqual(result.tools.map(tool => tool.name).sort(), publicOperations.map(operation => operation.name).sort());
   assert.equal(result.tools.length, 40);
+  assert.equal(result.tools.some(tool => tool.name.startsWith('marketplace_pay_intent')), false,
+    'ordinary Atto MCP clients never receive private payment-signature tools');
+  await assert.rejects(client.callTool({ name: 'marketplace_pay_intent_status', arguments: { requestId: 'request-identifier-001' } }));
   assert.equal(result.tools.some(tool => /mnemonic|backup|import|create_wallet/.test(tool.name)), false);
   assert.equal(result.tools.some(tool => /approv|reject/.test(tool.name)), false);
   assert.equal(result.tools.find(tool => tool.name === 'send').annotations.destructiveHint, true);
@@ -77,6 +80,25 @@ test('MCP discovers every shared operation and keeps recovery operations termina
     assert.equal(result.tools.find(tool => tool.name === name).annotations.readOnlyHint, true);
     assert.equal(result.tools.find(tool => tool.name === name).annotations.openWorldHint, false);
   }
+});
+
+test('only the explicitly private Marketplace child mode registers signed-intent recovery tools', async t => {
+  // Given a private stdio transport whose only consumer is the Marketplace MCP child.
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'private-marketplace-child-test', version: '1.0.0' });
+  const secretHeader = Buffer.from('{"x402Version":2,"synthetic":"private"}').toString('base64');
+  const server = createMcpServer({ call: async name => name === 'marketplace_pay_intent_status'
+    ? { requestId: 'request-identifier-001', paymentSignature: secretHeader } : null }, { internalMarketplacePayment: true });
+  t.after(async () => { await client.close(); await server.close(); });
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  // When the child lists tools and reads a journaled payment response.
+  const names = (await client.listTools()).tools.map(tool => tool.name);
+  assert.ok(names.includes('marketplace_pay_intent'));
+  assert.ok(names.includes('marketplace_pay_intent_status'));
+  const result = await client.callTool({ name: 'marketplace_pay_intent_status', arguments: { requestId: 'request-identifier-001' } });
+  // Then the exact signature is available over the private pipe.
+  assert.equal(result.structuredContent.result.paymentSignature, secretHeader);
 });
 
 test('MCP limit changes only propose, and an existing connection observes terminal approval', async t => {

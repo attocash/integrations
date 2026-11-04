@@ -68,7 +68,7 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
     heads.set(account.lastTransactionHash.toString(), account);
   };
   addresses.forEach((address, index) => saveAccount(AttoAccount.fromJson(JSON.stringify({
-    network: 'LOCAL', version: 0, algorithm: 'V1', publicKey: address.publicKey,
+    network: options.fixtureNetwork ?? 'LOCAL', version: 0, algorithm: 'V1', publicKey: address.publicKey,
     height: 3, balance: balances[index], lastTransactionHash: (index + 1).toString(16).padStart(2, '0').repeat(32),
     lastTransactionTimestamp: 1704616009211, representativeAlgorithm: 'V1', representativePublicKey: addresses[0].publicKey,
   }))));
@@ -214,7 +214,7 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
     await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
     assert.equal(state.error, undefined);
   });
-  await app.call('wallet_configure', { network: 'LOCAL', nodeUrl: url, workerUrl: url, representative: addresses[0].address, autoReceive: false });
+  await app.call('wallet_configure', { network: options.fixtureNetwork ?? 'LOCAL', nodeUrl: url, workerUrl: url, representative: addresses[0].address, autoReceive: false });
   await approve();
   return { get app() { return app; }, directory, mnemonic: () => phrase, state, addresses, recipient, open, approve,
     url, observeCanonical,

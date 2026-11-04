@@ -90,6 +90,12 @@ export class StateStore {
     return row ? JSON.parse(row.value as string) as T : undefined;
   }
 
+  entries<T>(prefix: string): Array<{ key: string; value: T }> {
+    this.requireOpen();
+    return this.state.prepare('SELECT key, value FROM settings WHERE key >= ? AND key < ? ORDER BY key')
+      .all(prefix, `${prefix}\uffff`).map(row => ({ key: row.key as string, value: JSON.parse(row.value as string) as T }));
+  }
+
   set(key: string, value: unknown): void {
     this.requireOpen();
     const json = JSON.stringify(value);

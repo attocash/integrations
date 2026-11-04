@@ -1,4 +1,4 @@
-# Contributing to Atto CLI and MCP
+# Contributing to Atto integrations
 
 Build, test, and packaging instructions for contributors.
 For installation and wallet usage, see the [public guide](../README.md).
@@ -6,7 +6,7 @@ For installation and wallet usage, see the [public guide](../README.md).
 ## Development
 
 Run these commands from the repository root. The build compiles CLI first so
-MCP can resolve its exported library declarations:
+the wallet MCP and Marketplace MCP can resolve its exported library declarations:
 
 ```sh
 npm ci
@@ -17,6 +17,11 @@ npm run test:integration
 ATTO_TEST_KEYCHAIN=1 npm run test:keychain
 npm run test:package
 ```
+
+The Marketplace MCP is a separate workspace package. Its sources and tests live in
+`atto-marketplace-mcp/`; its accepted tarball is included in `npm run pack` and
+`npm run test:package`. The current trusted npm release remains limited to the
+CLI and wallet MCP pair.
 
 The CLI and its direct Commons dependencies now use the published 8.0.2
 JavaScript verifier API. A regular `npm ci` installs the supported package set;
@@ -50,8 +55,10 @@ npm run pack -- --pack-destination /tmp/atto-artifacts
 Source checkouts use `0.0.0` as a development placeholder. CI replaces it with
 the version calculated by semantic-release before testing and publishing.
 
-This produces `attocash-cli-0.0.0.tgz` and `attocash-mcp-0.0.0.tgz`. The root
-`package-lock.json` records the development dependency tree for `npm ci`.
+This produces CLI, wallet MCP, and Marketplace MCP tarballs. The Marketplace MCP tarball
+is an accepted workspace artifact and is not in the trusted npm publisher.
+The root `package-lock.json` records the development dependency tree for
+`npm ci`.
 Packaging uses a temporary staging directory and leaves source package files
 unchanged. Use the root script to produce release artifacts; plain `npm pack`
 is blocked. `npm run test:package` builds and verifies the installed artifacts.
@@ -60,7 +67,8 @@ The CLI artifact bundles its direct Commons packages and their JavaScript
 dependencies to preserve patched `ws` resolution. Native password-store
 bindings remain normal npm dependencies so npm selects the correct platform
 binaries. The wallet MCP stays a separate package with an exact dependency on
-`@attocash/cli`; its SDK is not bundled. For local Commons
+`@attocash/cli`; its SDK is not bundled. The Marketplace MCP package depends on the
+matching CLI and wallet MCP artifacts plus Commons 8.0.2. For local Commons
 packages, `ATTO_COMMONS_LOCAL_VERSION` makes staging verify the one installed
 Commons closure and rewrites only the staged CLI dependency versions; source
 manifests remain registry-pinned.

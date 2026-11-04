@@ -1,0 +1,40 @@
+{
+  "name": "@attocash/atto-marketplace-mcp",
+  "version": "0.1.0",
+  "description": "Local stdio MCP client for Marketplace agent workflows",
+  "license": "BSD-3-Clause",
+  "type": "module",
+  "engines": {
+    "node": ">=24.15.0"
+  },
+  "bin": {
+    "atto-marketplace-mcp": "dist/main.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/attocash/integrations.git",
+    "directory": "atto-marketplace-mcp"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "@attocash/commons-core": "8.0.2",
+    "@attocash/cli": "0.0.0",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "zod": "4.5.4",
+    "@attocash/atto-marketplace-nano-adapter": "0.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "5.9.3"
+  }
+}

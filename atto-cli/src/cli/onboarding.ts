@@ -1,9 +1,11 @@
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { isAbsolute, join, resolve } from 'node:path';
+import { isDeepStrictEqual } from 'node:util';
 import { AttoApplication } from '../application/app.js';
 import { amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
 import { defaultCliDirectory, dedicatedMcpDirectory, resolveWalletProfile } from '../storage/profiles.js';
-import type { AccountPool, SpendingPolicy } from '../wallet/types.js';
+import type { AccountPool, SpendingPolicy, WalletIdentity, WalletSettings } from '../wallet/types.js';
 import { hiddenPrompt, requireTerminal, showRecovery, terminalPrompt } from './terminal.js';
 import { formatHumanResult } from './output.js';
 export { formatHumanResult } from './output.js';
@@ -142,5 +144,107 @@ export async function setupMcp({ directory }: { directory?: string }): Promise<u
     await approve(application, proposal.id);
     process.stderr.write('\nAdd this public configuration to your MCP client. The explicit data directory preserves your wallet selection.\n');
     return { mcpServers: { atto: { command: 'npx', args: ['--yes', '@attocash/mcp@latest', '--data-dir', profile.directory] } } };
+  } finally { await application.close(); }
+}
+
+/** Configure the local wallet profile used by Marketplace's private MCP integration. */
+export async function setupMarketplaceWallet({
+  directory,
+  controllerIndex,
+  reuseExisting = false,
+  configuration,
+  typedControllerApprovals = false,
+}: {
+  directory: string;
+  controllerIndex: number;
+  reuseExisting?: boolean;
+  configuration?: Pick<WalletSettings, 'network' | 'nodeUrl' | 'workerUrl'>;
+  typedControllerApprovals?: boolean;
+}): Promise<{ directory: string; address: string; index: number }> {
+  requireTerminal();
+  if (!directory || !isAbsolute(directory)) {
+    throw new AttoError('INVALID_INPUT', 'Marketplace wallet setup requires an explicit absolute wallet directory.');
+  }
+  if (!Number.isSafeInteger(controllerIndex) || controllerIndex < 0 || controllerIndex > 2_147_483_647) {
+    throw new AttoError('INVALID_INPUT', 'The Marketplace controller index must be a nonnegative integer.');
+  }
+  const selectedDirectory = resolve(directory);
+  if (!reuseExisting && selectedDirectory === resolve(defaultCliDirectory())) {
+    throw new AttoError('PROFILE_CONFLICT', 'Marketplace wallet setup cannot use the default CLI wallet directory. Choose a dedicated absolute directory.');
+  }
+
+  if (reuseExisting && !existsSync(join(selectedDirectory, 'state.sqlite'))) {
+    throw new AttoError('WALLET_NOT_INITIALIZED', 'The selected CLI wallet is not initialized. Choose an existing wallet or use dedicated wallet setup.');
+  }
+  const profile = resolveWalletProfile(selectedDirectory);
+  display({ directory: profile.directory, action: 'Configure local Marketplace wallet' });
+  const application = new AttoApplication({ directory: profile.directory });
+  try {
+    const status = await application.call('wallet_status') as { initialized: boolean; identity: WalletIdentity | null; settings: WalletSettings };
+    if (reuseExisting && !status.initialized) {
+      throw new AttoError('WALLET_NOT_INITIALIZED', 'The selected CLI wallet is not initialized. Choose an existing wallet or use dedicated wallet setup.');
+    }
+    if (reuseExisting && configuration
+      && (configuration.network !== status.settings.network || configuration.nodeUrl !== status.settings.nodeUrl
+        || configuration.workerUrl !== status.settings.workerUrl)) {
+      throw new AttoError('PROFILE_CONFLICT', 'The selected CLI wallet settings do not match the requested Marketplace network, node, and worker. Reuse preserves existing wallet settings.');
+    }
+    if (reuseExisting) {
+      process.stderr.write('This reuses the existing CLI wallet in place and shares its funds, spending grants, payment journals, and account pool. Keys and wallet settings stay in this profile.\n');
+      display({ identity: status.identity, settings: status.settings, credentialService: profile.credentialService });
+    } else {
+      await initializeWallet(application, profile.directory);
+      if (configuration) await application.call('wallet_configure', configuration);
+    }
+    const controller = await application.call('address_derive', { index: controllerIndex }) as { index: number; address: string };
+    process.stderr.write([
+      typedControllerApprovals
+        ? 'This setup proposes bounded native spending. Marketplace controller actions require separate terminal approval.'
+        : 'This setup proposes bounded MCP spending and message signing for one controller account.',
+      ...(typedControllerApprovals ? [] : ['ATTO message_sign requires spend access; read-only access cannot use it.']),
+      'Marketplace controller account: index ' + String(controller.index) + ' (' + JSON.stringify(controller.address) + ').',
+      '',
+    ].join('\n'));
+
+    // Reading limits_get reconciles payments. Reuse onboarding only inspects
+    // saved authority, leaving existing payment journals untouched.
+    const usage = reuseExisting ? {
+      policy: application.ledger.policy(), pool: application.ledger.pool(),
+      access: application.ledger.mcpAccess(), messageSigningIndexes: application.ledger.messageSigningIndexes(),
+    } : await application.call('limits_get') as { policy: SpendingPolicy; pool: AccountPool; access: 'read-only' | 'spend'; messageSigningIndexes: number[] };
+    if (reuseExisting) {
+      process.stderr.write([
+        `Current MCP access: ${usage.access}`,
+        `Current limits: ${formatPolicy(usage.policy)}`,
+        `Current message-signing indexes: ${usage.messageSigningIndexes.join(', ') || 'none'}`,
+        '',
+      ].join('\n'));
+    }
+    const pool = await configurePool(usage.pool);
+    const hasBoundedPolicy = usage.policy.perRequest !== null || usage.policy.rolling.length > 0;
+    const keepPolicy = reuseExisting && hasBoundedPolicy
+      && await choose('Spending policy: [1] Keep current bounded limits (default), [2] Set new bounded limits: ') === '1';
+    if (reuseExisting && !hasBoundedPolicy) process.stderr.write('The current policy is unlimited. Marketplace setup requires explicit bounded spending limits and spend access approval.\n');
+    const policy = keepPolicy ? usage.policy : await boundedPolicy();
+    const messageSigningIndexes = typedControllerApprovals ? usage.messageSigningIndexes : reuseExisting
+      ? [...new Set([...usage.messageSigningIndexes, controllerIndex])].sort((a, b) => a - b) : [controllerIndex];
+    const proposal = reuseExisting ? await application.store.withWalletLock(async () => {
+      // Fail rather than replacing authority changed by another CLI/MCP session
+      // while the user was answering terminal prompts.
+      if (!isDeepStrictEqual(usage, {
+        policy: application.ledger.policy(), pool: application.ledger.pool(),
+        access: application.ledger.mcpAccess(), messageSigningIndexes: application.ledger.messageSigningIndexes(),
+      }) || !isDeepStrictEqual(status.settings, application.store.get('settings'))
+        || !isDeepStrictEqual(status.identity, application.store.get('identity'))) {
+        throw new AttoError('PROPOSAL_STALE', 'The shared wallet settings or authority changed during setup. Review the current wallet and run setup again.');
+      }
+      return application.ledger.proposePolicy(policy, 'spend', {
+        directory: profile.directory, walletFingerprint: status.identity!.fingerprint, network: status.settings.network,
+      }, pool, messageSigningIndexes);
+    }) : (await application.call('limits_propose', {
+      policy, access: 'spend', pool, messageSigningIndexes,
+    }) as { proposal: { id: string } }).proposal;
+    await approve(application, proposal.id);
+    return { directory: profile.directory, address: controller.address, index: controller.index };
   } finally { await application.close(); }
 }

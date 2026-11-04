@@ -69,11 +69,11 @@ jobs:
         with:
           node-version: '24'
       - run: npm ci
-      - name: Prepare both package versions and the exact CLI dependency
+      - name: Prepare CLI and wallet MCP versions; align the private Marketplace MCP dependency pins
         run: node scripts/release-version.mjs "$RELEASE_VERSION"
       - name: Test the release version
         run: npm test
-      - name: Verify the release tarballs, including AttoNodeMock integration
+      - name: Verify the release tarballs and private Marketplace MCP workspace artifact
         run: npm run test:package
         env:
           ATTO_TEST_PACKAGE_INTEGRATION: '1'
@@ -81,10 +81,14 @@ jobs:
         with:
           name: atto-release-notes
           path: artifacts
-      - name: Preserve the tested tarballs
+      - name: Preserve the tested packages for publishing and acceptance
         run: |
           mv "./attocash-cli-$RELEASE_VERSION.tgz" artifacts/
           mv "./attocash-mcp-$RELEASE_VERSION.tgz" artifacts/
+          MARKETPLACE_VERSION="$(node -p "require('./atto-marketplace-mcp/package.json').version")"
+          mv "./attocash-atto-marketplace-mcp-$MARKETPLACE_VERSION.tgz" artifacts/
+          NANO_VERSION="$(node -p "require('./atto-marketplace-nano-adapter/package.json').version")"
+          mv "./attocash-atto-marketplace-nano-adapter-$NANO_VERSION.tgz" artifacts/
       - uses: actions/upload-artifact@v4
         with:
           name: atto-release-packages
@@ -113,7 +117,7 @@ jobs:
         with:
           name: atto-release-packages
           path: artifacts
-      - name: Publish CLI, then MCP, using npm trusted publishing
+      - name: Publish CLI, then wallet MCP, using npm trusted publishing
         run: node scripts/publish-release.mjs "$RELEASE_VERSION" artifacts
         env:
           NODE_AUTH_TOKEN: ''

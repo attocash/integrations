@@ -19,14 +19,15 @@ import type { WalletWork } from '../wallet/work.js';
 import { SpendLedger, type ConsolidationStep, type ExternalPaymentRecord, type ExternalPaymentSecrets, type SendRecord } from './ledger.js';
 import { planPayment, type PoolAccount } from './pool.js';
 import { reconcileBlock, reconcileSend } from './reconcile.js';
-import { MarketplaceTopUpClient, type MarketplaceConnection, type MarketplaceTopUpStatus, type TopUpChallenge } from '../marketplace/topups.js';
-import { parseAttoExactRequirement, paymentDeadline, paymentPayload, type AttoExactRequirement } from './atto-x402.js';
+import { MarketplaceTopUpClient, validateMarketplaceApiUrl, type MarketplaceConnection, type MarketplaceTopUpStatus, type TopUpChallenge } from '../marketplace/topups.js';
+import { parseAttoExactRequirement, paymentDeadline, paymentPayload, savedPaymentMatches, type AttoPaymentNetwork, type AttoExactRequirement } from './atto-x402.js';
 
 interface PaymentWallet {
   settings(): WalletSettings;
   addresses(): WalletAddress[];
   seed(): Promise<AttoSeed>;
   requireWrite(): void;
+  requireAccountsAvailable?(indexes: number[]): void;
   mcp: boolean;
 }
 type Quote = Awaited<ReturnType<MarketData['quoteUsd']>>;
@@ -38,6 +39,63 @@ export interface MarketplaceTopUpRequest {
   index?: number;
 }
 
+export interface InternalMarketplacePaymentConfig {
+  apiUrl: string;
+  audience: string;
+}
+
+export interface MarketplacePayIntentRequest {
+  requestId: string;
+  intentId: string;
+  amountAtomic: string;
+  paymentIdentifier: string;
+  paymentRequired: string;
+  apiUrl: string;
+  audience: string;
+  resourceUrl: string;
+  expiresAt: string;
+  index?: number;
+}
+
+/** Canonical private-child DTOs; public wallet projections retain their normal presentation metadata. */
+export interface MarketplaceIntentPayment {
+  requestId: string;
+  intentId: string;
+  paymentIdentifier: string;
+  network: string;
+  amountAtomic: string;
+  payer: string;
+  hash: string;
+  paymentSignature: string;
+  paymentState: 'READY';
+  reused: boolean;
+  nativeState?: 'unknown' | 'confirmed';
+}
+
+interface MarketplaceIntentFailureIdentity {
+  requestId: string;
+  intentId: string;
+  paymentIdentifier: string;
+  network: string;
+  amountAtomic: string;
+  payer: string;
+  paymentState: 'FAILED';
+}
+export type MarketplaceIntentPaymentFailure = MarketplaceIntentFailureIdentity & (
+  { hash: string; nativeState: 'rejected'; failureReason: 'NATIVE_TRANSACTION_REJECTED' }
+  | { hash: null; nativeState: 'challenged'; failureReason: 'MARKETPLACE_CHALLENGE_EXPIRED' }
+);
+export interface MarketplaceIntentPendingSignature {
+  requestId: string;
+  intentId: string;
+  network: string;
+  amountAtomic: string;
+  paymentState: 'PENDING_SIGNATURE';
+  nativeState: 'challenged';
+}
+export type MarketplaceIntentPaymentStatus = { requestId: string; paymentState: 'NOT_FOUND' }
+  | MarketplaceIntentPayment | MarketplaceIntentPaymentFailure | MarketplaceIntentPendingSignature;
+
 const MARKETPLACE_INTENT_SWEEP_TIMEOUT_MS = 1_000;
 const MARKETPLACE_INTENT_SWEEP_CONCURRENCY = 16;
 
@@ -46,7 +104,7 @@ export class Payments {
   constructor(private readonly store: StateStore, private readonly ledger: SpendLedger,
     private readonly wallet: PaymentWallet, private readonly market: MarketData, private readonly work: WalletWork,
     private readonly retry?: SendRetry, private readonly onDestination?: (binding: DestinationBinding) => void,
-    private readonly topUps?: MarketplaceTopUpClient) {}
+    private readonly topUps?: MarketplaceTopUpClient, private readonly internalMarketplacePayment?: InternalMarketplacePaymentConfig) {}
 
   private reader() { return new NodeReader(this.wallet.settings()); }
   private indexes(record: SendRecord) { return record.plan?.indexes ?? [record.index]; }
@@ -75,6 +133,7 @@ export class Payments {
 
   private requireApproved(record: SendRecord, requireReservation = true): void {
     this.wallet.requireWrite();
+    this.wallet.requireAccountsAvailable?.(this.indexes(record));
     if (requireReservation) this.ledger.assertReservationAllowed(record.id);
     if (record.network && record.network !== this.wallet.settings().network) throw new AttoError('NETWORK_MISMATCH', 'The payment belongs to a different network.');
     const pool = this.ledger.pool();
@@ -144,6 +203,308 @@ export class Payments {
       await this.reconcileMarketplaceSend(this.ledger.get(record.id)!);
       return this.marketplaceTopUpResult(this.ledger.get(record.id)!);
     });
+  }
+
+  /** Sign an existing Marketplace x402 intent. This private-child path never creates or submits an intent. */
+  async marketplacePayIntent(request: MarketplacePayIntentRequest): Promise<MarketplaceIntentPaymentStatus> {
+    if (!this.internalMarketplacePayment || !this.wallet.mcp) {
+      throw new AttoError('INTERNAL_ONLY', 'Existing-intent payment signing is available only to the configured private Marketplace wallet child.');
+    }
+    this.wallet.requireWrite();
+    const { raw, network, requirement } = this.validateMarketplaceIntentRequest(request);
+    const candidates = [...this.ledger.pool().indexes];
+    const previous = this.ledger.get(request.requestId);
+    if (previous?.external?.kind === 'marketplace-intent' && !candidates.includes(previous.index)) candidates.push(previous.index);
+    await this.reconcileMarketplaceIntents(candidates);
+    const existing = this.ledger.get(request.requestId);
+    if (existing) {
+      this.checkMarketplaceIntentBinding(existing, request, raw, network, requirement);
+      return this.store.withAccountLocks([existing.index], () => this.prepareMarketplaceIntent(existing, requirement, true));
+    }
+    await this.store.withWalletLock(async () => {
+      this.wallet.requireWrite();
+      this.ledger.assertCanReserve(raw);
+    });
+
+    const releases = new Map<number, () => void>();
+    try {
+      const snapshot = await this.store.withWalletLock(async () => {
+        this.wallet.requireWrite();
+        if (`atto:${this.wallet.settings().network.toLowerCase()}` !== network) throw new AttoError('NETWORK_MISMATCH', 'The wallet network changed during Marketplace payment setup.');
+        const settings = this.wallet.settings();
+        const pool = this.ledger.pool();
+        if (request.index !== undefined && !pool.indexes.includes(request.index)) {
+          throw new AttoError('POOL_APPROVAL_REQUIRED', 'The selected account is outside the approved payment pool.');
+        }
+        this.ledger.assertCanReserve(raw);
+        const pending = new Set(this.ledger.pending().flatMap(record => this.indexes(record)));
+        let busy = false;
+        let reserved = false;
+        const indexes = request.index === undefined ? pool.indexes : [request.index];
+        const addresses = indexes.map(index => {
+          const address = this.wallet.addresses().find(value => value.index === index);
+          if (!address) throw new AttoError('ADDRESS_NOT_DERIVED', 'Derive or approve the selected wallet account before paying.');
+          if (pending.has(index)) { reserved = true; return undefined; }
+          const release = this.store.tryAccountLocks([index]);
+          if (!release) { busy = true; return undefined; }
+          releases.set(index, release);
+          return address;
+        }).filter((value): value is WalletAddress => value !== undefined);
+        return { settings, pool, addresses, busy, reserved };
+      });
+      const candidates: PoolAccount[] = [];
+      const reader = new NodeReader(snapshot.settings);
+      for (const address of snapshot.addresses) {
+        if (address.address === requirement.payTo) continue;
+        const account = await retryNetwork(() => reader.account(address.address, this.retry?.signal), this.retry);
+        if (!account) continue;
+        this.checkAccount(address, account, snapshot.settings);
+        candidates.push({ address, account, workReady: this.work.isReady(account) });
+      }
+      let chosen: ReturnType<typeof planPayment>;
+      try { chosen = planPayment(candidates, raw, false); }
+      catch (error) {
+        if (snapshot.busy || snapshot.reserved) throw new AttoError('POOL_BUSY', 'Eligible wallet accounts are busy or reserved by another payment.');
+        if (snapshot.addresses.length && snapshot.addresses.every(address => address.address === requirement.payTo)) {
+          throw new AttoError('SELF_SEND', 'The Marketplace deposit address cannot be a source account.');
+        }
+        throw error;
+      }
+      let raced = false;
+      const record = await this.store.withWalletLock(async () => {
+        this.wallet.requireWrite();
+        if (!isDeepStrictEqual(snapshot.settings, this.wallet.settings()) || !isDeepStrictEqual(snapshot.pool, this.ledger.pool())) {
+          throw new AttoError('POOL_CHANGED', 'Wallet settings or the approved pool changed during source selection. Retry this request.');
+        }
+        const prior = this.ledger.get(request.requestId);
+        if (prior) { raced = true; return prior; }
+        this.ledger.assertCanReserve(raw);
+        this.wallet.requireAccountsAvailable?.([chosen.source.address.index]);
+        const external: ExternalPaymentRecord = {
+          kind: 'marketplace-intent', version: 1, paymentIdentifier: request.paymentIdentifier, network,
+          intentId: request.intentId, resourceUrl: request.resourceUrl, requirementHash: requirement.fingerprint,
+          intentExpiresAt: request.expiresAt, marketplaceState: 'ISSUED', paymentState: null, nativeState: 'challenged',
+        };
+        const identity = this.store.get<WalletIdentity>('identity');
+        if (!identity?.fingerprint) throw new AttoError('WALLET_NOT_INITIALIZED', 'Initialize this wallet profile before signing a Marketplace payment.');
+        return this.ledger.reserveExternalChallenge({ id: request.requestId, index: chosen.source.address.index,
+          destination: requirement.payTo, raw, sourceAddress: chosen.source.address.address,
+          network: snapshot.settings.network, selection: request.index === undefined ? 'automatic' : 'explicit',
+          plan: { indexes: [chosen.source.address.index], steps: [] }, createdAt: Date.now(), external }, requirement.rawJson, {
+          version: 1, apiUrl: request.apiUrl, audience: request.audience, walletFingerprint: identity.fingerprint,
+        });
+      });
+      this.checkMarketplaceIntentBinding(record, request, raw, network, requirement);
+      if (raced) {
+        for (const release of releases.values()) release();
+        releases.clear();
+        return await this.store.withAccountLocks([record.index], () => this.prepareMarketplaceIntent(record, requirement, true));
+      }
+      for (const [index, release] of releases) if (index !== record.index) { release(); releases.delete(index); }
+      if (!releases.has(record.index)) throw new AttoError('POOL_BUSY', 'The selected wallet account is already in use. Retry this request.');
+      return await this.prepareMarketplaceIntent(record, requirement, false);
+    } finally {
+      for (const release of releases.values()) release();
+    }
+  }
+
+  /** Private Marketplace child recovery returns the original saved signature and never signs a replacement. */
+  async marketplacePayIntentStatus(requestId: string): Promise<MarketplaceIntentPaymentStatus> {
+    if (!this.internalMarketplacePayment || !this.wallet.mcp) {
+      throw new AttoError('INTERNAL_ONLY', 'Existing-intent payment recovery is available only to the configured private Marketplace wallet child.');
+    }
+    const record = this.ledger.get(requestId);
+    if (!record) return { requestId, paymentState: 'NOT_FOUND' };
+    if (record.external?.kind !== 'marketplace-intent') throw new AttoError('REQUEST_CONFLICT', 'This request ID does not belong to an existing Marketplace intent.');
+    const secrets = this.ledger.externalSecretsFor(requestId);
+    this.checkMarketplaceIntentOwner(record, secrets);
+    return this.store.withAccountLocks([record.index], async () => {
+      await this.expireUnsignedMarketplaceIntent(requestId);
+      await this.reconcileMarketplaceSend(this.ledger.get(requestId)!);
+      const current = this.ledger.get(requestId)!;
+      const requirement = this.savedMarketplaceIntentRequirement(current, secrets!);
+      if (current.status === 'published' || current.status === 'failed' || current.external?.nativeState === 'rejected') {
+        return this.marketplaceIntentResult(current, requirement, true);
+      }
+      await this.store.withWalletLock(async () => this.requireApproved(current));
+      return this.marketplaceIntentResult(current, requirement, true);
+    });
+  }
+
+  private validateMarketplaceIntentRequest(request: MarketplacePayIntentRequest) {
+    const config = this.internalMarketplacePayment!;
+    const settings = this.wallet.settings();
+    const network: AttoPaymentNetwork = `atto:${settings.network.toLowerCase() as 'live' | 'beta' | 'dev' | 'local'}`;
+    const raw = amountRaw(request.amountAtomic, 'RAW');
+    if (raw === '0' || raw !== request.amountAtomic || request.paymentIdentifier !== request.requestId
+      || request.apiUrl !== config.apiUrl || request.audience !== config.audience
+      || request.audience.trim() !== request.audience || /[\r\n\0]/.test(request.audience)) {
+      throw new AttoError('MARKETPLACE_CONFIGURATION', 'The existing intent must match the locally configured Marketplace origin, audience, payment identifier, and positive atomic amount.');
+    }
+    let apiUrl: string;
+    try { apiUrl = validateMarketplaceApiUrl(config.apiUrl, settings.network); }
+    catch { throw new AttoError('MARKETPLACE_CONFIGURATION', 'The configured Marketplace payment origin is invalid for this wallet network.'); }
+    if (apiUrl !== request.apiUrl || request.resourceUrl !== `${apiUrl}/${request.intentId}`) {
+      throw new AttoError('MARKETPLACE_RESOURCE_MISMATCH', 'The exact resource URL must be the existing intent under the locally configured Marketplace origin.');
+    }
+    const expiresAtMs = Date.parse(request.expiresAt);
+    if (!Number.isSafeInteger(expiresAtMs) || (expiresAtMs <= Date.now()
+      && this.ledger.get(request.requestId)?.external?.intentExpiresAt !== request.expiresAt)) {
+      throw new AttoError('MARKETPLACE_CHALLENGE_EXPIRED', 'The existing Marketplace intent has an invalid or expired deadline.');
+    }
+    const requirement = parseAttoExactRequirement({ header: request.paymentRequired, apiUrl, intentId: request.intentId, network, amountRaw: raw });
+    if (requirement.resourceUrl !== request.resourceUrl || requirement.amountRaw !== raw || requirement.network !== network) {
+      throw new AttoError('MARKETPLACE_RESOURCE_MISMATCH', 'The x402 requirement does not match this exact Marketplace intent.');
+    }
+    return { raw, network, requirement };
+  }
+
+  private checkMarketplaceIntentBinding(record: SendRecord, request: MarketplacePayIntentRequest, raw: string,
+    network: AttoPaymentNetwork, requirement: AttoExactRequirement): void {
+    const external = record.external;
+    if (!external || external.kind !== 'marketplace-intent' || record.id !== request.requestId || record.raw !== raw
+      || external.paymentIdentifier !== request.paymentIdentifier || external.intentId !== request.intentId
+      || external.network !== network || external.resourceUrl !== request.resourceUrl
+      || external.intentExpiresAt !== request.expiresAt || external.requirementHash !== requirement.fingerprint
+      || (request.index !== undefined && request.index !== record.index)) {
+      throw new AttoError('REQUEST_CONFLICT', 'This request ID is already bound to a different Marketplace intent, challenge, amount, expiry, network, or source.');
+    }
+    const secrets = this.ledger.externalSecretsFor(record.id);
+    this.checkMarketplaceIntentOwner(record, secrets);
+    if (!secrets || secrets.requirementJson !== requirement.rawJson) {
+      throw new AttoError('REQUEST_CONFLICT', 'This request ID received different exact x402 challenge bytes.');
+    }
+  }
+
+  private checkMarketplaceIntentOwner(record: SendRecord, secrets?: ExternalPaymentSecrets): asserts secrets is ExternalPaymentSecrets {
+    const external = record.external;
+    const config = this.internalMarketplacePayment!;
+    if (!secrets || secrets.paymentKind !== 'marketplace-intent' || !external || external.kind !== 'marketplace-intent'
+      || secrets.apiUrl !== config.apiUrl || secrets.audience !== config.audience
+      || external.network !== `atto:${this.wallet.settings().network.toLowerCase()}` || record.network !== this.wallet.settings().network) {
+      throw new AttoError('MARKETPLACE_RECONNECT_REQUIRED', 'This payment belongs to a different configured Marketplace origin, audience, wallet, or network.');
+    }
+    const identity = this.store.get<WalletIdentity>('identity');
+    if (!identity || secrets.walletFingerprint !== identity.fingerprint) {
+      throw new AttoError('WALLET_MISMATCH', 'The saved Marketplace payment belongs to a different wallet profile.');
+    }
+  }
+
+  private savedMarketplaceIntentRequirement(record: SendRecord, secrets: ExternalPaymentSecrets): AttoExactRequirement {
+    const external = record.external;
+    if (!external || external.kind !== 'marketplace-intent') throw new AttoError('REQUEST_CONFLICT', 'This request is not an existing Marketplace intent.');
+    const requirement = parseAttoExactRequirement({ header: Buffer.from(secrets.requirementJson, 'utf8').toString('base64'),
+      apiUrl: secrets.apiUrl, intentId: external.intentId, network: external.network, amountRaw: record.raw });
+    if (requirement.fingerprint !== external.requirementHash || requirement.resourceUrl !== external.resourceUrl) {
+      throw new AttoError('INVALID_STATE', 'The saved exact Marketplace challenge does not match the wallet journal.');
+    }
+    return requirement;
+  }
+
+  private async prepareMarketplaceIntent(record: SendRecord, requirement: AttoExactRequirement, reused: boolean): Promise<MarketplaceIntentPaymentStatus> {
+    // The account lock is held: refresh after a concurrent prepare and expire only an unsigned reservation.
+    record = await this.expireUnsignedMarketplaceIntent(record.id);
+    const secrets = this.ledger.externalSecretsFor(record.id);
+    this.checkMarketplaceIntentOwner(record, secrets);
+    const currentRequirement = this.savedMarketplaceIntentRequirement(record, secrets);
+    if (currentRequirement.rawJson !== requirement.rawJson || currentRequirement.fingerprint !== requirement.fingerprint) {
+      throw new AttoError('REQUEST_CONFLICT', 'This request ID received different exact x402 challenge bytes.');
+    }
+    if (record.status === 'published' || record.status === 'failed' || record.external?.nativeState === 'rejected') {
+      return this.marketplaceIntentResult(record, requirement, true);
+    }
+    await this.store.withWalletLock(async () => this.requireApproved(record));
+    if (secrets.paymentSignature && secrets.transactionJson && record.hash) return this.marketplaceIntentResult(record, requirement, true);
+    if (record.status !== 'reserved' || record.hash) {
+      throw new AttoError('INVALID_STATE', 'The original signed Marketplace payment is incomplete; refusing to sign a replacement.');
+    }
+    const expiresAtMs = Date.parse(record.external!.intentExpiresAt);
+    if (!Number.isSafeInteger(expiresAtMs) || expiresAtMs <= Date.now()) {
+      throw new AttoError('MARKETPLACE_CHALLENGE_EXPIRED', 'The existing Marketplace intent expired before its payment was signed.');
+    }
+    const seed = await this.wallet.seed();
+    const settings = this.wallet.settings();
+    let execution: Awaited<ReturnType<typeof signingWallet>> | undefined;
+    try {
+      const signer = await derivedSigner(seed, record.index);
+      if (signer.address.value !== record.sourceAddress) throw new AttoError('WALLET_MISMATCH', 'The saved Marketplace payment source does not match its wallet key.');
+      execution = await signingWallet(seed, record.index, settings, async block => {
+        await this.store.withWalletLock(async () => {
+          const current = this.ledger.get(record.id)!;
+          this.requireApproved(current);
+          if (!(block instanceof AttoSendBlock) || block.address.value !== record.sourceAddress
+            || block.receiverAddress.value !== requirement.payTo || block.amount.toString() !== record.raw
+            || block.network.name !== settings.network) {
+            throw new AttoError('TRANSACTION_MISMATCH', 'The signed payment differs from the exact Marketplace requirement.');
+          }
+        });
+      }, this.work.worker(), this.retry);
+      const transaction = await execution.wallet.prepareSendByIndex(toAttoIndex(record.index), parseAddress(requirement.payTo),
+        AttoAmount.from(AttoUnit.RAW, record.raw), null);
+      const payment = paymentPayload(requirement, record.external!.paymentIdentifier, transaction);
+      const deadline = paymentDeadline(transaction, requirement.maxTimeoutSeconds, record.external!.intentExpiresAt);
+      await this.store.withWalletLock(async () => {
+        const current = this.ledger.get(record.id)!;
+        this.requireApproved(current);
+        const currentSecrets = this.ledger.externalSecretsFor(record.id);
+        if (!current.external || current.external.kind !== 'marketplace-intent' || current.hash || current.status !== 'reserved'
+          || current.external.requirementHash !== requirement.fingerprint || !currentSecrets
+          || currentSecrets.requirementJson !== requirement.rawJson || BigInt(Date.now()) >= deadline) {
+          throw new AttoError('MARKETPLACE_CHALLENGE_EXPIRED', 'The exact Marketplace challenge or payment deadline changed before it could be saved.');
+        }
+        this.ledger.externalAttempt(record.id, {
+          hash: transaction.hash.toString(), blockJson: transaction.block.toJson(), transactionJson: transaction.toJson(),
+          paymentJson: payment.json, paymentSignature: payment.header, attemptedAt: Date.now(),
+        });
+      });
+      return this.marketplaceIntentResult(this.ledger.get(record.id)!, requirement, reused);
+    } finally {
+      execution?.wallet.close();
+      seed.value.fill(0);
+    }
+  }
+
+  private marketplaceIntentResult(record: SendRecord, requirement: AttoExactRequirement, reused: boolean): MarketplaceIntentPaymentStatus {
+    const external = record.external;
+    const secrets = this.ledger.externalSecretsFor(record.id);
+    this.checkMarketplaceIntentOwner(record, secrets);
+    if (!external || external.kind !== 'marketplace-intent' || !secrets) throw new AttoError('REQUEST_CONFLICT', 'This request is not an existing Marketplace intent.');
+    const identity = { requestId: record.id, intentId: external.intentId, paymentIdentifier: external.paymentIdentifier,
+      network: external.network, amountAtomic: record.raw, payer: record.sourceAddress! };
+    if (record.status === 'failed' || external.nativeState === 'rejected') {
+      if (external.nativeState === 'rejected' && record.hash) {
+        return { ...identity, hash: record.hash, paymentState: 'FAILED', nativeState: 'rejected',
+          failureReason: 'NATIVE_TRANSACTION_REJECTED' };
+      }
+      if (external.marketplaceState === 'EXPIRED' && external.paymentState === 'FAILED'
+        && external.nativeState === 'challenged' && !record.hash && !record.blockJson
+        && !secrets.transactionJson && !secrets.paymentJson && !secrets.paymentSignature) {
+        return { ...identity, hash: null, paymentState: 'FAILED', nativeState: 'challenged',
+          failureReason: 'MARKETPLACE_CHALLENGE_EXPIRED' };
+      }
+      throw new AttoError('INVALID_STATE', 'The terminal Marketplace payment has no conclusive saved outcome.');
+    }
+    if (secrets.paymentSignature || secrets.transactionJson || secrets.paymentJson || record.hash) {
+      if (!secrets.paymentSignature || !secrets.transactionJson || !secrets.paymentJson || !record.hash) {
+        throw new AttoError('INVALID_STATE', 'The exact saved Marketplace signature is incomplete; refusing to return or replace it.');
+      }
+      const transaction = AttoTransaction.fromJson(secrets.transactionJson);
+      if (!(transaction.block instanceof AttoSendBlock) || transaction.hash.toString() !== record.hash
+        || transaction.block.address.value !== record.sourceAddress || transaction.block.receiverAddress.value !== requirement.payTo || transaction.block.amount.toString() !== record.raw
+        || transaction.block.network.name !== record.network) {
+        throw new AttoError('INVALID_STATE', 'The saved Marketplace signature differs from its approved wallet journal binding.');
+      }
+      if (!savedPaymentMatches(requirement, external.paymentIdentifier, transaction, secrets.paymentJson, secrets.paymentSignature)) {
+        throw new AttoError('INVALID_STATE', 'The saved Marketplace signature does not match the exact challenge and payment journal.');
+      }
+      if (external.nativeState !== 'unknown' && external.nativeState !== 'confirmed') {
+        throw new AttoError('INVALID_STATE', 'A saved Marketplace signature must retain its native attempt state.');
+      }
+      return { ...identity, hash: record.hash, paymentSignature: secrets.paymentSignature, paymentState: 'READY',
+        nativeState: external.nativeState, reused };
+    }
+    return { requestId: record.id, intentId: external.intentId, network: external.network, amountAtomic: record.raw,
+      paymentState: 'PENDING_SIGNATURE', nativeState: 'challenged' };
   }
 
   private topUpNetwork(settings: WalletSettings): 'atto:live' | 'atto:local' {
@@ -411,10 +772,18 @@ export class Payments {
     if (outcome.status === 'published') this.work.prepareConfirmed(outcome.transaction.block);
   }
 
+  /** Caller holds this account's lock; the wallet lock makes the no-candidate check and release atomic. */
+  private async expireUnsignedMarketplaceIntent(requestId: string): Promise<SendRecord> {
+    return this.store.withWalletLock(async () => {
+      this.ledger.expireExternalChallenge(requestId, Date.now());
+      return this.ledger.get(requestId)!;
+    });
+  }
+
   private async reconcileMarketplaceIntents(candidateIndexes = this.ledger.pool().indexes): Promise<void> {
     const candidates = new Set(candidateIndexes);
     const records = this.ledger.pending().filter(record => record.external?.kind === 'marketplace-intent'
-      && record.hash !== undefined && candidates.has(record.index));
+      && (record.hash === undefined || candidates.has(record.index)));
     let cursor = 0;
     const worker = async () => {
       while (cursor < records.length) {
@@ -422,8 +791,8 @@ export class Payments {
         const release = this.store.tryAccountLocks([record.index]);
         if (!release) continue;
         try {
-          const current = this.ledger.get(record.id);
-          if (current?.external?.kind === 'marketplace-intent') {
+          const current = await this.expireUnsignedMarketplaceIntent(record.id);
+          if (current.external?.kind === 'marketplace-intent') {
             await this.reconcileMarketplaceSend(current, MARKETPLACE_INTENT_SWEEP_TIMEOUT_MS);
           }
         } finally { release(); }
@@ -586,6 +955,7 @@ export class Payments {
           if (!isDeepStrictEqual(snapshot.settings, this.wallet.settings()) || !isDeepStrictEqual(snapshot.pool, this.ledger.pool())) {
             throw new AttoError('POOL_CHANGED', 'Wallet configuration changed during account selection. Retry this request.');
           }
+          this.wallet.requireAccountsAvailable?.(chosen.plan.indexes);
           return this.ledger.reserve({ id: request.requestId, index: chosen.source.address.index, destination, raw,
             sourceAddress: chosen.source.address.address, network: snapshot.settings.network,
             selection: request.index === undefined ? 'automatic' : 'explicit', plan: chosen.plan,

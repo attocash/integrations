@@ -42,13 +42,22 @@ async function pack() {
   const rootManifest = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
   const cliDirectory = join(root, 'atto-cli');
   const mcpDirectory = join(root, 'atto-mcp');
+  const marketplaceDirectory = join(root, 'atto-marketplace-mcp');
+  const nanoDirectory = join(root, 'atto-marketplace-nano-adapter');
   const cli = JSON.parse(await readFile(join(cliDirectory, 'package.json'), 'utf8'));
   const mcp = JSON.parse(await readFile(join(mcpDirectory, 'package.json'), 'utf8'));
+  const marketplace = JSON.parse(await readFile(join(marketplaceDirectory, 'package.json'), 'utf8'));
+  const nano = JSON.parse(await readFile(join(nanoDirectory, 'package.json'), 'utf8'));
   if (cli.name !== '@attocash/cli' || mcp.name !== '@attocash/mcp' || mcp.dependencies?.[cli.name] !== cli.version) {
     throw new Error('The MCP package must depend on the exact CLI version being packaged.');
   }
+  if (marketplace.name !== '@attocash/atto-marketplace-mcp' || marketplace.dependencies?.[cli.name] !== cli.version
+      || marketplace.dependencies?.[nano.name] !== nano.version || marketplace.dependencies?.['@attocash/commons-core'] !== '8.0.2') {
+    throw new Error('The Marketplace MCP artifact must retain Commons 8.0.2 and depend on the exact CLI and Nano wallet versions being packaged.');
+  }
+  if (nano.dependencies?.[cli.name] !== cli.version) throw new Error('The Nano adapter must depend on the exact CLI recovery-source library being packaged.');
   if (cli.bundleDependencies || cli.bundledDependencies) throw new Error('Keep bundled dependencies out of the source workspace manifest; packaging adds them only to the staged CLI artifact.');
-  for (const manifest of [cli, mcp]) {
+  for (const manifest of [cli, mcp, nano, marketplace]) {
     if (Object.values(manifest.dependencies ?? {}).some(version => /^(?:workspace:|file:|link:)/.test(version))) {
       throw new Error('Published dependencies must use registry versions rather than workspace or file paths.');
     }
@@ -85,7 +94,9 @@ async function pack() {
   try {
     const cliStage = join(stage, 'cli');
     const mcpStage = join(stage, 'mcp');
-    for (const [source, target] of [[cliDirectory, cliStage], [mcpDirectory, mcpStage]]) {
+    const marketplaceStage = join(stage, 'atto-marketplace-mcp');
+    const nanoStage = join(stage, 'atto-marketplace-nano-adapter');
+    for (const [source, target] of [[cliDirectory, cliStage], [mcpDirectory, mcpStage], [marketplaceDirectory, marketplaceStage], [nanoDirectory, nanoStage]]) {
       await mkdir(target, { recursive: true });
       for (const file of ['dist', 'README.md', 'LICENSE']) await cp(join(source, file), join(target, file), { recursive: true });
     }
@@ -97,7 +108,7 @@ async function pack() {
       await cp(directory, target, { recursive: true, dereference: true, filter: source => source === directory || !source.slice(directory.length + 1).split(/[\\/]/).includes('node_modules') });
     }
     await mkdir(destination, { recursive: true });
-    for (const [manifest, directory] of [[cli, cliStage], [mcp, mcpStage]]) {
+    for (const [manifest, directory] of [[cli, cliStage], [mcp, mcpStage], [marketplace, marketplaceStage], [nano, nanoStage]]) {
       const { scripts, devDependencies, overrides, bundleDependencies, bundledDependencies, ...published } = manifest;
       if (manifest === cli) {
         published.bundleDependencies = bundled;

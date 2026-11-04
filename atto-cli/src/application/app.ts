@@ -4,7 +4,7 @@ import { AddressLabels } from '../labels/presentation.js';
 import type { DestinationBinding } from '../spending/destination.js';
 import { createHash } from 'node:crypto';
 import {
-  AttoMnemonic, AttoPublicKey, AttoReceivable, AttoSignature, AttoTransaction, toAttoIndex,
+  AttoMnemonic, AttoOpenBlock, AttoPublicKey, AttoReceivable, AttoReceiveBlock, AttoSignature, AttoTransaction, toAttoIndex,
 } from '@attocash/commons-core';
 import { amountOutput, amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
@@ -16,7 +16,7 @@ import { StateStore } from '../storage/state.js';
 import { resolveWalletProfile } from '../storage/profiles.js';
 import { SpendLedger, type McpAccess } from '../spending/ledger.js';
 import { approvalInstructions } from '../spending/approval.js';
-import { Payments } from '../spending/payments.js';
+import { Payments, type InternalMarketplacePaymentConfig } from '../spending/payments.js';
 import { WalletWork, type WorkExecution } from '../wallet/work.js';
 import { BackgroundReceiver } from '../wallet/background-receive.js';
 import { WatchManager } from '../watches/manager.js';
@@ -28,9 +28,10 @@ import { operationFor, parseOperation } from './operations.js';
 import { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import { runDoctor } from '../doctor/doctor.js';
+import { validateMarketplaceUserProofApproval, createMarketplaceProofApprovalResponse } from '../marketplace/proof-approval.js';
 import { MarketplaceTopUpClient } from '../marketplace/topups.js';
 
-interface ReceiveRecord { hash: string; index: number; blockHash: string; result?: unknown }
+interface ReceiveRecord { hash: string; index: number; blockHash: string; sourceAddress?: string; network?: string; result?: unknown }
 const RESET_KEY = 'wallet.reset';
 
 function signedMessageBytes(args: Record<string, unknown>): Int8Array {
@@ -64,14 +65,20 @@ export class AttoApplication {
   private recoveryReads = 0;
   private readonly calls = new Set<Promise<unknown>>();
   private readonly mcp: boolean;
+  private readonly internalMarketplacePayment?: InternalMarketplacePaymentConfig;
+  private readonly internalMarketplaceAuthorizeWrite?: (status: unknown) => void;
+  private readonly internalMarketplaceReceiveSafety: boolean;
   private readonly doctorAbort = new AbortController();
 
-  constructor(options: { directory?: string; secrets?: SecretStore; market?: MarketData; access?: 'mcp'; onReceiveProgress?: (event: ReceiveProgress) => void; sendRetry?: SendRetry; globalDirectory?: GlobalDirectory; onDestination?: (binding: DestinationBinding) => void; workExecution?: WorkExecution; receivingAllowed?: () => boolean } = {}) {
+  constructor(options: { directory?: string; secrets?: SecretStore; market?: MarketData; access?: 'mcp'; internalMarketplaceReceiveSafety?: boolean; internalMarketplaceAuthorizeWrite?: (status: unknown) => void; internalMarketplacePayment?: InternalMarketplacePaymentConfig; onReceiveProgress?: (event: ReceiveProgress) => void; sendRetry?: SendRetry; globalDirectory?: GlobalDirectory; onDestination?: (binding: DestinationBinding) => void; workExecution?: WorkExecution; receivingAllowed?: () => boolean } = {}) {
     const profile = resolveWalletProfile(options.directory);
     this.store = new StateStore(profile.directory);
     try {
       this.secrets = options.secrets ?? new OsSecretStore(profile.credentialAccount, profile.credentialService);
       this.mcp = options.access === 'mcp';
+      this.internalMarketplacePayment = options.internalMarketplacePayment;
+      this.internalMarketplaceAuthorizeWrite = options.internalMarketplaceAuthorizeWrite;
+      this.internalMarketplaceReceiveSafety = options.internalMarketplaceReceiveSafety === true;
       this.ledger = new SpendLedger(this.store);
       this.personal = new PersonalLabels(this.store);
       this.labels = new AddressLabels(this.personal, options.globalDirectory ?? new GlobalDirectory(this.store.directory));
@@ -88,7 +95,8 @@ export class AttoApplication {
       this.payments = new Payments(this.store, this.ledger, {
         settings: () => this.settings(), addresses: () => this.addresses(), seed: () => this.seed(),
         requireWrite: () => this.requireMcpWrite(), mcp: this.mcp,
-      }, this.market, this.work, options.sendRetry, options.onDestination, this.topUps);
+        ...(this.internalMarketplaceReceiveSafety ? { requireAccountsAvailable: (indexes: number[]) => this.requireReceivesResolved(indexes) } : {}),
+      }, this.market, this.work, options.sendRetry, options.onDestination, this.topUps, this.internalMarketplacePayment);
       this.auto = new AutoReceiver(() => ({
         settings: !this.receivingAllowed() || (this.mcp && this.ledger.mcpAccess() !== 'spend') ? { ...this.settings(), autoReceive: false } : this.settings(),
         addresses: this.addresses(),
@@ -129,6 +137,10 @@ export class AttoApplication {
     this.requireResetFinished();
     if (this.mcp && this.ledger.mcpAccess() !== 'spend') {
       throw new AttoError('MCP_READ_ONLY', 'MCP has read-only access to this wallet. Propose limits and obtain local terminal approval to enable transactions.');
+    }
+    if (this.internalMarketplaceAuthorizeWrite) {
+      this.internalMarketplaceAuthorizeWrite({ initialized: Boolean(this.identity()), identity: this.identity() ?? null,
+        settings: this.settings(), addresses: this.addresses(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool() });
     }
   }
 
@@ -362,6 +374,31 @@ export class AttoApplication {
     return found;
   }
 
+  private requireReceivesResolved(indexes: number[], allowedHash?: string): void {
+    if (!this.internalMarketplaceReceiveSafety) return;
+    const prefix = `receive.${this.settings().network}.`;
+    for (const { key, value } of this.store.entries<ReceiveRecord>(prefix)) {
+      if (!value || !Number.isSafeInteger(value.index) || value.index < 0 || value.index > 0x7fff_ffff
+        || !/^[A-F0-9]{64}$/.test(value.hash) || !/^[A-F0-9]{64}$/.test(value.blockHash) || key !== `${prefix}${value.hash}`) {
+        throw new AttoError('INVALID_STATE', 'The saved receive candidate is invalid. Preserve and restore its original wallet state.');
+      }
+      if (indexes.includes(value.index) && !value.result && value.hash !== allowedHash) {
+        throw new AttoError('SOURCE_FENCED', 'Recover the original pending RECEIVE before creating another native operation.');
+      }
+    }
+  }
+
+  private privateReceiveObservation(record: ReceiveRecord, index: number, hash: string) {
+    const network = this.settings().network;
+    const address = this.address(index).address;
+    const hasPrivateBinding = record.sourceAddress !== undefined || record.network !== undefined;
+    if (record.hash !== hash || record.index !== index || !/^[A-F0-9]{64}$/.test(record.blockHash)
+      || hasPrivateBinding && (record.sourceAddress !== address || record.network !== network)) {
+      throw new AttoError('INVALID_STATE', 'The saved receive candidate does not match this wallet account and network.');
+    }
+    return { status: 'unknown', hash: record.blockHash, index, sendHash: hash, sourceAddress: address, network, amountAtomic: null };
+  }
+
   private async receive(request: ReceiveRequest, automatic = false) {
     if (automatic && !this.receivingAllowed()) throw new AttoError('AUTO_RECEIVE_DISABLED', 'Automatic receiving is stopping.');
     const index = request.index ?? 0;
@@ -369,6 +406,7 @@ export class AttoApplication {
       await this.store.withWalletLock(async () => {
         this.requireMcpWrite();
         this.payments.requireAvailable(index);
+        this.requireReceivesResolved([index], request.hash.toUpperCase());
       });
       if (automatic && !this.settings().autoReceive) throw new AttoError('AUTO_RECEIVE_DISABLED', 'Automatic receiving is disabled.');
       const address = this.address(index, automatic);
@@ -376,6 +414,29 @@ export class AttoApplication {
       const key = `receive.${this.settings().network}.${hash}`;
       const prior = this.store.get<ReceiveRecord>(key);
       if (prior && prior.index !== index) throw new AttoError('WRONG_RECEIVER', 'This receivable belongs to a different address.');
+      if (prior && this.internalMarketplaceReceiveSafety) {
+        const observation = this.privateReceiveObservation(prior, index, hash);
+        let transaction: AttoTransaction | null;
+        if (prior.result) {
+          try { transaction = AttoTransaction.fromJson(JSON.stringify((prior.result as { transaction?: unknown }).transaction)); }
+          catch { throw new AttoError('TRANSACTION_MISMATCH', 'The saved transaction does not match the original receive candidate.'); }
+        } else {
+          try { transaction = await this.reader().transaction(prior.blockHash); }
+          catch { return observation; }
+        }
+        if (!transaction) return observation;
+        const block = transaction.block;
+        if (transaction.hash.toString() !== prior.blockHash || !await transaction.isValid()
+          || !(block instanceof AttoOpenBlock || block instanceof AttoReceiveBlock)
+          || block.address.value !== address.address || block.network.name !== this.settings().network || block.sendHash.toString() !== hash) {
+          throw new AttoError('TRANSACTION_MISMATCH', 'The observed transaction does not match the original receive candidate.');
+        }
+        if (prior.result) return prior.result;
+        const result = { ...this.result(transaction, 'received'), index };
+        this.store.set(key, { ...prior, result });
+        this.work.prepareConfirmed(block);
+        return result;
+      }
       if (prior?.result) return prior.result;
       if (prior) {
         const transaction = await this.reader().transaction(prior.blockHash);
@@ -402,15 +463,24 @@ export class AttoApplication {
             this.requireMcpWrite();
             this.payments.requireAvailable(index);
             if (automatic && !this.settings().autoReceive) throw new AttoError('AUTO_RECEIVE_DISABLED', 'Automatic receiving is disabled.');
-            this.store.set(key, { hash, index, blockHash: block.hash.toString() } satisfies ReceiveRecord);
+            this.store.set(key, { hash, index, blockHash: block.hash.toString(),
+              ...(this.internalMarketplaceReceiveSafety ? { sourceAddress: address.address, network: this.settings().network } : {}) } satisfies ReceiveRecord);
           });
         }, this.work.worker());
         wallet = execution.wallet;
         const transaction = await wallet.receive(receivable, parseAddress(request.representative ?? this.settings().representative), null);
         const result = { ...this.result(transaction, 'received'), index, amount: amountOutput(receivable.amount.toString()) };
-        this.store.set(key, { hash, index, blockHash: transaction.hash.toString(), result } satisfies ReceiveRecord);
+        this.store.set(key, { hash, index, blockHash: transaction.hash.toString(), result,
+          ...(this.internalMarketplaceReceiveSafety ? { sourceAddress: address.address, network: this.settings().network } : {}) } satisfies ReceiveRecord);
         this.work.prepareConfirmed(transaction.block);
         return result;
+      } catch (error) {
+        if (this.internalMarketplaceReceiveSafety) {
+          this.requireMcpWrite();
+          const candidate = this.store.get<ReceiveRecord>(key);
+          if (candidate && !candidate.result) return this.privateReceiveObservation(candidate, index, hash);
+        }
+        throw error;
       } finally { wallet?.close(); seed.value.fill(0); }
     };
     if (!automatic) return this.store.withAccountLocks([index], operation);
@@ -574,6 +644,14 @@ export class AttoApplication {
       } as SendRequest);
       case 'marketplace_topup': return this.payments.marketplaceTopUp(args as { amount: string; unit: 'ATTO' | 'RAW'; requestId: string; index?: number });
       case 'marketplace_topup_status': return this.payments.marketplaceTopUpStatus(args.requestId as string);
+      case 'marketplace_pay_intent': {
+        if (!this.internalMarketplacePayment) throw new AttoError('INTERNAL_ONLY', 'This operation is available only to the configured private Marketplace wallet child.');
+        return this.payments.marketplacePayIntent(args as unknown as import('../spending/payments.js').MarketplacePayIntentRequest);
+      }
+      case 'marketplace_pay_intent_status': {
+        if (!this.internalMarketplacePayment) throw new AttoError('INTERNAL_ONLY', 'This operation is available only to the configured private Marketplace wallet child.');
+        return this.payments.marketplacePayIntentStatus(args.requestId as string);
+      }
       case 'receive': return this.receive(args as unknown as ReceiveRequest);
       case 'receive_all': return this.receiveAll(args);
       case 'representative_change': return this.changeRepresentative(args.index as number, args.representative as string);
@@ -624,7 +702,8 @@ export class AttoApplication {
     if (!operationFor(name)!.readOnly && name !== 'limits_propose' && !['labels_set', 'labels_remove'].includes(name) && !name.startsWith('watch_')) this.requireMcpWrite();
     const call = (async () => {
       const result = await this.invoke(name, args);
-      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify'].includes(name)) return result;
+      if (this.internalMarketplaceReceiveSafety && name === 'receive' && (result as { status?: unknown } | null)?.status === 'unknown') return result;
+      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify', 'marketplace_pay_intent', 'marketplace_pay_intent_status'].includes(name)) return result;
       if (this.settings().network === 'LIVE' && ['address_list', 'account_get', 'balances_get', 'transaction_get', 'entry_get', 'representative_weight', 'history_list', 'receivables_list'].includes(name)) await this.labels.global.refresh();
       return this.labels.decorate(result, this.settings().network);
     })();
@@ -649,6 +728,28 @@ export class AttoApplication {
   async approveMarketplaceProof(input: unknown) {
     this.requireReady();
     return this.store.withWalletLock(() => this.topUps.signProofApproval(input));
+  }
+
+  /** Private Marketplace terminal signing: no standalone connection is read or changed. */
+  async approveMarketplaceOwnedProof(input: unknown) {
+    this.requireReady();
+    if (this.mcp || !process.stdin.isTTY || !process.stderr.isTTY) {
+      throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Approve Marketplace controller actions in the local terminal.');
+    }
+    return this.store.withWalletLock(async () => {
+      const request = validateMarketplaceUserProofApproval(input, { network: 'ATTO', nativeNetwork: 'live' });
+      if (this.addresses().find(address => address.index === request.controller.index)?.address !== request.controller.address) {
+        throw new AttoError('WALLET_MISMATCH', 'The Marketplace controller does not match this selected wallet and index.');
+      }
+      const seed = await this.seed();
+      try {
+        const signer = await derivedSigner(seed, request.controller.index);
+        if (signer.address.value !== request.controller.address) throw new AttoError('WALLET_MISMATCH', 'The selected controller key changed.');
+        validateMarketplaceUserProofApproval(input, { network: 'ATTO', nativeNetwork: 'live' });
+        const signature = (await signer.signMessage(new Int8Array(Buffer.from(request.challenge.message, 'utf8')))).toString();
+        return createMarketplaceProofApprovalResponse(request as import('../marketplace/proof-approval.js').MarketplaceProofApprovalRequest, signature);
+      } finally { seed.value.fill(0); }
+    });
   }
 
   // The receiver observes current MCP access on every snapshot, and receive()

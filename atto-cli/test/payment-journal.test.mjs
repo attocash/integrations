@@ -363,20 +363,22 @@ test('ordinary payment mutations preserve historical records without upgrading t
 });
 
 test('historical payment accounting does not resume old Marketplace authorizations', async t => {
-  // Given old payment records and the current public Marketplace topup entrypoint.
+  // Given old payment records and current private Marketplace wallet entrypoints.
   const { store, ledger } = fixture(t);
   store.set('spending.records', [historicalPayment('market-topup', 'historical-topup', '20'),
     historicalPayment('market-intent', 'historical-intent', '30', 'unknown')]);
   const { Payments } = await import(pathToFileURL(join(packageDirectory, 'dist/spending/payments.js')).href);
   const payments = new Payments(store, ledger, { mcp: true }, undefined, undefined,
-    undefined, undefined, undefined);
+    undefined, undefined, undefined, { apiUrl: 'http://localhost/v1/agent/topups', audience: 'marketplace' });
   const before = JSON.stringify(store.get('spending.records'));
 
-  // When the current recovery operation receives an old ID.
+  // When current recovery operations receive the old IDs.
   const topup = payments.marketplaceTopUpStatus('historical-topup');
+  const intent = payments.marketplacePayIntentStatus('historical-intent');
 
-  // Then the current entrypoint rejects the old authorization, and pending accounts remain fenced.
+  // Then neither current entrypoint accepts the old authorization, and pending accounts remain fenced.
   await assert.rejects(topup, { code: 'REQUEST_CONFLICT' });
+  await assert.rejects(intent, { code: 'REQUEST_CONFLICT' });
   assert.throws(() => payments.requireAvailable(1), { code: 'ACCOUNT_RESERVED' });
   assert.equal(JSON.stringify(store.get('spending.records')), before);
 });

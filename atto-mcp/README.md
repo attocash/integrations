@@ -198,6 +198,15 @@ only challenges you trust. `message_verify` checks the same exact bytes with
 public data and does not read wallet credentials.
 
 The standard Atto MCP does not expose a tool that returns signed payment headers.
+Marketplace may launch a private Atto wallet child over stdio to sign an already-issued
+intent. The child binds the request to its configured Marketplace API URL and audience,
+the exact intent resource, network, amount, identifier, expiry, and x402 challenge;
+the challenge's canonical `payTo` is the destination and the signed block is checked
+against it. The Marketplace MCP creates and journals the intent, while the Marketplace backend
+checks that `payTo` against the saved intent before accepting payment. Keep the
+child's signature response on that private pipe. If the Marketplace MCP process is
+compromised, the wallet's locally approved source pool and spending limits still
+bound what it can sign.
 
 Limits apply to all CLI and MCP sends in that profile, across every derived
 address and including ordinary payments to owned addresses. Internal transfers

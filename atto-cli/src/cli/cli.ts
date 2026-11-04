@@ -47,7 +47,7 @@ export function formatMarketplaceApprovalPreview(preview: ReturnType<AttoApplica
     `Proof origin: ${preview.proofOrigin ?? '(none; Agent API audience)'}`,
     `Audience: ${preview.audience}`,
     `Purpose: ${preview.purpose}`,
-    `Controller: ATTO index ${preview.controller.index}, ${preview.controller.address}`,
+    `Controller: Atto index ${preview.controller.index}, ${preview.controller.address}`,
     ...(preview.accountId ? [`Account: ${preview.accountId}`, `Identity: ${preview.identityId}`] : []),
     `Challenge: ${preview.challengeId}`,
     `Expires: ${preview.expiresAt}`,
@@ -441,7 +441,7 @@ export async function runCli(argv = process.argv): Promise<void> {
   representative.command('change <address>').description('Publish a representative change for an existing account')
     .option('--index <index>', 'Wallet account index (default: 0)', number)
     .action((representative, options) => call('representative_change', { representative, ...options }));
-  const message = program.command('message').description('Sign or verify exact ATTO message bytes');
+  const message = program.command('message').description('Sign or verify exact Atto message bytes');
   const messageSource = (options: { text?: string; hex?: string }) => {
     if ((options.text !== undefined) === (options.hex !== undefined)) {
       throw new AttoError('INVALID_INPUT', 'Supply exactly one of --text or --hex.');
@@ -454,7 +454,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option('--hex <bytes>', 'Exact message bytes as even-length hexadecimal; empty bytes are allowed')
     .action(options => call('message_sign', { index: options.index, ...messageSource(options) }));
   message.command('verify').description('Verify exact UTF-8 message or byte hex without wallet credentials')
-    .option('--address <address>', 'ATTO address corresponding to the signing public key')
+    .option('--address <address>', 'Atto address corresponding to the signing public key')
     .option('--public-key <hex>', '64-character public key in hexadecimal')
     .requiredOption('--signature <hex>', '128-character signature in hexadecimal')
     .option('--text <message>', 'Exact UTF-8 message; whitespace is preserved')
@@ -552,7 +552,7 @@ export async function runCli(argv = process.argv): Promise<void> {
 
   program.command('operations [name]').description('List shared operations or inspect one input schema')
     .action(name => {
-      const visible = operations;
+      const visible = operations.filter(operation => !operation.internalOnly);
       if (name === undefined) return output(visible.map(({ name, description, readOnly }) => ({ name, description, readOnly })), 'operations');
       const operation = visible.find(operation => operation.name === name);
       if (!operation) throw new AttoError('UNKNOWN_OPERATION', 'Unknown Atto operation. Run atto operations to list available names.');
