@@ -4,7 +4,7 @@ import { AddressLabels } from '../labels/presentation.js';
 import type { DestinationBinding } from '../spending/destination.js';
 import { createHash } from 'node:crypto';
 import {
-  AttoMnemonic, AttoOpenBlock, AttoPublicKey, AttoReceivable, AttoReceiveBlock, AttoSignature, AttoTransaction, toAttoIndex,
+  AttoMnemonic, AttoOpenBlock, AttoPublicKey, AttoReceivable, AttoReceiveBlock, AttoSendBlock, AttoSignature, AttoTransaction, toAttoIndex,
 } from '@attocash/commons-core';
 import { amountOutput, amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
@@ -31,7 +31,7 @@ import { runDoctor } from '../doctor/doctor.js';
 import { validateMarketplaceUserProofApproval, createMarketplaceProofApprovalResponse } from '../marketplace/proof-approval.js';
 import { MarketplaceTopUpClient } from '../marketplace/topups.js';
 
-interface ReceiveRecord { hash: string; index: number; blockHash: string; sourceAddress?: string; network?: string; result?: unknown }
+interface ReceiveRecord { hash: string; index: number; blockHash: string; sourceAddress?: string; network?: string; amountAtomic?: string; result?: unknown }
 const RESET_KEY = 'wallet.reset';
 
 function signedMessageBytes(args: Record<string, unknown>): Int8Array {
@@ -388,7 +388,7 @@ export class AttoApplication {
     }
   }
 
-  private privateReceiveObservation(record: ReceiveRecord, index: number, hash: string) {
+  private privateReceiveBinding(record: ReceiveRecord, index: number, hash: string) {
     const network = this.settings().network;
     const address = this.address(index).address;
     const hasPrivateBinding = record.sourceAddress !== undefined || record.network !== undefined;
@@ -396,7 +396,58 @@ export class AttoApplication {
       || hasPrivateBinding && (record.sourceAddress !== address || record.network !== network)) {
       throw new AttoError('INVALID_STATE', 'The saved receive candidate does not match this wallet account and network.');
     }
-    return { status: 'unknown', hash: record.blockHash, index, sendHash: hash, sourceAddress: address, network, amountAtomic: null };
+    return { hash: record.blockHash, index, sendHash: hash, sourceAddress: address, network };
+  }
+
+  private savedReceiveAmount(record: ReceiveRecord): string | undefined {
+    const checked = (value: unknown): string => {
+      try {
+        if (typeof value !== 'string' || amountRaw(value, 'RAW') !== value) throw new Error();
+        return value;
+      } catch { throw new AttoError('INVALID_STATE', 'The saved receive amount is invalid.'); }
+    };
+    const candidate = record.amountAtomic === undefined ? undefined : checked(record.amountAtomic);
+    let completed: string | undefined;
+    if (record.result !== undefined) {
+      if (!record.result || typeof record.result !== 'object' || Array.isArray(record.result)) {
+        throw new AttoError('INVALID_STATE', 'The saved receive result is invalid.');
+      }
+      const amount = (record.result as { amount?: unknown }).amount;
+      if (amount !== undefined) {
+        if (!amount || typeof amount !== 'object' || Array.isArray(amount)) {
+          throw new AttoError('INVALID_STATE', 'The saved receive amount is invalid.');
+        }
+        completed = checked((amount as { raw?: unknown }).raw);
+      }
+    }
+    if (candidate !== undefined && completed !== undefined && candidate !== completed) {
+      throw new AttoError('INVALID_STATE', 'The saved receive amounts disagree.');
+    }
+    return candidate ?? completed;
+  }
+
+  /** Older standalone records retain their shape; signed SEND history supplies missing metadata. */
+  private async recoverReceiveAmount(hash: string, address: string): Promise<string> {
+    const unavailable = () => new AttoError('RECEIVE_RECOVERY_UNAVAILABLE',
+      'The original SEND amount is unavailable. Retry receive with the same incoming SEND hash; its candidate is unchanged.');
+    let source: AttoTransaction | null;
+    try { source = await this.reader().transaction(hash); }
+    catch (error) {
+      if (error instanceof AttoError && error.code === 'INVALID_NODE_RESPONSE') {
+        throw new AttoError('TRANSACTION_MISMATCH', 'The original SEND history is invalid.');
+      }
+      if (error instanceof AttoError && ['NODE_UNAVAILABLE', 'NODE_TIMEOUT', 'NODE_HTTP_ERROR', 'CANCELLED'].includes(error.code)) {
+        throw unavailable();
+      }
+      throw error;
+    }
+    if (!source) throw unavailable();
+    const block = source.block;
+    if (source.hash.toString() !== hash || !await source.isValid() || !(block instanceof AttoSendBlock)
+      || block.network.name !== this.settings().network || block.receiverAddress.value !== address) {
+      throw new AttoError('TRANSACTION_MISMATCH', 'The original SEND does not match this receive.');
+    }
+    return amountRaw(block.amount.toString(), 'RAW');
   }
 
   private async receive(request: ReceiveRequest, automatic = false) {
@@ -415,26 +466,35 @@ export class AttoApplication {
       const prior = this.store.get<ReceiveRecord>(key);
       if (prior && prior.index !== index) throw new AttoError('WRONG_RECEIVER', 'This receivable belongs to a different address.');
       if (prior && this.internalMarketplaceReceiveSafety) {
-        const observation = this.privateReceiveObservation(prior, index, hash);
+        const binding = this.privateReceiveBinding(prior, index, hash);
+        const savedAmount = this.savedReceiveAmount(prior);
         let transaction: AttoTransaction | null;
         if (prior.result) {
           try { transaction = AttoTransaction.fromJson(JSON.stringify((prior.result as { transaction?: unknown }).transaction)); }
           catch { throw new AttoError('TRANSACTION_MISMATCH', 'The saved transaction does not match the original receive candidate.'); }
         } else {
           try { transaction = await this.reader().transaction(prior.blockHash); }
-          catch { return observation; }
+          catch { transaction = null; }
         }
-        if (!transaction) return observation;
-        const block = transaction.block;
-        if (transaction.hash.toString() !== prior.blockHash || !await transaction.isValid()
-          || !(block instanceof AttoOpenBlock || block instanceof AttoReceiveBlock)
-          || block.address.value !== address.address || block.network.name !== this.settings().network || block.sendHash.toString() !== hash) {
-          throw new AttoError('TRANSACTION_MISMATCH', 'The observed transaction does not match the original receive candidate.');
+        if (transaction) {
+          const block = transaction.block;
+          if (transaction.hash.toString() !== prior.blockHash || !await transaction.isValid()
+            || !(block instanceof AttoOpenBlock || block instanceof AttoReceiveBlock)
+            || block.address.value !== address.address || block.network.name !== this.settings().network || block.sendHash.toString() !== hash
+            || prior.result && (typeof (prior.result as { hash?: unknown }).hash !== 'string'
+              || (prior.result as { hash: string }).hash.toUpperCase() !== prior.blockHash)) {
+            throw new AttoError('TRANSACTION_MISMATCH', 'The observed transaction does not match the original receive candidate.');
+          }
         }
-        if (prior.result) return prior.result;
-        const result = { ...this.result(transaction, 'received'), index };
+        const amount = savedAmount ?? await this.recoverReceiveAmount(hash, address.address);
+        if (!transaction) return { status: 'unknown', ...binding, amountAtomic: amount };
+        if (prior.result) {
+          return (prior.result as { amount?: unknown }).amount === undefined
+            ? { ...(prior.result as Record<string, unknown>), amount: amountOutput(amount) } : prior.result;
+        }
+        const result = { ...this.result(transaction, 'received'), index, amount: amountOutput(amount) };
         this.store.set(key, { ...prior, result });
-        this.work.prepareConfirmed(block);
+        this.work.prepareConfirmed(transaction.block);
         return result;
       }
       if (prior?.result) return prior.result;
@@ -464,21 +524,27 @@ export class AttoApplication {
             this.payments.requireAvailable(index);
             if (automatic && !this.settings().autoReceive) throw new AttoError('AUTO_RECEIVE_DISABLED', 'Automatic receiving is disabled.');
             this.store.set(key, { hash, index, blockHash: block.hash.toString(),
-              ...(this.internalMarketplaceReceiveSafety ? { sourceAddress: address.address, network: this.settings().network } : {}) } satisfies ReceiveRecord);
+              ...(this.internalMarketplaceReceiveSafety ? { sourceAddress: address.address, network: this.settings().network,
+                amountAtomic: receivable.amount.toString() } : {}) } satisfies ReceiveRecord);
           });
         }, this.work.worker());
         wallet = execution.wallet;
         const transaction = await wallet.receive(receivable, parseAddress(request.representative ?? this.settings().representative), null);
         const result = { ...this.result(transaction, 'received'), index, amount: amountOutput(receivable.amount.toString()) };
         this.store.set(key, { hash, index, blockHash: transaction.hash.toString(), result,
-          ...(this.internalMarketplaceReceiveSafety ? { sourceAddress: address.address, network: this.settings().network } : {}) } satisfies ReceiveRecord);
+          ...(this.internalMarketplaceReceiveSafety ? { sourceAddress: address.address, network: this.settings().network,
+            amountAtomic: receivable.amount.toString() } : {}) } satisfies ReceiveRecord);
         this.work.prepareConfirmed(transaction.block);
         return result;
       } catch (error) {
         if (this.internalMarketplaceReceiveSafety) {
           this.requireMcpWrite();
           const candidate = this.store.get<ReceiveRecord>(key);
-          if (candidate && !candidate.result) return this.privateReceiveObservation(candidate, index, hash);
+          if (candidate && !candidate.result) {
+            const binding = this.privateReceiveBinding(candidate, index, hash);
+            const amount = this.savedReceiveAmount(candidate) ?? await this.recoverReceiveAmount(hash, address.address);
+            return { status: 'unknown', ...binding, amountAtomic: amount };
+          }
         }
         throw error;
       } finally { wallet?.close(); seed.value.fill(0); }

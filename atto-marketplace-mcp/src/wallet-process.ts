@@ -214,6 +214,7 @@ function localSignerFailure(message: string): ProfileError {
 const walletDenials:Record<string,string>={
   WALLET_SETUP_REQUIRED:'Configure the selected account and wallet permissions in the local terminal.',
   WALLET_RESPONSE_INVALID:'The native wallet returned data inconsistent with the selected account or request.',
+  RECEIVE_RECOVERY_UNAVAILABLE:'Recovery data is temporarily unavailable. Retry wallet_receive with the original incoming SEND hash; its candidate is unchanged.',
   REQUEST_CONFLICT:'Recover the original request with its unchanged account, route and payment terms.',
   INVALID_REQUEST:'The wallet request does not match this tool’s supported inputs.',
   NOT_FOUND:'The original wallet operation was not found in its selected journal.',

@@ -131,7 +131,7 @@ function normalizeResult(identity: WalletIdentity, operation: NativeWalletOperat
   if (operation === 'receive') {
     if (atto && value.status === 'unknown') {
       const pending = z.strictObject({status:z.literal('unknown'),hash,index:index.max(0x7fff_ffff),sendHash:hash,
-        sourceAddress:z.string(),network:z.enum(['LOCAL','DEV','BETA','LIVE']),amountAtomic:positiveAtomic.nullable()}).parse(value);
+        sourceAddress:z.string(),network:z.enum(['LOCAL','DEV','BETA','LIVE']),amountAtomic:positiveAtomic}).parse(value);
       same(`atto:${pending.network.toLowerCase()}`, identity.network);
       same(pending.sourceAddress, identity.address); same(pending.index, identity.index);
       same(pending.sendHash, hash.parse(input.hash));
@@ -146,7 +146,7 @@ function normalizeResult(identity: WalletIdentity, operation: NativeWalletOperat
       same(attoAddress(block.algorithm, block.publicKey), identity.address);
       same(hash.parse(block.sendHash), hash.parse(input.hash));
       if (!['OPEN','RECEIVE'].includes(String(block.type))) return invalid();
-      amount = value.amount === undefined ? null : object(value.amount).raw;
+      amount = object(value.amount).raw;
     } else {
       same(value.network, identity.network); same(value.sourceAddress, identity.address); same(value.index, identity.index);
       amount = value.amountAtomic;
@@ -155,7 +155,7 @@ function normalizeResult(identity: WalletIdentity, operation: NativeWalletOperat
     const candidateHash = candidate === null ? null : hash.parse(candidate);
     if (state === 'SETTLED' && candidateHash === null) return invalid();
     return {...base(identity),sendHash:hash.parse(input.hash),hash:candidateHash,
-      amountAtomic:amount === null ? null : positiveAtomic.parse(amount),state};
+      amountAtomic:positiveAtomic.parse(amount),state};
   }
   return invalid();
 }

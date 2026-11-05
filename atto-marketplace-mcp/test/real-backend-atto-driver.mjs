@@ -2,7 +2,7 @@
 import assert from 'node:assert/strict';
 import { createHash, createPublicKey, randomUUID, verify } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Client } from '@modelcontextprotocol/client';
@@ -329,6 +329,37 @@ async function makeWallet() {
 async function nativeWalletJourney(marketplace) {
   const tool = async (name, args) => safeObject(resultOf(await marketplace.client.callTool({name, arguments: args}), name), name);
   const native = async (name, args = {}) => tool(name, {asset: 'ATTO', ...args});
+  const assertLegacyReceiveAmountRecovery = async (incomingSendHash, expectedResult) => {
+    const sendHash = incomingSendHash.toUpperCase();
+    // Given the original standalone journal shape, with no saved amount or available signing credential.
+    const { StateStore } = await import(new URL('../storage/state.js', pathToFileURL(attoCli)).href);
+    const recoveryStore = new StateStore(cliHome);
+    try {
+      const receiveKey = `receive.LOCAL.${sendHash}`;
+      const saved = recoveryStore.get(receiveKey);
+      check(saved && saved.result, 'The original completed RECEIVE journal is missing.');
+      assert.equal(saved.index, expectedResult.index);
+      const { amount, ...legacyResult } = saved.result;
+      const legacy = {hash: saved.hash, index: saved.index, blockHash: saved.blockHash, result: legacyResult};
+      await recoveryStore.withWalletLock(async () => recoveryStore.set(receiveKey, legacy));
+      const legacyBytes = JSON.stringify(legacy);
+      const balanceBeforeRecovery = await native('wallet_balance', {network: 'atto:local'});
+      const credential = join(testKeyringDirectory, 'credential');
+      const parkedCredential = join(testKeyringDirectory, `.credential-receive-recovery-${randomUUID()}`);
+      await rename(credential, parkedCredential);
+      try {
+        // When the public Marketplace tool reconstructs the missing amount from the real node's original SEND.
+        const recovered = await native('wallet_receive', {network: 'atto:local', hash: sendHash});
+        // Then the exact result, original journal content and native balance survive without signing keys.
+        assert.deepEqual(recovered, expectedResult);
+        assert.equal(recovered.amountAtomic, expectedResult.amountAtomic);
+        assert.equal(recovered.hash, expectedResult.hash);
+        assert.deepEqual(recoveryStore.get(receiveKey), legacy);
+        assert.equal(JSON.stringify(recoveryStore.get(receiveKey)), legacyBytes);
+        assert.deepEqual(await native('wallet_balance', {network: 'atto:local'}), balanceBeforeRecovery);
+      } finally { await rename(parkedCredential, credential); }
+    } finally { recoveryStore.close(); }
+  };
   const selection = readWalletSelection(marketplaceHome);
   const access = selection.attoAccess;
   const status = parseJsonOutput(await runCli(['call', 'wallet_status'], 'native wallet status'), 'native wallet status').result;
@@ -343,6 +374,7 @@ async function nativeWalletJourney(marketplace) {
   assert.equal(initialReceive.state, 'SETTLED'); assert.equal(initialReceive.sendHash, fundingHash.toUpperCase());
   assert.equal(initialReceive.amountAtomic, '2000000000');
   assert.deepEqual(await native('wallet_receive', {network: 'atto:local', hash: fundingHash}), initialReceive);
+  await assertLegacyReceiveAmountRecovery(fundingHash, initialReceive);
   const balance = await native('wallet_balance', {network: 'atto:local'});
   assert.deepEqual(balance, {asset: 'ATTO', network: 'atto:local', address: access.address, index: 0, balanceAtomic: '2000000000'});
 
@@ -389,11 +421,14 @@ async function nativeWalletJourney(marketplace) {
   const receivedBack = await native('wallet_receive', {network: 'atto:local', hash: returnedSend.hash});
   assert.equal(receivedBack.state, 'SETTLED'); assert.equal(receivedBack.sendHash, returnedSend.hash); assert.equal(receivedBack.amountAtomic, '1');
   assert.deepEqual(await native('wallet_receive', {network: 'atto:local', hash: returnedSend.hash}), receivedBack);
+
+  await assertLegacyReceiveAmountRecovery(returnedSend.hash, receivedBack);
+
   assert.deepEqual(await native('wallet_balance', {network: 'atto:local'}), balance);
   assert.equal((await native('wallet_receivables', {network: 'atto:local', limit: 10})).items.length, 0);
   return {marketplaceMcpNativeStatus: true, marketplaceMcpNativeBalance: true, marketplaceMcpExternalTransferDenied: true,
     marketplaceMcpExternalTransfer: true, marketplaceMcpTransferReplay: true, marketplaceMcpReceivables: true,
-    marketplaceMcpReceiveOpen: true, marketplaceMcpReceiveReplay: true};
+    marketplaceMcpReceiveOpen: true, marketplaceMcpReceiveReplay: true, marketplaceMcpReceiveAmountRecovery: true};
 }
 
 async function fundAndPublish() {

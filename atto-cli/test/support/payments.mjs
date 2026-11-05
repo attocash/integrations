@@ -48,11 +48,15 @@ export function gate() {
 
 export async function fixture(t, balances, pool = { indexes: balances.map((_, index) => index), consolidate: false }, limit = '100', market, options = {}) {
   const directory = await mkdtemp(join(tmpdir(), 'atto pool payments-'));
-  let phrase;
-  const secrets = { get: async () => phrase ?? null, set: async value => { phrase = value; } };
+  let phrase, secretReads = 0, denySecretReads = false;
+  const secrets = { get: async () => {
+    secretReads++;
+    if (denySecretReads) throw new Error('Recovery must not access wallet secrets.');
+    return phrase ?? null;
+  }, set: async value => { phrase = value; } };
   const applications = new Set();
-  const open = access => {
-    const application = new AttoApplication({ directory, secrets, market, ...options, ...(access ? { access } : {}) });
+  const open = (access, overrides = {}) => {
+    const application = new AttoApplication({ directory, secrets, market, ...options, ...(access ? { access } : {}), ...overrides });
     applications.add(application);
     return application;
   };
@@ -73,7 +77,8 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
     lastTransactionTimestamp: 1704616009211, representativeAlgorithm: 'V1', representativePublicKey: addresses[0].publicKey,
   }))));
   const state = { accounts, publications: [], publicationAttempts: [], receivables: new Map(), requests: [], works: [],
-    failPublication: 0, hideHashLookup: false, holdPublications: undefined, error: undefined };
+    failPublication: 0, hideHashLookup: false, hiddenTransactionHashes: new Set(), transactionResponses: new Map(),
+    holdPublications: undefined, error: undefined };
   const observeCanonical = transaction => {
     const block = transaction.block;
     const prior = accounts.get(block.publicKey.toString());
@@ -176,8 +181,9 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
       const receivableKey = /^\/accounts\/([A-Fa-f0-9]{64})\/receivables\/stream$/.exec(url.pathname)?.[1].toUpperCase();
       if (receivableKey) return stream([...state.receivables.values()].filter(value => value.receiverPublicKey.toString() === receivableKey));
       const transactionHash = /^\/transactions\/([A-Fa-f0-9]{64})$/.exec(url.pathname)?.[1].toUpperCase();
+      if (transactionHash && state.transactionResponses.has(transactionHash)) return response.end(state.transactionResponses.get(transactionHash));
       const transaction = state.publications.find(value => value.hash.toString() === transactionHash);
-      if (transaction && !state.hideHashLookup) return response.end(transaction.toJson());
+      if (transaction && !state.hideHashLookup && !state.hiddenTransactionHashes.has(transactionHash)) return response.end(transaction.toJson());
       const historyKey = /^\/accounts\/([A-Fa-f0-9]{64})\/transactions\/stream$/.exec(url.pathname)?.[1].toUpperCase();
       if (historyKey) return stream(state.publications.filter(value => value.block.publicKey.toString() === historyKey
         && BigInt(value.height.toString()) >= BigInt(url.searchParams.get('fromHeight') ?? '1')
@@ -217,7 +223,7 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
   await app.call('wallet_configure', { network: options.fixtureNetwork ?? 'LOCAL', nodeUrl: url, workerUrl: url, representative: addresses[0].address, autoReceive: false });
   await approve();
   return { get app() { return app; }, directory, mnemonic: () => phrase, state, addresses, recipient, open, approve,
-    url, observeCanonical,
+    url, observeCanonical, get secretReads() { return secretReads; }, forbidSecrets() { denySecretReads = true; },
     request: (id, amount = '1', extra = {}) => ({ destination: recipient.address, amount, unit: 'RAW', requestId: id, ...extra }),
     async reopen(access) { await app.close(); applications.delete(app); app = open(access); return app; } };
 }

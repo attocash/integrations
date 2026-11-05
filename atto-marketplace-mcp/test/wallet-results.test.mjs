@@ -86,28 +86,34 @@ test('Given bounded receivable observations, when scanning either asset, then so
 });
 
 test('Given receive or open results, when reporting settlement or uncertainty, then incoming SEND and RECEIVE hashes remain distinct',()=>{
+  // Given matching native receive observations for each supported asset.
   const block={type:'OPEN',network:'LOCAL',algorithm:'V1',publicKey:key,sendHash};
+  // When the results are normalized into the common public response.
   const attoResult=normalizeWalletResult(atto,'receive',{status:'received',index:7,hash:receiveHash,transaction:{block},amount:{raw:amount}},{hash:sendHash});
   const nanoResult=normalizeWalletResult(nano,'receive',{state:'UNKNOWN',network:nano.network,index:7,sourceAddress:nano.address,
     sendHash:receiveHash,amountAtomic:amount},{hash:sendHash});
+  // Then both hashes and exact amounts remain bound, and missing metadata is refused.
   assert.equal(attoResult.state,'SETTLED');
   assert.equal(nanoResult.state,'PENDING');
   assert.equal(attoResult.hash,receiveHash.toUpperCase());
   assert.equal(attoResult.sendHash,sendHash.toUpperCase());
   assert.equal(nanoResult.hash,receiveHash.toUpperCase());
   assert.deepEqual(Object.keys(attoResult).sort(),Object.keys(nanoResult).sort());
-  const recovered=normalizeWalletResult(atto,'receive',{status:'received',hash:receiveHash,transaction:{block}},{hash:sendHash});
-  assert.equal(recovered.amountAtomic,null,'Unknown recovered amount is never invented.');
+  assert.throws(()=>normalizeWalletResult(atto,'receive',{status:'received',hash:receiveHash,transaction:{block}},{hash:sendHash}),
+    {code:'WALLET_RESPONSE_INVALID'},'A missing recovered amount must be resolved by the wallet instead of emitted as settled.');
   assert.throws(()=>normalizeWalletResult(atto,'receive',{status:'received',hash:receiveHash,transaction:{block:{...block,sendHash:receiveHash}}},{hash:sendHash}));
 });
 
 test('Given a durable Atto RECEIVE candidate, when publication is unresolved, then only its bound private observation becomes pending',()=>{
-  const pending={status:'unknown',hash:receiveHash,index:7,sendHash,sourceAddress:atto.address,network:'LOCAL',amountAtomic:null};
+  // Given a saved uncertain candidate whose exact amount was captured before publication.
+  const pending={status:'unknown',hash:receiveHash,index:7,sendHash,sourceAddress:atto.address,network:'LOCAL',amountAtomic:amount};
+  // When its public recovery result is constructed.
   const result=normalizeWalletResult(atto,'receive',pending,{hash:sendHash});
+  // Then identity and amount remain exact, and incomplete or conflicting data fails closed.
   assert.deepEqual(result,{asset:'ATTO',network:atto.network,address:atto.address,index:7,
-    sendHash:sendHash.toUpperCase(),hash:receiveHash.toUpperCase(),amountAtomic:null,state:'PENDING'});
+    sendHash:sendHash.toUpperCase(),hash:receiveHash.toUpperCase(),amountAtomic:amount,state:'PENDING'});
   for (const patch of [{index:0},{network:'LIVE'},{sourceAddress:attoAddress(34)},{sendHash:receiveHash},{hash:null},
-    {transaction:{}},{amountAtomic:0}]) {
+    {transaction:{}},{amountAtomic:0},{amountAtomic:null},{amountAtomic:undefined}]) {
     assert.throws(()=>normalizeWalletResult(atto,'receive',{...pending,...patch},{hash:sendHash}),{code:'WALLET_RESPONSE_INVALID'});
   }
 });

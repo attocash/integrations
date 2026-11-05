@@ -474,8 +474,11 @@ use exact atomic decimal strings.
 
 `permissions` reports effective `marketplaceFunding`, `externalTransfers`, and
 `receive` grants. Native operation states are `PENDING`, `SETTLED`, and `REJECTED`;
-an unknown candidate stays pending. A receive amount can be null when recovering
-an Atto candidate whose original acknowledgment did not retain that amount.
+an unknown candidate stays pending. Receive amounts are positive atomic strings,
+including after restart. Atto records missing an amount recover it from the signed
+original SEND after validating its hash, network, recipient, signature and work.
+Unavailable history returns `RECEIVE_RECOVERY_UNAVAILABLE`: retry `wallet_receive`
+with the original incoming SEND hash while retaining its unchanged candidate.
 Receivables are a bounded scan without a continuation cursor; `incomplete` means
 more may exist. Transfer destinations are canonicalized before signing, including
 Nano's `xrb_` alias. Equivalent permission, spending-limit, and unresolved-source

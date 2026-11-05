@@ -69,7 +69,7 @@ test('private RECEIVE lost acknowledgement retains one candidate across restart 
   const args = { index: 1, hash: incoming.hash };
   const pending = await mcp.call('receive', args);
   assert.deepEqual(pending, { status: 'unknown', hash: pending.hash, index: 1, sendHash: incoming.hash,
-    sourceAddress: f.addresses[1].address, network: 'LOCAL', amountAtomic: null });
+    sourceAddress: f.addresses[1].address, network: 'LOCAL', amountAtomic: '1' });
   assert.match(pending.hash, /^[A-F0-9]{64}$/);
   const key = `receive.LOCAL.${incoming.hash}`;
   // Then restart retains the same candidate and blocks new spending until exact reconciliation.

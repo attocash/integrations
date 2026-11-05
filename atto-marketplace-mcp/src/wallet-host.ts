@@ -122,7 +122,7 @@ export function publicWalletErrorCode(error: unknown): string {
   if (['PERMISSION_DENIED','EXTERNAL_TRANSFERS_DENIED','MARKETPLACE_FUNDING_DENIED','MCP_READ_ONLY'].includes(code ?? '')) return 'PERMISSION_DENIED';
   if (['SOURCE_FENCED','ACCOUNT_RESERVED','POOL_BUSY','PAYMENT_IN_PROGRESS','WALLET_BUSY','ACCOUNT_BUSY'].includes(code ?? '')) return 'SOURCE_FENCED';
   const allowed = ['INSUFFICIENT_FUNDS','NETWORK_MISMATCH','WALLET_SETUP_REQUIRED','WALLET_RESPONSE_INVALID',
-    'REQUEST_CONFLICT','INVALID_REQUEST','NOT_FOUND','JOURNAL_NOT_FOUND','RPC_CONFLICT','JOURNAL_CONFLICT'];
+    'REQUEST_CONFLICT','INVALID_REQUEST','NOT_FOUND','JOURNAL_NOT_FOUND','RPC_CONFLICT','JOURNAL_CONFLICT','RECEIVE_RECOVERY_UNAVAILABLE'];
   return code && allowed.includes(code) ? code : 'WALLET_REJECTED';
 }
 
@@ -140,7 +140,10 @@ export function createWalletHost(env: NodeJS.ProcessEnv = process.env): McpServe
       return {content:[{type:'text',text:JSON.stringify(structuredContent)}],structuredContent};
     } catch(error) {
       const code=publicWalletErrorCode(error);
-      const structuredContent={error:{code,message:'The local wallet rejected the operation. Check its terminal configuration, permissions and original request status.'}};
+      const message=code==='RECEIVE_RECOVERY_UNAVAILABLE'
+        ? 'Recovery data is temporarily unavailable. Retry wallet_receive with the original incoming SEND hash; its candidate is unchanged.'
+        : 'The local wallet rejected the operation. Check its terminal configuration, permissions and original request status.';
+      const structuredContent={error:{code,message}};
       return {content:[{type:'text',text:JSON.stringify(structuredContent)}],structuredContent,isError:true};
     }
   });
