@@ -118,6 +118,19 @@ test('Given a durable Atto RECEIVE candidate, when publication is unresolved, th
   }
 });
 
+test('canonical Nano mainnet identity and balance use the same public contract as development',()=>{
+  // Given a valid Nano wallet whose profile uses the canonical mainnet network name.
+  const mainnet={...nano,network:'nano:mainnet'};
+  // When public identity and balance observations are normalized.
+  const identity=publicWalletIdentity(mainnet);
+  const balance=normalizeWalletResult(mainnet,'balance.get',{address:nano.address,index:7,network:'nano:mainnet',balanceAtomic:amount},{});
+  // Then the canonical route works and the obsolete spelling is rejected.
+  assert.equal(identity.network,'nano:mainnet');
+  assert.equal(balance.balanceAtomic,amount);
+  assert.equal(balance.network,'nano:mainnet');
+  assert.throws(()=>publicWalletIdentity({...nano,network:'nano:main'}),{code:'WALLET_RESPONSE_INVALID'});
+});
+
 test('Given foreign or malformed identities, when building a public wallet identity, then configuration mismatches fail closed',()=>{
   assert.throws(()=>publicWalletIdentity({...atto,address:nano.address}));
   assert.throws(()=>publicWalletIdentity({...nano,network:'atto:local'}));

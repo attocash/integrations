@@ -45,7 +45,7 @@ export function publicWalletIdentity(value: WalletIdentity): WalletIdentity {
   const parsed = result.data;
   address(parsed.address, parsed.asset);
   if (parsed.asset === 'ATTO' ? !/^atto:(live|beta|dev|local)$/.test(parsed.network) || parsed.index > 0x7fff_ffff
-    : !/^nano:(main|beta|dev)$/.test(parsed.network)) invalid();
+    : !/^nano:(mainnet|beta|dev)$/.test(parsed.network)) invalid();
   same(parsed.permissions.receive, parsed.permissions.marketplaceFunding || parsed.permissions.externalTransfers);
   return parsed;
 }
