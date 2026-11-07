@@ -148,6 +148,8 @@ export class MarketplaceApiClient {
     if (!(options.allowStatus ?? [200, 201, 202, 204]).includes(response.status)) {
       const signerError = signerApiError(response.status, json);
       if (signerError) throw signerError;
+      const productError = productApiError(response.status, json);
+      if (productError) throw productError;
       if (response.status === 401 || response.status === 403) {
         throw new MarketplaceApiError('AUTHORIZATION_DENIED', `Marketplace denied this operation (HTTP ${response.status}). This profile will not switch credentials or gain authority automatically.`, response.status);
       }
@@ -302,6 +304,32 @@ export class MarketplaceApiClient {
       throw new ProfileError('REAUTH_REQUIRED', 'The controller-token refresh outcome is unknown. Reauthenticate from the local terminal before retrying.');
     }
   }
+}
+
+/** Public product status/code pairs carry fixed diagnostics, never backend prose or arbitrary details. */
+function productApiError(status: number, value: unknown): MarketplaceApiError | undefined {
+  const code = objectRecord(value)?.error;
+  if (status === 409 && code === 'product_conflict') {
+    return new MarketplaceApiError('PRODUCT_CONFLICT',
+      'The product, release, or publication reservation changed. Read the current product state and reconcile the original request before preparing another operation.',
+      status, { serverCode: code });
+  }
+  if (status === 503 && code === 'product_publication_price_unavailable') {
+    return new MarketplaceApiError('PRODUCT_PUBLICATION_PRICE_UNAVAILABLE',
+      'A usable asset price is unavailable for product publication. Retry the original request later with its arguments unchanged.',
+      status, { serverCode: code });
+  }
+  if (status === 409 && code === 'product_publication_insufficient_funds') {
+    return new MarketplaceApiError('PRODUCT_PUBLICATION_INSUFFICIENT_FUNDS',
+      'The available balance cannot fund the product publication reservation. Read the balance and current publication quote before preparing another operation.',
+      status, { serverCode: code });
+  }
+  if (status === 409 && code === 'product_idempotency_conflict') {
+    return new MarketplaceApiError('PRODUCT_IDEMPOTENCY_CONFLICT',
+      'The request ID was already used for a different product request. Reconcile the original request before preparing another operation; do not retry it with changed arguments.',
+      status, { serverCode: code });
+  }
+  return undefined;
 }
 
 function isTaskPublishPath(pathname: string): boolean {
