@@ -202,11 +202,17 @@ export class MarketplaceApiClient {
         if (minimumError) throw minimumError;
       }
       if ((options.method ?? 'GET') === 'POST' && url.search === ''
-        && /^\/v1\/(?:agent\/releases\/[0-9a-f-]+\/purchase|agent\/purchases\/[0-9a-f-]+\/refund)$/.test(url.pathname)) {
+        && (url.pathname === '/v1/agent/withdrawals'
+          || /^\/v1\/(?:agent\/releases\/[0-9a-f-]+\/purchase|agent\/purchases\/[0-9a-f-]+\/refund)$/.test(url.pathname))) {
         const location=response.headers.get('Location');
         if (location) {
           const match=/^\/v1\/agent\/commands\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(location);
-          if (!match) throw new MarketplaceApiError('COMMAND_PROTOCOL','Marketplace returned an unsafe Shop command pointer.');
+          if (!match) throw new MarketplaceApiError('COMMAND_PROTOCOL',url.pathname === '/v1/agent/withdrawals'
+            ? 'Marketplace returned an unsafe withdrawal command pointer.' : 'Marketplace returned an unsafe Shop command pointer.');
+          if (url.pathname === '/v1/agent/withdrawals') {
+            throw new MarketplaceApiError('COMMAND_UNRESOLVED','Recover the original withdrawal through its durable command status.',
+              response.status,{commandId:match[1],statusUrl:location});
+          }
           const detail=objectRecord(json);
           throw new MarketplaceApiError(typeof detail?.error==='string'?detail.error:'MARKETPLACE_HTTP',
             typeof detail?.message==='string'?detail.message:`Marketplace returned HTTP ${response.status} for the original Shop command.`,

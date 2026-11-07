@@ -1314,3 +1314,258 @@ async function writeApprovalResponse(requestPath,request) {
 
 function json(res,status,body) { res.writeHead(status,{'content-type':'application/json'}); res.end(JSON.stringify(body)); }
 function contentText(result) { return result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n')??''; }
+
+for (const route of [
+  {asset:'ATTO',network:'atto:dev',address:`atto://${'b'.repeat(61)}`,amount:'2000000000'},
+  {asset:'XNO',network:'nano:dev',address:`nano_${'1'.repeat(60)}`,amount:'30000000000000000000000000000'},
+]) for (const mode of ['immediate','delayed','interrupted']) {
+  test(`${route.asset} ${mode} durable withdrawal rejection recovers across stdio restart without another signed submission`,async()=>{
+    const fixture=await rejectionFixture(route,{mode});
+    try {
+      const first=await fixture.submit();
+      if(mode==='interrupted') {
+        assert.equal(first.isError,true);
+        assert.equal(fixture.journal().state,'COMMAND_PENDING');
+      } else {
+        assert.equal(first.isError,undefined,contentText(first));
+        assert.equal(JSON.parse(contentText(first)).result.state,'REJECTED');
+        assert.equal(fixture.journal().state,'COMPLETE');
+      }
+      const before=fixture.counts();
+      await fixture.restart();
+      const recovered=await fixture.call();
+      assert.equal(recovered.isError,undefined,contentText(recovered));
+      const result=JSON.parse(contentText(recovered)).result;
+      assert.equal(result.state,'REJECTED');
+      assert.equal(result.withdrawalId,fixture.commandId);
+      assert.equal(result.requestId,fixture.args.requestId);
+      assert.deepEqual(fixture.counts(),before,'recovery must not POST a withdrawal/challenge or sign another proof');
+      assert.equal(fixture.journal().state,'COMPLETE');
+
+      // A later independent success must not replace the original rejection.
+      const successArgs={...fixture.args,requestId:'abababab-abab-4bab-8bab-abababababab'};
+      const pending=JSON.parse(contentText(await fixture.call(successArgs))).result;
+      await fixture.approve(pending);
+      const success=await fixture.call(successArgs);
+      assert.equal(success.isError,undefined,contentText(success));
+      assert.equal(JSON.parse(contentText(success)).result.state,'PENDING');
+      assert.notEqual(JSON.parse(contentText(success)).result.withdrawalId,fixture.commandId);
+      const afterSuccess=fixture.counts();
+      const oldReplay=await fixture.call();
+      assert.equal(JSON.parse(contentText(oldReplay)).result.state,'REJECTED');
+      assert.equal(JSON.parse(contentText(oldReplay)).result.withdrawalId,fixture.commandId);
+      assert.deepEqual(fixture.counts(),afterSuccess);
+
+      // Completed recovery also refuses a changed resource under its original ID.
+      fixture.mutationPending(); // Reproduce a crash between handoff completion and mutation completion.
+      fixture.change({atomicAmount:'1'});
+      assert.equal(JSON.parse(contentText(await fixture.call())).error.code,'COMMAND_PROTOCOL');
+      assert.equal(fixture.mutation().state,'PENDING');
+      fixture.change({state:'PENDING'});
+      assert.equal(JSON.parse(contentText(await fixture.call())).error.code,'COMMAND_PROTOCOL');
+      fixture.change({});
+      assert.equal(JSON.parse(contentText(await fixture.call())).result.state,'REJECTED');
+      assert.equal(fixture.mutation().state,'COMPLETE');
+      assert.deepEqual(fixture.counts(),afterSuccess);
+      assert.ok(fixture.requests.filter(r=>r.path.startsWith('/v1/agent/commands/')
+        ||r.path.startsWith('/v1/agent/withdrawals/')).every(r=>r.authorization==='Bearer controller-session-token'));
+    } finally { await fixture.close(); }
+  });
+}
+
+test('withdrawal rejection recovery fails closed for hostile pointers, status envelopes, owner reads and frozen terms',async t=>{
+  const route={asset:'ATTO',network:'atto:dev',address:`atto://${'b'.repeat(61)}`,amount:'2000000000'};
+  const cases=[
+    ...['https://evil.example/v1/agent/commands/','//evil.example/v1/agent/commands/',
+      '/v1/agent/commands/','/v1/agent/commands/','/v1/agent/withdrawals/'].map((prefix,index)=>({
+      name:`unsafe pointer ${index}`,location:prefix+'98989898-9898-4898-8898-989898989898'+(index===2?'?x=1':index===3?'#fragment':''),unknown:true})),
+    {name:'foreign command owner',statusHttp:403},
+    {name:'different command status identity',statusChange:{commandId:'abababab-abab-4bab-8bab-abababababab'}},
+    {name:'different command status URL',statusChange:{statusUrl:'/v1/agent/commands/abababab-abab-4bab-8bab-abababababab'}},
+    {name:'withdrawal not owned',resourceHttp:403},
+    {name:'withdrawal resource missing',resourceHttp:404},
+    {name:'withdrawal ID',change:{withdrawalId:'abababab-abab-4bab-8bab-abababababab'}},
+    {name:'request ID',change:{requestId:'abababab-abab-4bab-8bab-abababababab'}},
+    {name:'asset',change:{asset:'XNO'}},
+    {name:'network',change:{network:'atto:beta'}},
+    {name:'exact amount',change:{atomicAmount:'2000000001'}},
+    {name:'destination',change:{destinationId:'abababab-abab-4bab-8bab-abababababab'}},
+    {name:'destination address',change:{destinationAddress:`atto://${'c'.repeat(61)}`}},
+    {name:'selection version',change:{destinationVersion:4}},
+    {name:'nonterminal resource',change:{state:'PENDING'}},
+    {name:'malformed resource',change:{nativeSend:undefined}},
+  ];
+  for(const scenario of cases) await t.test(scenario.name,async()=>{
+    const fixture=await rejectionFixture(route,{mode:'immediate',...scenario});
+    try {
+      const rejected=await fixture.submit();
+      assert.equal(rejected.isError,true,scenario.name);
+      assert.equal(fixture.journal().state,scenario.unknown?'UNKNOWN':'COMMAND_PENDING');
+      const before=fixture.counts();
+      await fixture.restart();
+      const replay=await fixture.call();
+      if(scenario.unknown) {
+        assert.equal(JSON.parse(contentText(replay)).result.status,'unknown');
+        assert.equal(fixture.requests.some(r=>r.path.startsWith('/v1/agent/commands/')),false);
+      } else assert.equal(replay.isError,true);
+      assert.deepEqual(fixture.counts(),before);
+      assert.equal(fixture.journal().state,scenario.unknown?'UNKNOWN':'COMMAND_PENDING');
+      assert.equal(fixture.requests.some(r=>r.path==='/v1/agent/withdrawals'&&r.method==='GET'),false,'recovery must not scan withdrawal lists');
+    } finally { await fixture.close(); }
+  });
+});
+
+async function rejectionFixture(route,options) {
+  const commandId='98989898-9898-4898-8898-989898989898';
+  const destinationId='89898989-8989-4898-8989-898989898989';
+  const requestId='78787878-7878-4787-8787-787878787878';
+  const args={asset:route.asset,network:route.network,atomicAmount:route.amount,destinationId,expectedSelectionVersion:3,requestId};
+  const requests=[];
+  let statusCalls=0,signatureCount=0,handoffId,change=options.change??{};
+  const withdrawal={withdrawalId:commandId,requestId,asset:route.asset,network:route.network,atomicAmount:route.amount,
+    destinationId,destinationVersion:3,destinationAddress:route.address,state:'REJECTED',nativeSend:null,
+    createdAt:'2026-11-07T12:00:00Z',updatedAt:'2026-11-07T12:00:00Z',replayed:false};
+  const statusUrl='/v1/agent/commands/'+commandId;
+  const http=await listen(async(req,res)=>{
+    const body=await readBody(req);
+    requests.push({method:req.method,path:req.url,authorization:req.headers.authorization});
+    if(req.url.startsWith(`/v1/agent/payout-addresses/${route.asset}/selection`))
+      return json(res,200,{asset:route.asset,destinationId,version:3,usableAfter:new Date(Date.now()-1000).toISOString()});
+    if(req.url==='/v1/agent/payout-addresses')
+      return json(res,200,[{destinationId,asset:route.asset,network:route.network,address:route.address,state:'ACTIVE'}]);
+    if(req.url==='/v1/agent/withdrawals/challenges') return json(res,200,challenge(
+      '67676767-6767-4676-8676-676767676767','withdrawal creation',
+      hash(['withdrawal-create-v2',accountId,identityId,route.asset,route.amount,route.network,destinationId,route.address,'3',body.idempotencyKey])));
+    if(req.url==='/v1/agent/withdrawals'&&req.method==='POST') {
+      assert.ok(body.proof.signature);
+      if(body.command.idempotencyKey!==requestId) return json(res,201,{...withdrawal,
+        withdrawalId:'bcbcbcbc-bcbc-4cbc-8cbc-bcbcbcbcbcbc',requestId:body.command.idempotencyKey,state:'PENDING'});
+      if(options.mode==='lost') {req.socket.destroy();return;}
+      if(options.mode==='immediate') {
+        res.setHeader('Location',options.location??statusUrl);
+        return json(res,409,{error:'insufficient_funds',message:'Not enough available balance.'});
+      }
+      return json(res,202,{commandId,statusUrl,status:'PENDING',result:null,errorCode:null,httpStatus:null});
+    }
+    if(req.url===statusUrl) {
+      statusCalls++;
+      if(options.replaceAuthAtStatus) fixture.store.replaceSessionWithApiKey('agent','test-new-scoped-key',['tasks:read'],{});
+      if(options.statusHttp) return json(res,options.statusHttp,{});
+      if(options.mode==='interrupted'&&statusCalls===1) return json(res,503,{});
+      if(options.mode==='delayed'&&statusCalls===1)
+        return json(res,200,{commandId,statusUrl,status:'PENDING',result:null,errorCode:null,httpStatus:null});
+      return json(res,200,{commandId,statusUrl,status:'REJECTED',result:{error:'insufficient_funds'},errorCode:'insufficient_funds',httpStatus:409,...options.statusChange});
+    }
+    if(req.url==='/v1/agent/withdrawals/'+commandId)
+      return json(res,options.resourceHttp??200,{...withdrawal,...change});
+    return json(res,404,{});
+  });
+  const fixture=await profileHome(http.origin);
+  let client=await connect(fixture.home,'agent');
+  const call=(input=args)=>client.callTool({name:'marketplace_withdrawal_create',arguments:input});
+  const approve=async pending=>{
+    const path=join(fixture.home,'approvals','agent',`${pending.handoffId}.request.json`);
+    await writeApprovalResponse(path,JSON.parse(await readFile(path,'utf8')));
+    signatureCount++;
+  };
+  return {args,commandId,requests,call,approve,change:value=>{change=value;},
+    get:()=>client.callTool({name:'marketplace_withdrawal_get',arguments:{withdrawalId:commandId}}),
+    corrupt:mutate=>{
+      const journal=fixture.store.getHandoff('agent',handoffId);
+      const saved=JSON.parse(journal.privatePayload);mutate(saved);
+      fixture.store.setHandoffState('agent',handoffId,journal.state,JSON.stringify(saved));
+    },
+    handoffState:state=>fixture.store.setHandoffState('agent',handoffId,state),
+    counts:()=>({posts:requests.filter(r=>r.method==='POST'&&r.path==='/v1/agent/withdrawals').length,
+      challenges:requests.filter(r=>r.path==='/v1/agent/withdrawals/challenges').length,signatures:signatureCount}),
+    journal:()=>fixture.store.getHandoff('agent',handoffId),
+    mutation:()=>fixture.store.getMutationByRequestId('agent',requestId),
+    mutationPending:()=>fixture.store.db.prepare("UPDATE mutations SET state='PENDING' WHERE profile_id='agent' AND request_id=?").run(requestId),
+    submit:async()=>{
+      const pending=JSON.parse(contentText(await call())).result;
+      handoffId=pending.handoffId;
+      assert.equal(pending.status,'approval_required');
+      await approve(pending);
+      return call();
+    },
+    restart:async()=>{await client.close();client=await connect(fixture.home,'agent');},
+    close:async()=>{await client.close();http.close();fixture.store.close();await rm(fixture.home,{recursive:true,force:true});},
+  };
+}
+
+for(const route of [
+  {asset:'ATTO',network:'atto:dev',address:`atto://${'b'.repeat(61)}`,amount:'2000000000'},
+  {asset:'XNO',network:'nano:dev',address:`nano_${'1'.repeat(60)}`,amount:'30000000000000000000000000000'},
+]) test(`${route.asset} explicit withdrawal GET reconciles only the exact existing UNKNOWN rejection`,async()=>{
+  const fixture=await rejectionFixture(route,{mode:'lost'});
+  try {
+    assert.equal((await fixture.submit()).isError,true);
+    assert.equal(fixture.journal().state,'UNKNOWN');
+    const before=fixture.counts();
+    await fixture.restart();
+    assert.equal(JSON.parse(contentText(await fixture.call())).result.status,'unknown');
+    const get=await fixture.get();
+    assert.equal(get.isError,undefined,contentText(get));
+    assert.equal(JSON.parse(contentText(get)).result.state,'REJECTED');
+    assert.equal(fixture.journal().state,'COMPLETE');
+    const pointer=JSON.parse(fixture.journal().privatePayload).commandPointer;
+    assert.equal(pointer.commandId,fixture.commandId);
+    await fixture.restart();
+    const replay=JSON.parse(contentText(await fixture.call())).result;
+    assert.equal(replay.state,'REJECTED');
+    assert.equal(replay.withdrawalId,fixture.commandId);
+    assert.equal(replay.requestId,fixture.args.requestId);
+    assert.deepEqual(fixture.counts(),before,'explicit recovery cannot POST, challenge, or sign');
+    assert.equal(fixture.requests.some(r=>r.path==='/v1/agent/withdrawals'&&r.method==='GET'),false);
+  } finally { await fixture.close(); }
+});
+
+test('explicit withdrawal GET leaves unknown recovery intact for unbound resources and saved authority',async t=>{
+  const route={asset:'ATTO',network:'atto:dev',address:`atto://${'b'.repeat(61)}`,amount:'2000000000'};
+  const cases=[
+    {name:'non-rejected resource',change:{state:'PENDING'},ordinary:true},
+    {name:'historical non-UUID request key',change:{requestId:'browser_request-17'},ordinary:true},
+    {name:'unrelated UUID request',change:{requestId:'abababab-abab-4bab-8bab-abababababab'},ordinary:true},
+    {name:'different withdrawal ID',change:{withdrawalId:'abababab-abab-4bab-8bab-abababababab'}},
+    {name:'amount mismatch',change:{atomicAmount:'1'}},
+    {name:'network mismatch',change:{network:'atto:beta'}},
+    {name:'asset mismatch',change:{asset:'XNO'}},
+    {name:'destination mismatch',change:{destinationId:'abababab-abab-4bab-8bab-ababababababab'}},
+    {name:'address mismatch',change:{destinationAddress:`atto://${'c'.repeat(61)}`}},
+    {name:'version mismatch',change:{destinationVersion:4}},
+    {name:'command owner denied',statusHttp:403},
+    {name:'different command',statusChange:{commandId:'abababab-abab-4bab-8bab-abababababab'}},
+    {name:'command settled',statusChange:{status:'SETTLED',result:{}}},
+    {name:'profile authority changed during status read',replaceAuthAtStatus:true},
+    ...[
+      ['account',saved=>{saved.request.accountId='abababab-abab-4bab-8bab-abababababab';}],
+      ['identity',saved=>{saved.request.identityId='abababab-abab-4bab-8bab-abababababab';}],
+      ['profile',saved=>{saved.request.profileId='other';}],
+      ['origin',saved=>{saved.request.marketplaceOrigin='https://evil.example';}],
+      ['audience',saved=>{saved.request.audience='other';}],
+      ['controller address',saved=>{saved.request.controller.address=`atto://${'c'.repeat(61)}`;}],
+      ['controller index',saved=>{saved.request.controller.index=1;}],
+      ['controller network',saved=>{saved.request.controller.network='NANO';}],
+      ['handoff ID',saved=>{saved.request.handoffId='f'.repeat(32);}],
+      ['purpose',saved=>{saved.request.purpose='payout address enrollment';}],
+      ['context',saved=>{saved.context.address=`atto://${'c'.repeat(61)}`;}],
+      ['action command',saved=>{saved.request.action.command.atomicAmount='1';}],
+      ['request hash',saved=>{saved.requestHash='f'.repeat(64);}],
+    ].map(([name,corrupt])=>({name:`saved ${name}`,corrupt})),
+    {name:'waiting approval handoff',handoffState:'WAITING_APPROVAL',ordinary:true},
+    {name:'submitting handoff',handoffState:'SUBMITTING',ordinary:true},
+  ];
+  for(const scenario of cases) await t.test(scenario.name,async()=>{
+    const fixture=await rejectionFixture(route,{mode:'lost',...scenario});
+    try {
+      assert.equal((await fixture.submit()).isError,true);
+      if(scenario.corrupt) fixture.corrupt(scenario.corrupt);
+      if(scenario.handoffState) fixture.handoffState(scenario.handoffState);
+      const before=fixture.counts();
+      const get=await fixture.get();
+      assert.equal(Boolean(get.isError),!scenario.ordinary,contentText(get));
+      assert.equal(fixture.journal().state,scenario.handoffState??'UNKNOWN');
+      assert.deepEqual(fixture.counts(),before);
+    } finally { await fixture.close(); }
+  });
+});

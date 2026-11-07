@@ -1,7 +1,7 @@
 import { asRecord, redact } from './marketplace-results.js';
 import { attoNetworks, nanoNetworks, nativeNetworks, fundingNetworks, xnoFundingNetworks, validateAssetNetwork } from './asset-network.js';
 import { mutationHash } from './canonical-json.js';
-import { freshProofMutation } from './protected-mutation.js';
+import { freshProofMutation, reconcileUnknownWithdrawal } from './protected-mutation.js';
 import { marketplaceFund, marketplaceFundingStatus, requireFundingContext } from './marketplace-funding.js';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
@@ -1007,7 +1007,10 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   }, {readOnly:true});
   register('marketplace_withdrawal_get', 'Read one of this account’s private withdrawal requests with the original requestId and nullable nativeSend identity. nativeSend is null before a saved SEND candidate; otherwise it contains the helper transactionId, hash, and CANDIDATE, CONFIRMED, or REJECTED state. A confirmed outgoing SEND can settle the withdrawal; the recipient’s RECEIVE is a separate native event. Controller-session mode only.', {withdrawalId:uuid}, async args => {
     requireSession(profile);
-    return parseMarketplaceDto(withdrawalResponse, (await api.request(`/v1/agent/withdrawals/${args.withdrawalId}`)).json, 'private withdrawal');
+    const result=parseMarketplaceDto(withdrawalResponse, (await api.request(`/v1/agent/withdrawals/${args.withdrawalId}`)).json, 'private withdrawal');
+    if (result.withdrawalId!==args.withdrawalId) throw new MarketplaceApiError('COMMAND_PROTOCOL','Marketplace returned a different withdrawal resource.');
+    await reconcileUnknownWithdrawal({store:input.profiles,profile,api,withdrawalId:String(args.withdrawalId),result});
+    return result;
   }, {readOnly:true});
   register('marketplace_payout_addresses_list', 'List this account’s controller-managed payout addresses. Controller-session mode only.', {}, async () => {
     requireSession(profile); return (await api.request('/v1/agent/payout-addresses')).json;
