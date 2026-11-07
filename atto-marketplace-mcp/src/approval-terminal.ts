@@ -7,7 +7,7 @@ import { signMarketplaceAttoController } from '@attocash/cli/internal-marketplac
 import { loadConfiguration, signMarketplaceNanoController } from '@attocash/atto-marketplace-nano-adapter';
 import { MarketplaceProfileStore, ProfileError } from './profile-store.js';
 import { managedWalletEnvironment } from './wallet-home.js';
-import { canonicalJson } from './marketplace-api.js';
+import { canonicalJson } from './canonical-json.js';
 import { validateTypedApproval } from './approval-validation.js';
 import { approvalRequestDigest, approvalRequestPath, approvalResponsePath, readApprovalRequest, readApprovalResponse,
   validateApprovalResponse, verifyApprovalSignature, writeApprovalResponse, type MarketplaceProofApprovalRequest } from './approval-files.js';

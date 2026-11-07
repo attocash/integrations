@@ -1,7 +1,7 @@
 import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { isAbsolute, join, parse, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { canonicalJson } from './marketplace-api.js';
+import { canonicalJson } from './canonical-json.js';
 import { PaymentHandoffError, parseXnoPaymentRequest, parseXnoPaymentResponse, type XnoPaymentRequest, type XnoPaymentResponse } from './payment-handoff.js';
 
 const MAX_FILE_BYTES = 256_000;

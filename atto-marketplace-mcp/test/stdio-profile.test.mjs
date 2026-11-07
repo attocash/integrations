@@ -790,7 +790,7 @@ test('an unsupported pending Marketplace recovery identity is rejected before HT
   const http=await listen(async(_req,res)=>{calls++;json(res,500,{});});
   const fixture=await profileHome({origin:http.origin,authMode:'controller-session',accessToken:'valid-controller-access-token',
     accessExpiresAt:Date.now()+60_000});
-  const {mutationHash}=await import(pathToFileURL(join(packageDirectory,'dist/marketplace-api.js')).href);
+  const {mutationHash}=await import(pathToFileURL(join(packageDirectory,'dist/canonical-json.js')).href);
   const requestHash=mutationHash({operation:'profile-update',target:accountId,payload:patch,accountId});
   fixture.store.beginMutation({profileId:'agent',requestId,operation:'profile-update',target:accountId,requestHash},'old-unwrapped-recovery');
   const before=fixture.store.getMutationByRequestId('agent',requestId);

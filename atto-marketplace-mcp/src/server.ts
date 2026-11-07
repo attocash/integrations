@@ -1,20 +1,20 @@
+import { asRecord, redact } from './marketplace-results.js';
+import { attoNetworks, nanoNetworks, nativeNetworks, fundingNetworks, xnoFundingNetworks, validateAssetNetwork } from './asset-network.js';
+import { mutationHash } from './canonical-json.js';
+import { freshProofMutation } from './protected-mutation.js';
+import { marketplaceFund, marketplaceFundingStatus, requireFundingContext } from './marketplace-funding.js';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { createHash, randomBytes } from 'node:crypto';
-import { existsSync } from 'node:fs';
-import { MarketplaceApiClient, MarketplaceApiError, apiUrl, mutationHash, newRequestId, parseCommandPointer,
+import { createHash } from 'node:crypto';
+import { MarketplaceApiClient, MarketplaceApiError, commandPointerFromError, parseCommandPointer,
   type ApiResponse, type MarketplaceCommandPointer } from './marketplace-api.js';
-import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
+import { MarketplaceProfileStore, ProfileError, requireSession, type MarketplaceProfile } from './profile-store.js';
 import { managedWalletEnvironment } from './wallet-home.js';
 import { verifyWorkReceipt } from './work-receipt.js';
 import { productPaidContent, productPurchaseChallenge, productPurchaseResult, productReceipt,
   productRefundChallenge, productSellerOrder, verifyProductReceipt } from './product-purchase.js';
-import { createXnoPaymentRequest, parseXnoPaymentRequest, parseXnoPaymentResponse, PaymentHandoffError, type XnoPaymentRequest, type XnoPaymentResponse } from './payment-handoff.js';
-import { ensurePaymentHandoffDirectory, readXnoPaymentResponse, readXnoPaymentResponseForRecovery, writeXnoPaymentRequest } from './payment-handoff-files.js';
-import { approvalRequestPath, approvalRequestDigest, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest,
-  type MarketplaceProofApprovalRequest } from './approval-files.js';
-import { attoIntentPaymentStatus, payAttoIntent, payXnoHandoff, callWallet, type AttoIntentPayment,
-  type AttoIntentPaymentFailure, type AttoIntentPaymentStatus } from './wallet-process.js';
+import { PaymentHandoffError } from './payment-handoff.js';
+import { callWallet } from './wallet-process.js';
 import { publishVerifiedResponse, readLocalSource, resolveDownloadDestination, validateFilename,
   type ImmutableFileManifestEntry } from './submission-files.js';
 
@@ -41,8 +41,8 @@ const commandWaitTimeoutMs = (() => {
   return Number.isSafeInteger(parsed) && parsed >= 100 && parsed <= 30_000 ? parsed : 30_000;
 })();
 const asset = z.enum(['ATTO', 'XNO']);
-const attoNetwork = z.enum(['atto:live','atto:beta','atto:dev','atto:local']);
-const nativeNetwork = z.enum(['atto:live','atto:beta','atto:dev','atto:local','nano:mainnet','nano:beta','nano:dev']);
+const attoNetwork = z.enum(attoNetworks);
+const nativeNetwork = z.enum(nativeNetworks);
 const withdrawalResponse = z.object({
   withdrawalId: uuid, requestId: responseRequestId, asset, network: z.string().min(1).max(64),
   atomicAmount: positiveAtomic, destinationId: uuid, destinationVersion: z.number().int().nonnegative(),
@@ -51,8 +51,8 @@ const withdrawalResponse = z.object({
     state:z.enum(['CANDIDATE','CONFIRMED','REJECTED'])}).nullable(),
   createdAt: z.string().datetime({offset:true}), updatedAt: z.string().datetime({offset:true}), replayed: z.boolean(),
 });
-const fundingNetwork = z.enum(['atto:live','atto:beta','atto:dev','atto:local','nano:mainnet','nano:dev']);
-const xnoFundingNetwork = z.enum(['nano:mainnet','nano:dev']);
+const fundingNetwork = z.enum(fundingNetworks);
+const xnoFundingNetwork = z.enum(xnoFundingNetworks);
 const browserFundingContext = {
   expectedMarketplaceOrigin: z.string().min(1).max(2048).optional()
     .describe('Optional browser context check. Supply this together with expectedAccountId, or omit both.'),
@@ -106,10 +106,6 @@ const credential = z.strictObject({
   if (Boolean(value.productPublishAttoLimit || value.productPublishXnoLimit) && !productPublish) context.addIssue({code:'custom',message:'Product publication reservation ceilings require products:publish.'});
   if (apply !== Boolean(value.applyAttoLimit || value.applyXnoLimit)) context.addIssue({code:'custom',message:'applications:apply needs an exact ATTO and/or XNO ceiling, and an unused apply ceiling is rejected.'});
   if (purchase !== Boolean(value.purchaseAttoLimit || value.purchaseXnoLimit)) context.addIssue({code:'custom',message:'products:purchase needs an exact ATTO and/or XNO ceiling, and an unused purchase ceiling is rejected.'});
-});
-const approvalChallenge = z.strictObject({
-  challengeId: uuid, message: z.string().min(1).max(4096),
-  issuedAt: z.string().datetime({offset:true}), expiresAt: z.string().datetime({offset:true}),
 });
 const profilePatch = z.strictObject({
   handle: z.string().min(3).max(30).regex(/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/).nullable().optional(),
@@ -1084,243 +1080,6 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   return server;
 }
 
-interface FreshProofMutationInput {
-  store: MarketplaceProfileStore;
-  profile: MarketplaceProfile;
-  api: MarketplaceApiClient;
-  env: NodeJS.ProcessEnv;
-  home: string;
-  operation: string;
-  target: string;
-  requestId: string;
-  payload: unknown;
-  purpose: string;
-  challengePath: string;
-  challengeBody: unknown;
-  prepare?: () => Promise<unknown>;
-  challengeResponse?: (response:unknown, context:unknown) => {challenge:z.infer<typeof approvalChallenge>;context:unknown};
-  makeAction: (challenge: z.infer<typeof approvalChallenge>, context: unknown) => Record<string, unknown>;
-  send: (proof: {challengeId:string;message:string;signature:string}) => Promise<ApiResponse>;
-  result?: (response: unknown, context: unknown) => unknown;
-}
-
-async function freshProofMutation(input: FreshProofMutationInput): Promise<unknown> {
-  requireSession(input.profile);
-  const requestHash=mutationHash({operation:input.operation,target:input.target,payload:input.payload,accountId:input.profile.accountId});
-  const reservedHandle=randomBytes(16).toString('hex');
-  const previous=input.store.beginMutation({profileId:input.profile.id,requestId:input.requestId,operation:input.operation,
-    target:input.target,requestHash},reservedHandle);
-  const handle=previous.resultIdentity;
-  if (!handle || !/^[a-f0-9]{32}$/.test(handle)) throw new ProfileError('RECOVERY_REQUIRED','The protected Marketplace operation needs local recovery before retrying.');
-  let handoff;
-  try { handoff=input.store.getHandoff(input.profile.id,handle); }
-  catch (error) {
-    if (!(error instanceof ProfileError) || error.code!=='HANDOFF_NOT_FOUND') throw error;
-    input.store.putHandoff(input.profile.id,handle,'CONTROLLER_APPROVAL',requestHash,'PREPARING',
-      JSON.stringify({command:input.payload,requestHash}),Number.MAX_SAFE_INTEGER);
-    handoff=input.store.getHandoff(input.profile.id,handle);
-  }
-  if (handoff.kind!=='CONTROLLER_APPROVAL' || handoff.requestHash!==requestHash) {
-    throw new ProfileError('APPROVAL_BINDING','This local approval handle is bound to another protected Marketplace operation.');
-  }
-  let saved=asRecord(JSON.parse(handoff.privatePayload));
-  if (previous.state==='COMPLETE' || handoff.state==='COMPLETE') {
-    const result=saved.result;
-    if (result===undefined) throw new ProfileError('RECOVERY_REQUIRED','The protected Marketplace operation completed, but its safe result is unavailable locally.');
-    if (previous.state!=='COMPLETE') input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-    if (input.operation==='withdrawal-create') {
-      const withdrawalId=asRecord(result).withdrawalId;
-      if (typeof withdrawalId!=='string' || !uuid.safeParse(withdrawalId).success) {
-        throw new ProfileError('RECOVERY_REQUIRED','The saved withdrawal result has no original withdrawal ID. Use marketplace_withdrawals_list to reconcile it.');
-      }
-      const current=await input.api.request(`/v1/agent/withdrawals/${withdrawalId}`);
-      const recovered=input.result?input.result(current.json,saved.context):safeMutationResult(current.json);
-      return {...asRecord(recovered),recovered:true};
-    }
-    return {...asRecord(result),recovered:true};
-  }
-  if (handoff.state==='COMMAND_PENDING') {
-    const pointer=parseCommandPointer(saved.commandPointer);
-    if (!pointer) throw new ProfileError('RECOVERY_REQUIRED','The durable command pointer is missing from its private approval journal.');
-    return resumeProtectedCommand(input,handle,requestHash,saved,pointer);
-  }
-  if (handoff.state==='UNKNOWN' || handoff.state==='SUBMITTING') {
-    if (isShopFinancialProof(input.operation)) {
-      const request=parseApprovalRequest(saved.request);
-      if (saved.requestHash!==requestHash || mutationHash(saved.command)!==mutationHash(input.payload)) {
-        throw new ProfileError('IDEMPOTENCY_CONFLICT','The saved signed Shop action differs from the original request.');
-      }
-      const responsePath=approvalRequestPath(input.home,input.profile.id,handle).replace(/\.request\.json$/,'.response.json');
-      if (!existsSync(responsePath)) return {status:'unknown',requestId:input.requestId,handoffId:handle,
-        ...protectedMutationRecovery(input)};
-      const response=validateApprovalResponse(request,readApprovalResponse(input.home,input.profile.id,handle));
-      await verifyApprovalSignature(request,response,input.env);
-      const proof={challengeId:response.challengeId,message:response.message,signature:response.signature};
-      try {
-        const sent=await input.send(proof); // One exact same-key replay; Marketplace owns admission and effects.
-        if (sent.command) {
-          saved={...saved,commandPointer:sent.command};
-          input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-          return resumeProtectedCommand(input,handle,requestHash,saved,sent.command);
-        }
-        return completeProtectedMutation(input,handle,request,requestHash,input.payload,saved.context,sent.json);
-      } catch (error) {
-        const pointer=commandPointerFromError(error);
-        if (pointer) {
-          saved={...saved,commandPointer:pointer};
-          input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-        }
-        throw error;
-      }
-    }
-    return {status:'unknown',requestId:input.requestId,handoffId:handle,...protectedMutationRecovery(input)};
-  }
-  if (handoff.state==='EXPIRED') throw new ProfileError('APPROVAL_EXPIRED','This exact approval has expired. Inspect its resource state, then use a new request ID only when the operation is known not to have been applied.');
-  if (handoff.state==='PREPARING') {
-    let context=await input.prepare?.();
-    const challengeResponse=await input.api.request(input.challengePath,{method:'POST',body:input.challengeBody});
-    const extracted=input.challengeResponse?.(challengeResponse.json,context);
-    if (extracted) context=extracted.context;
-    const parsed=approvalChallenge.safeParse(extracted?.challenge??challengeResponse.json);
-    if (!parsed.success || Date.parse(parsed.data.expiresAt)<=Date.now()
-      || Date.parse(parsed.data.expiresAt)-Date.parse(parsed.data.issuedAt)>300_000) {
-      throw new MarketplaceApiError('APPROVAL_CHALLENGE','Marketplace returned an invalid or expired controller approval challenge.');
-    }
-    const request:MarketplaceProofApprovalRequest={version:1,type:'marketplace-controller-approval-request',
-      profileId:input.profile.id,handoffId:handle,marketplaceOrigin:input.profile.origin,transport:'AGENT_API',proofOrigin:null,
-      audience:input.profile.audience,accountId:input.profile.accountId,identityId:input.profile.identityId,
-      controller:{network:input.profile.controllerNetwork,address:input.profile.controllerAddress,index:input.profile.controllerIndex},
-      purpose:input.purpose,action:input.makeAction(parsed.data,context),challenge:parsed.data};
-    saved={command:input.payload,request,requestHash,context};
-    input.store.setHandoffState(input.profile.id,handle,'WAITING_APPROVAL',JSON.stringify(saved));
-    handoff=input.store.getHandoff(input.profile.id,handle);
-  }
-  if (handoff.state!=='WAITING_APPROVAL') throw new ProfileError('APPROVAL_STATE','This controller approval is not ready for the requested action. Use the original request ID to recover it.');
-  saved=asRecord(JSON.parse(handoff.privatePayload));
-  if (saved.requestHash!==requestHash || mutationHash(saved.command)!==mutationHash(input.payload)) {
-    throw new ProfileError('IDEMPOTENCY_CONFLICT','This request ID is already bound to different protected Marketplace action content.');
-  }
-  const request=parseApprovalRequest(saved.request);
-  if (Date.parse(request.challenge.expiresAt)<=Date.now()) {
-    input.store.setHandoffState(input.profile.id,handle,'EXPIRED');
-    throw new ProfileError('APPROVAL_EXPIRED','This exact approval has expired. Inspect its resource state, then retry only with a new request ID.');
-  }
-  const path=await writeApprovalRequest(input.home,input.profile.id,handle,request);
-  const responsePath=approvalRequestPath(input.home,input.profile.id,handle).replace(/\.request\.json$/,'.response.json');
-  if (!existsSync(responsePath)) return approvalRequired(input.requestId,handle,request,path);
-  const response=validateApprovalResponse(request,readApprovalResponse(input.home,input.profile.id,handle));
-  await verifyApprovalSignature(request,response,input.env);
-  if (!input.store.claimHandoff(input.profile.id,handle,'WAITING_APPROVAL','SUBMITTING')) {
-    throw new ProfileError('MUTATION_IN_PROGRESS','Another Marketplace MCP process is submitting this exact approved action. Retry after it completes.');
-  }
-  const proof={challengeId:response.challengeId,message:response.message,signature:response.signature};
-  try {
-    const sent=await input.send(proof);
-    if (sent.command) {
-      saved={...saved,commandPointer:sent.command};
-      input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-      return resumeProtectedCommand(input,handle,requestHash,saved,sent.command);
-    }
-    return completeProtectedMutation(input,handle,request,requestHash,input.payload,saved.context,sent.json);
-  } catch (error) {
-    const pointer=commandPointerFromError(error);
-    if (pointer) {
-      saved={...saved,commandPointer:pointer};
-      input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-      throw error;
-    }
-    input.store.setHandoffState(input.profile.id,handle,'UNKNOWN',JSON.stringify(saved));
-    const recovery=protectedMutationRecovery(input);
-    throw new ProfileError('MUTATION_UNKNOWN',`Marketplace may have applied this signed operation. Use ${String(recovery.reconciliationTool)} to reconcile it. ${String(recovery.next)}`);
-  }
-}
-
-function isShopFinancialProof(operation:string):boolean {
-  return operation==='product-purchase' || operation==='product-refund';
-}
-
-async function resumeProtectedCommand(input:FreshProofMutationInput,handle:string,requestHash:string,
-  saved:Record<string,unknown>,pointer:MarketplaceCommandPointer):Promise<unknown> {
-  try {
-    const completed=await input.api.resumeCommand(pointer);
-    return completeProtectedMutation(input,handle,parseApprovalRequest(saved.request),requestHash,
-      saved.command??input.payload,saved.context,completed.json);
-  } catch(error) {
-    if (!isShopFinancialProof(input.operation) || !(error instanceof MarketplaceApiError)
-      || error.details?.terminal!==true || error.details.commandId!==pointer.commandId
-      || error.details.statusUrl!==pointer.statusUrl) throw error;
-    const result={status:'rejected',requestId:input.requestId,commandId:pointer.commandId,
-      errorCode:error.code,httpStatus:error.httpStatus??409};
-    input.store.setHandoffState(input.profile.id,handle,'COMPLETE',JSON.stringify({...saved,result}));
-    input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-    return result;
-  }
-}
-
-function completeProtectedMutation(input:FreshProofMutationInput,handle:string,request:MarketplaceProofApprovalRequest,
-  requestHash:string,command:unknown,context:unknown,serverResponse:unknown):unknown {
-  const result=input.result?input.result(serverResponse,context):safeMutationResult(serverResponse);
-  input.store.setHandoffState(input.profile.id,handle,'COMPLETE',JSON.stringify({request,command,requestHash,result}));
-  input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-  return result;
-}
-
-function protectedMutationRecovery(input:FreshProofMutationInput):Record<string,unknown> {
-  if(input.operation==='product-purchase') return {
-    reconciliationTool:'marketplace_purchases_list',releaseId:input.target,
-    next:'Inspect this account’s purchases for the exact original release and original purchase command. Keep the saved requestId and handoff; do not start another purchase while this signed submission is uncertain.'};
-  if(input.operation==='product-refund') return {
-    reconciliationTool:'marketplace_purchase_get',
-    purchaseId:input.target,
-    next:'Inspect this original order for status REFUNDED and its stable refundCommandId. Keep the saved requestId and handoff; do not start another refund while this signed submission is uncertain.'};
-  if (input.operation.startsWith('credential-')) {
-    const credential=asRecord(asRecord(input.payload).credential ?? {});
-    const operation=input.operation.slice('credential-'.length).toUpperCase();
-    const target=input.operation==='credential-create'?undefined:input.target;
-    const name=input.operation==='credential-create' && typeof credential.name==='string'?credential.name:undefined;
-    let next:string;
-    if (operation==='CREATE') {
-      next='Inspect this credential name in the metadata list. A committed one-time key whose response was lost cannot be retrieved or activated from metadata. If it exists, use its safe apiKeyId to request an explicitly approved rotation or revocation, then create or activate a replacement as appropriate. If the operation is absent, retry only after confirming that no credential was created.';
-    } else if (operation==='ROTATE') {
-      next='Inspect the target credential and its active successor in the metadata list. A lost one-time rotated key cannot be retrieved or activated. If rotation committed, explicitly approve a new rotation of the active successor to save a fresh key; if the target remains active, retry only after confirming no effect and use a fresh request ID.';
-    } else {
-      next='Inspect the target credential’s revokedAt value in the metadata list. If it is still active, retry only after confirming no effect and use a fresh request ID; if revoked, no replacement is needed.';
-    }
-    return {reconciliationTool:'marketplace_credentials_list',...(target?{targetApiKeyId:target}:{}),...(name?{credentialName:name}:{}),next};
-  }
-  if (input.operation.startsWith('withdrawal-')) return {
-    reconciliationTool:'marketplace_withdrawals_list',
-    next:'Inspect this account’s withdrawal list for the original action. Do not create another request while its outcome is unknown.'};
-  return {reconciliationTool:'marketplace_payout_addresses_list',alsoReadTool:'marketplace_payout_selection_get',
-    next:'Inspect the payout-address list and current selection for the original action. Do not create another request while its outcome is unknown.'};
-}
-
-function approvalRequired(requestId:string,handle:string,request:MarketplaceProofApprovalRequest,path:string):Record<string,unknown> {
-  return {status:'approval_required',requestId,handoffId:handle,purpose:request.purpose,expiresAt:request.challenge.expiresAt,
-    walletCommand:`atto-marketplace-mcp approve ${shellQuote(path)}`,
-    next:'Run this exact command in a local wallet terminal, then call the same Marketplace tool again with the identical request ID and action. The signed response remains in the private profile directory.'};
-}
-
-function parseApprovalRequest(value:unknown):MarketplaceProofApprovalRequest {
-  const request=asRecord(value);
-  const controller=asRecord(request.controller);
-  if (request.version!==1 || request.type!=='marketplace-controller-approval-request'
-    || typeof request.profileId!=='string' || typeof request.handoffId!=='string'
-    || typeof request.marketplaceOrigin!=='string' || request.transport!=='AGENT_API' || request.proofOrigin!==null
-    || typeof request.audience!=='string' || typeof request.purpose!=='string'
-    || (controller.network!=='ATTO' && controller.network!=='NANO')
-    || !request.challenge || typeof request.action!=='object') {
-    throw new ProfileError('APPROVAL_FILE','The saved typed wallet approval request is invalid.');
-  }
-  return request as unknown as MarketplaceProofApprovalRequest;
-}
-
-function safeMutationResult(value:unknown):Record<string,unknown> {
-  const record=asRecord(value);
-  const safe=Object.fromEntries(Object.entries(record).filter(([key])=>/^(?:apiKeyId|result|replayed|destinationId|selectionVersion|withdrawalId|asset|network|atomicAmount|destinationVersion|destinationAddress|state|createdAt|updatedAt)$/.test(key)));
-  return redact(safe,true) as Record<string,unknown>;
-}
-
 function safeCredentialMutation(value:unknown):Record<string,unknown> {
   const record=asRecord(value);
   const apiKeyId=typeof record.apiKeyId==='string'?record.apiKeyId:undefined;
@@ -1396,8 +1155,6 @@ async function credentialGrantForRotation(api:MarketplaceApiClient,apiKeyId:stri
     applyXnoLimit:target.applyXnoLimit,purchaseAttoLimit:target.purchaseAttoLimit,
     purchaseXnoLimit:target.purchaseXnoLimit});
 }
-
-function shellQuote(value:string):string { return `'${value.replace(/'/g,"'\\''")}'`; }
 
 function payoutPurpose(action:string):string {
   switch(action) {
@@ -1485,7 +1242,7 @@ function inferPayoutActionBinding(message:string,profile:MarketplaceProfile,comm
   const match=/^Binding Hash: ([0-9a-f]{64})$/m.exec(message);
   if (!match) throw new MarketplaceApiError('APPROVAL_BINDING','Marketplace did not return a bound payout-address challenge.');
   const candidates=typeof command.network==='string'?[command.network]
-    :command.asset==='ATTO'?['atto:live','atto:beta','atto:dev','atto:local']:['nano:mainnet','nano:beta','nano:dev'];
+    :command.asset==='ATTO'?attoNetworks:nanoNetworks;
   const matching=candidates.filter(network=>createHash('sha256').update([
     'payout-address-v1',profile.accountId,profile.identityId,String(command.action),String(command.asset),network,
     typeof command.destinationId==='string'?command.destinationId:'',candidateAddress,
@@ -1649,12 +1406,6 @@ function findExactSubmission(value:unknown,taskId:string,version:number):{submis
   return {submissionId:row.submissionId,version,files:parsed.data};
 }
 
-function commandPointerFromError(error:unknown):MarketplaceCommandPointer|undefined {
-  if (!(error instanceof MarketplaceApiError) || !error.details) return undefined;
-  try { return parseCommandPointer(error.details); }
-  catch { return undefined; }
-}
-
 async function mutate(store: MarketplaceProfileStore, profile: MarketplaceProfile, api:MarketplaceApiClient, operation: string, target: string, id: string,
   payload: unknown, send: () => Promise<ApiResponse>, prepare?: () => Promise<void>, pendingResultIdentity?:string,
   validateResult?:(value:unknown, source:'response'|'saved')=>void, resultIdentityFields:string[]=[]): Promise<unknown> {
@@ -1702,524 +1453,6 @@ async function mutate(store: MarketplaceProfileStore, profile: MarketplaceProfil
     || resultIdentityFields.includes(key)));
   store.completeMutation(profile.id,id,hash,JSON.stringify(safeIdentity));
   return result;
-}
-
-function requireFundingContext(profile: MarketplaceProfile, args: Record<string, unknown>): void {
-  const hasOrigin = args.expectedMarketplaceOrigin !== undefined;
-  const hasAccount = args.expectedAccountId !== undefined;
-  if (hasOrigin !== hasAccount) {
-    throw new ProfileError('FUNDING_CONTEXT_MISMATCH',
-      'Provide both expectedMarketplaceOrigin and expectedAccountId, or omit both. This validation runs before any funding request or payment is created.');
-  }
-  if (hasOrigin && (args.expectedMarketplaceOrigin !== profile.origin || args.expectedAccountId !== profile.accountId)) {
-    throw new ProfileError('FUNDING_CONTEXT_MISMATCH',
-      'The supplied expectedMarketplaceOrigin and expectedAccountId must both match the configured Marketplace profile. Select the matching Marketplace MCP profile; no funding request or payment was created.');
-  }
-}
-
-function fundingProfileAliasError(store:MarketplaceProfileStore,profile:MarketplaceProfile,requestIdValue:string):ProfileError|undefined {
-  const aliases=store.listFundingRecoveryProfileAliases(profile,requestIdValue);
-  if (!aliases.length) return undefined;
-  const profiles=aliases.map(alias=>`\`${alias.profileId}\``).join(', ');
-  return new ProfileError('FUNDING_PROFILE_ALIAS',
-    `This requestId is saved under matching local profile(s): ${profiles}. Select the original profile and check marketplace_funding_status with this same requestId. This call made no Marketplace or wallet request and created no mutation or payment.`);
-}
-
-function requireSession(profile: MarketplaceProfile): void {
-  if (profile.authMode!=='controller-session') throw new ProfileError('SETUP_REQUIRED','This operation requires a controller-session profile. Reconfigure a separate Marketplace MCP profile with `atto-marketplace-mcp setup --profile <new-id> --mode controller-session`; scoped API-key profiles do not gain funding authority.');
-}
-
-interface MarketplaceFundingJournal {
-  version: 1;
-  profileId: string;
-  accountId: string;
-  origin: string;
-  audience: string;
-  requestId: string;
-  asset: 'ATTO'|'XNO';
-  amountAtomic: string;
-  requestedNetwork?: string;
-  state: string;
-  intentId?: string;
-  network?: string;
-  expiresAt?: string;
-  paymentRequired?: string;
-  xnoRequest?: XnoPaymentRequest;
-  xnoResponse?: XnoPaymentResponse;
-  xnoNativeObservation?: NanoFundingObservation;
-  attoPayment?: AttoIntentPayment;
-  attoFailure?: AttoIntentPaymentFailure;
-  attoNativeState?: 'challenged'|'unknown'|'confirmed'|'rejected';
-  lastStatus?: Record<string,unknown>;
-}
-
-async function marketplaceFund(input:{store:MarketplaceProfileStore;profile:MarketplaceProfile;api:MarketplaceApiClient;env:NodeJS.ProcessEnv;
-  paymentHandoffDirectory?:string;asset:'ATTO'|'XNO';amountAtomic:string;requestId:string;network?:string}):Promise<unknown> {
-  requireSession(input.profile);
-  validateAssetNetwork(input.asset,input.network,'funding');
-  if (!input.store.getMutationByRequestId(input.profile.id,input.requestId)) {
-    const aliasError=fundingProfileAliasError(input.store,input.profile,input.requestId);
-    if (aliasError) throw aliasError;
-  }
-  const requestHash=mutationHash({operation:'marketplace-fund',accountId:input.profile.accountId,origin:input.profile.origin,
-    asset:input.asset,amountAtomic:input.amountAtomic,...(input.network!==undefined?{network:input.network}:{})});
-  const reservedHandle=randomBytes(16).toString('hex');
-  const mutation=input.store.beginMutation({profileId:input.profile.id,requestId:input.requestId,operation:'marketplace-fund',
-    target:input.profile.accountId,requestHash},reservedHandle);
-  const handle=mutation.resultIdentity;
-  if (!handle || !/^[a-f0-9]{32}$/.test(handle)) throw new ProfileError('FUNDING_RECOVERY','The durable funding journal is missing its original payment handle. Do not create a replacement request.');
-  let journal:MarketplaceFundingJournal;
-  try {
-    const existing=input.store.getHandoff(input.profile.id,handle);
-    if (existing.kind!=='MARKETPLACE_FUNDING' || existing.requestHash!==requestHash) throw new Error('binding mismatch');
-    journal=parseFundingJournal(existing.privatePayload,input.profile,handle);
-    if (journal.requestId!==input.requestId || journal.asset!==input.asset || journal.amountAtomic!==input.amountAtomic
-      || journal.requestedNetwork!==input.network) {
-      throw new Error('request mismatch');
-    }
-  } catch (error) {
-    if (error instanceof ProfileError && error.code!=='HANDOFF_NOT_FOUND') throw error;
-    if (!(error instanceof ProfileError)) throw new ProfileError('FUNDING_RECOVERY','The saved funding journal does not match this request. Reconcile its existing status before continuing.');
-    journal={version:1,profileId:input.profile.id,accountId:input.profile.accountId,origin:input.profile.origin,
-      audience:input.profile.audience,requestId:input.requestId,asset:input.asset,amountAtomic:input.amountAtomic,
-      ...(input.network!==undefined?{requestedNetwork:input.network}:{}),state:'PREPARING'};
-    input.store.putHandoff(input.profile.id,handle,'MARKETPLACE_FUNDING',requestHash,'PREPARING',JSON.stringify(journal),Number.MAX_SAFE_INTEGER);
-  }
-
-  if (!journal.intentId) {
-    const created=await input.api.request('/v1/agent/topups',{method:'POST',body:{asset:input.asset,
-      amountAtomic:input.amountAtomic,paymentIdentifier:input.requestId,
-      ...(input.network!==undefined?{network:input.network}:{})},allowStatus:[200,202,402,410]});
-    const status=asRecord(created.json);
-    validateFundingStatus(status,input.profile,input.asset,input.amountAtomic,undefined,input.network);
-    journal={...journal,intentId:String(status.intentId),network:String(status.network),expiresAt:String(status.expiresAt),
-      state:created.status===402?'INTENT_ISSUED':String(status.state),lastStatus:status};
-    if (created.status===402) {
-      const required=created.headers.get('payment-required');
-      if (!required || required.length>100_000) throw new MarketplaceApiError('PAYMENT_PROTOCOL','Marketplace omitted or oversized its exact native payment challenge.');
-      journal.paymentRequired=required;
-      if (input.asset==='XNO') {
-        const directory=requirePaymentHandoffDirectory(input.paymentHandoffDirectory);
-        const request=createXnoPaymentRequest({version:1,type:'marketplace-x402-payment-request',handoffId:handle,
-          origin:input.profile.origin,audience:input.profile.audience,accountId:input.profile.accountId,asset:'XNO',
-          network:String(status.network) as XnoPaymentRequest['network'],amountAtomic:input.amountAtomic,
-          requestId:input.requestId,paymentIdentifier:input.requestId,intentId:String(status.intentId),
-          resourceUrl:`${input.profile.origin}/v1/agent/topups/${String(status.intentId)}`,
-          expiresAt:String(status.expiresAt),paymentRequired:required});
-        assertPaymentRequestProfile(request,input.profile);
-        journal.xnoRequest=request;
-        writeXnoPaymentRequest(directory,request);
-      }
-    }
-    saveFundingJournal(input.store,input.profile.id,handle,journal,journal.state);
-    if (created.status!==402) {
-      const reconciled=await fundingStatusForJournal(input.store,input.profile,input.api,input.env,input.paymentHandoffDirectory,handle,journal,false);
-      return reconciled;
-    }
-  }
-
-  if (!journal.intentId || !journal.expiresAt || !journal.network || !journal.paymentRequired) {
-    throw new ProfileError('FUNDING_RECOVERY','The original Marketplace funding challenge is incomplete in the local journal. Do not request a replacement intent.');
-  }
-  if (Date.parse(journal.expiresAt)<=Date.now()) {
-    return await fundingStatusForJournal(input.store,input.profile,input.api,input.env,input.paymentHandoffDirectory,handle,journal,false);
-  }
-  const current=await fetchFundingIntent(input.api,input.profile,journal);
-  let attoObservation:AttoIntentPaymentStatus|undefined;
-  if (input.asset==='ATTO') {
-    const terminal=fundingFailed(current)||fundingUsable(current)
-      || current.state==='PENDING'&&typeof current.sendHash==='string';
-    attoObservation=terminal||journal.attoFailure
-      ? await bestEffortAttoPaymentStatus(input.env,input.profile,input.requestId)
-      : await attoIntentPaymentStatus({env:input.env,requestId:input.requestId,
-        apiUrl:`${input.profile.origin}/v1/agent/topups`,audience:input.profile.audience});
-    if (attoObservation && attoObservation.paymentState!=='NOT_FOUND') {
-      assertAttoPaymentStatusBinding(attoObservation,journal,current);
-      if (attoObservation.paymentState==='FAILED' && !fundingUsable(current)) {
-        journal={...journal,attoFailure:attoObservation,attoNativeState:attoObservation.nativeState,state:'FAILED',lastStatus:current};
-        saveFundingJournal(input.store,input.profile.id,handle,journal,'FAILED');
-        input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-        return await fundingPublicResult(input.api,journal,current,'Fresh Marketplace API intent read');
-      }
-      journal=recordAttoPaymentStatus(journal,attoObservation);
-    }
-    if (journal.attoFailure && fundingUsable(current)) {
-      throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace reports this ATTO intent credited, but the local wallet reports its native transaction rejected. Reconcile the exact intent before retrying.');
-    }
-    if (journal.attoFailure && !fundingUsable(current)) {
-      journal={...journal,state:'FAILED',lastStatus:current};
-      saveFundingJournal(input.store,input.profile.id,handle,journal,'FAILED');
-      input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-      return await fundingPublicResult(input.api,journal,current,'Fresh Marketplace API intent read');
-    }
-    if (journal.attoPayment || journal.attoNativeState) {
-      saveFundingJournal(input.store,input.profile.id,handle,journal,journal.state);
-    }
-  }
-  if(journal.asset==='XNO'&&journal.xnoRequest) {
-    const observation=await reconcileXnoWallet(input.env,handle,journal.xnoRequest,journal.xnoResponse,current);
-    if(observation)journal={...journal,xnoNativeObservation:observation};
-  }
-  if (fundingFailed(current)) {
-    journal={...journal,state:'FAILED',lastStatus:current};
-    saveFundingJournal(input.store,input.profile.id,handle,journal,'FAILED');
-    input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-    return await fundingPublicResult(input.api,journal,current,'Fresh Marketplace API intent read');
-  }
-  if (fundingUsable(current) || current.state==='PENDING' && current.sendHash) {
-    journal={...journal,state:String(current.state),lastStatus:current};
-    saveFundingJournal(input.store,input.profile.id,handle,journal,journal.state);
-    input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-    return await fundingPublicResult(input.api,journal,current,'Fresh Marketplace API intent read');
-  }
-  if (input.asset==='ATTO' && !journal.attoPayment) {
-    const recovered=attoObservation?.paymentState==='READY'?attoObservation:undefined;
-    const intentId=journal.intentId;
-    const paymentRequired=journal.paymentRequired;
-    const expiresAt=journal.expiresAt;
-    if (!intentId || !paymentRequired || !expiresAt) {
-      throw new ProfileError('FUNDING_RECOVERY','The exact Marketplace challenge is missing from the local journal.');
-    }
-    const payment=recovered ?? await payAttoIntent({
-      env:input.env,apiUrl:`${input.profile.origin}/v1/agent/topups`,audience:input.profile.audience,
-      request:{requestId:input.requestId,intentId,amountAtomic:input.amountAtomic,
-        paymentIdentifier:input.requestId,paymentRequired,
-        apiUrl:`${input.profile.origin}/v1/agent/topups`,resourceUrl:`${input.profile.origin}/v1/agent/topups/${intentId}`,
-        expiresAt},
-    });
-    assertAttoPaymentBinding(payment,journal);
-    journal={...journal,attoPayment:payment,attoNativeState:'unknown',state:'PAYMENT_READY'};
-    saveFundingJournal(input.store,input.profile.id,handle,journal,'PAYMENT_READY');
-  }
-  if (input.asset==='XNO' && !journal.xnoResponse) {
-    const request=journal.xnoRequest;
-    if (!request) throw new ProfileError('FUNDING_RECOVERY','The exact XNO payment request is missing from the durable Marketplace journal.');
-    const directory=requirePaymentHandoffDirectory(input.paymentHandoffDirectory);
-    await payXnoHandoff(input.env,handle);
-    const response=readXnoPaymentResponse(directory,handle,request);
-    journal={...journal,xnoResponse:response,state:'PAYMENT_READY'};
-    saveFundingJournal(input.store,input.profile.id,handle,journal,'PAYMENT_READY');
-  }
-  return submitFundingPayment(input.store,input.profile,input.api,input.env,input.requestId,requestHash,handle,journal);
-}
-
-async function marketplaceFundingStatus(input:{store:MarketplaceProfileStore;profile:MarketplaceProfile;api:MarketplaceApiClient;env:NodeJS.ProcessEnv;
-  paymentHandoffDirectory?:string;requestId:string}):Promise<unknown> {
-  requireSession(input.profile);
-  const mutation=input.store.getMutationByRequestId(input.profile.id,input.requestId);
-  if (!mutation) {
-    const aliasError=fundingProfileAliasError(input.store,input.profile,input.requestId);
-    if (aliasError) throw aliasError;
-    throw new ProfileError('FUNDING_NOT_FOUND','No Marketplace funding request with this requestId exists in this local profile.');
-  }
-  if (mutation.operation!=='marketplace-fund' || mutation.target!==input.profile.accountId) {
-    throw new ProfileError('IDEMPOTENCY_CONFLICT','This requestId is already bound to a different Marketplace operation.');
-  }
-  if (!mutation.resultIdentity || !/^[a-f0-9]{32}$/.test(mutation.resultIdentity)) {
-    throw new ProfileError('FUNDING_RECOVERY','The original funding handle is unavailable. Reconcile with Marketplace support before creating another payment.');
-  }
-  const handoff=input.store.getHandoff(input.profile.id,mutation.resultIdentity);
-  if (handoff.kind!=='MARKETPLACE_FUNDING' || handoff.requestHash!==mutation.requestHash) {
-    throw new ProfileError('FUNDING_RECOVERY','The original funding journal does not match this request. Reconcile with Marketplace support before creating another payment.');
-  }
-  const journal=parseFundingJournal(handoff.privatePayload,input.profile,mutation.resultIdentity);
-  return await fundingStatusForJournal(input.store,input.profile,input.api,input.env,input.paymentHandoffDirectory,
-    mutation.resultIdentity,journal,true);
-}
-
-async function submitFundingPayment(store:MarketplaceProfileStore,profile:MarketplaceProfile,api:MarketplaceApiClient,env:NodeJS.ProcessEnv,requestIdValue:string,
-  requestHash:string,handle:string,journal:MarketplaceFundingJournal):Promise<unknown> {
-  const payment=journal.asset==='ATTO'?journal.attoPayment:journal.xnoResponse;
-  if (!payment || !journal.intentId) throw new ProfileError('FUNDING_RECOVERY','The exact native payment is not saved in the Marketplace funding journal.');
-  saveFundingJournal(store,profile.id,handle,{...journal,state:'SUBMITTING'},'SUBMITTING');
-  let saved:MarketplaceFundingJournal;
-  let status:Record<string,unknown>;
-  let settledState:'PENDING'|'ACCEPTED'|'SETTLED'|'REJECTED';
-  try {
-    const result=await api.request(`/v1/agent/topups/${journal.intentId}`,{method:'POST',
-      headers:{'PAYMENT-SIGNATURE':journal.asset==='ATTO'?journal.attoPayment!.paymentSignature:journal.xnoResponse!.paymentSignature},
-      allowStatus:[200,202,409]});
-    status=asRecord(result.json);
-    validateFundingStatus(status,profile,journal.asset,journal.amountAtomic,journal.intentId,journal.network);
-    const receipt=result.headers.get('payment-response');
-    const settlement=journal.asset==='XNO'
-      ? validatePaymentReceipt(receipt,status,journal.xnoResponse!,result.status)
-      : validateAttoPaymentReceipt(receipt,status,journal.attoPayment!,result.status);
-    settledState=settlement;
-    const nextState=fundingFailed(status)?'FAILED':fundingUsable(status)?String(status.state):'PENDING';
-    saved={...journal,state:nextState,lastStatus:status};
-    saveFundingJournal(store,profile.id,handle,saved,nextState);
-    if (fundingUsable(status) || nextState==='FAILED') store.completeMutation(profile.id,requestIdValue,requestHash,handle);
-  } catch (error) {
-    const existing=store.getHandoff(profile.id,handle);
-    const saved=parseFundingJournal(existing.privatePayload,profile,handle);
-    saveFundingJournal(store,profile.id,handle,{...saved,state:'UNKNOWN'},'UNKNOWN');
-    if (error instanceof MarketplaceApiError || error instanceof ProfileError) throw error;
-    throw new MarketplaceApiError('FUNDING_UNKNOWN','Marketplace may have received this exact native payment. Retry marketplace_fund with the same requestId or reconcile it with marketplace_funding_status.');
-  }
-  if (journal.asset==='ATTO' && (fundingUsable(status) || ['EXPIRED','FAILED'].includes(saved.state))) {
-    const observation=await bestEffortAttoPaymentStatus(env,profile,requestIdValue);
-    if (observation && observation.paymentState!=='NOT_FOUND') {
-      assertAttoPaymentStatusBinding(observation,saved,status);
-      if (observation.paymentState==='FAILED' && fundingUsable(status)) {
-        throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace reports this ATTO intent credited, but the local wallet reports its native transaction rejected. Reconcile the exact intent before retrying.');
-      }
-      saved=recordAttoPaymentStatus(saved,observation);
-      saveFundingJournal(store,profile.id,handle,saved,saved.state);
-    }
-  }
-  if(saved.asset==='XNO'&&saved.xnoRequest) {
-    const observation=await reconcileXnoWallet(env,handle,saved.xnoRequest,saved.xnoResponse,status);
-    if(observation) {saved={...saved,xnoNativeObservation:observation};saveFundingJournal(store,profile.id,handle,saved,saved.state);}
-  }
-  return {...await fundingPublicResult(api,saved,status,'Marketplace API response to payment submission (POST)'),settlementState:settledState};
-}
-
-async function fundingStatusForJournal(store:MarketplaceProfileStore,profile:MarketplaceProfile,api:MarketplaceApiClient,env:NodeJS.ProcessEnv,
-  paymentHandoffDirectory:string|undefined,handle:string,journal:MarketplaceFundingJournal,recoverLocalPayment:boolean):Promise<unknown> {
-  if (!journal.intentId) throw new ProfileError('FUNDING_RECOVERY','The intent ID has not been recorded yet. Retry marketplace_fund with the same requestId to recover the idempotent intent response.');
-  if (recoverLocalPayment && !['ACCEPTED','SETTLED','EXPIRED','FAILED','REJECTED'].includes(journal.state)) {
-    if (journal.asset==='XNO' && !journal.xnoResponse && journal.xnoRequest) {
-      try {
-        const response=readXnoPaymentResponseForRecovery(requirePaymentHandoffDirectory(paymentHandoffDirectory),handle,journal.xnoRequest);
-        journal={...journal,xnoResponse:response,state:'PAYMENT_READY'};
-        saveFundingJournal(store,profile.id,handle,journal,'PAYMENT_READY');
-      } catch (error) {
-        if (!(error instanceof PaymentHandoffError) || error.code!=='PAYMENT_FILE') throw error;
-      }
-    }
-  }
-  const status=await fetchFundingIntent(api,profile,journal);
-  if(journal.asset==='XNO'&&journal.xnoRequest) {
-    const observation=await reconcileXnoWallet(env,handle,journal.xnoRequest,journal.xnoResponse,status);
-    if(observation)journal={...journal,xnoNativeObservation:observation};
-  }
-  if (journal.asset==='ATTO') {
-    const observation=await bestEffortAttoPaymentStatus(env,profile,journal.requestId);
-    if (observation && observation.paymentState!=='NOT_FOUND') {
-      assertAttoPaymentStatusBinding(observation,journal,status);
-      if (observation.paymentState==='FAILED' && fundingUsable(status)) {
-        throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace reports this ATTO intent credited, but the local wallet reports its native transaction rejected. Reconcile the exact intent before retrying.');
-      }
-      journal=recordAttoPaymentStatus(journal,observation);
-    }
-  }
-  if (journal.attoFailure && fundingUsable(status)) {
-    throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace reports this ATTO intent credited, but the saved native wallet journal records rejection. Reconcile the exact intent before retrying.');
-  }
-  journal={...journal,state:journal.attoFailure&&!fundingUsable(status)?'FAILED':fundingFailed(status)?'FAILED':String(status.state),lastStatus:status};
-  saveFundingJournal(store,profile.id,handle,journal,journal.state);
-  if (fundingUsable(status) || fundingFailed(status) || journal.attoFailure) {
-    const mutation=store.getMutationByRequestId(profile.id,journal.requestId);
-    if (mutation?.state==='PENDING') store.completeMutation(profile.id,journal.requestId,mutation.requestHash,handle);
-  }
-  return await fundingPublicResult(api,journal,status,'Fresh Marketplace API intent read');
-}
-
-function parseFundingJournal(payload:string,profile:MarketplaceProfile,handle:string):MarketplaceFundingJournal {
-  let value:Record<string,unknown>;
-  try { value=asRecord(JSON.parse(payload)); } catch { throw new ProfileError('FUNDING_RECOVERY','The private Marketplace funding journal is invalid.'); }
-  if (value.version!==1 || value.profileId!==profile.id || value.accountId!==profile.accountId
-    || value.origin!==profile.origin || value.audience!==profile.audience
-    || typeof value.requestId!=='string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.requestId)
-    || value.asset!=='ATTO'&&value.asset!=='XNO' || typeof value.amountAtomic!=='string'||! /^[1-9][0-9]{0,64}$/.test(value.amountAtomic)
-    || typeof value.state!=='string' || (value.intentId!==undefined && typeof value.intentId!=='string')) {
-    throw new ProfileError('FUNDING_RECOVERY','The private Marketplace funding journal does not match its profile or stable request.');
-  }
-  const journal=value as unknown as MarketplaceFundingJournal;
-  if (journal.requestedNetwork!==undefined) {
-    try { validateAssetNetwork(journal.asset,journal.requestedNetwork,'funding'); }
-    catch { throw new ProfileError('FUNDING_RECOVERY','The saved funding journal has an invalid requested network.'); }
-    if (journal.network!==undefined && journal.network!==journal.requestedNetwork) {
-      throw new ProfileError('FUNDING_RECOVERY','The saved funding intent resolved to a different requested network.');
-    }
-  }
-  if (journal.xnoRequest) {
-    const request=parseXnoPaymentRequest(journal.xnoRequest,0);
-    assertPaymentRequestProfile(request,profile);
-    if (request.handoffId!==handle || request.requestId!==journal.requestId || request.amountAtomic!==journal.amountAtomic
-      || request.network!==journal.network) {
-      throw new ProfileError('FUNDING_RECOVERY','The saved XNO payment request is bound to a different Marketplace funding identity.');
-    }
-  }
-  if (journal.xnoResponse && journal.xnoRequest) parseXnoPaymentResponse(journal.xnoResponse,journal.xnoRequest,handle,0);
-  return journal;
-}
-
-function saveFundingJournal(store:MarketplaceProfileStore,profileId:string,handle:string,journal:MarketplaceFundingJournal,state:string):void {
-  store.setHandoffState(profileId,handle,state,JSON.stringify({...journal,state}));
-}
-
-async function fetchFundingIntent(api:MarketplaceApiClient,profile:MarketplaceProfile,journal:MarketplaceFundingJournal):Promise<Record<string,unknown>> {
-  if (!journal.intentId) throw new ProfileError('FUNDING_RECOVERY','The Marketplace funding intent ID is missing from its local journal.');
-  const status=asRecord((await api.request(`/v1/agent/topups/${journal.intentId}`)).json);
-  validateFundingStatus(status,profile,journal.asset,journal.amountAtomic,journal.intentId,journal.network);
-  if (journal.attoPayment && typeof status.sendHash==='string' && status.sendHash.toUpperCase()!==journal.attoPayment.hash.toUpperCase()) {
-    throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace reports a different ATTO transaction for this funding request.');
-  }
-  if (journal.xnoResponse && typeof status.sendHash==='string' && status.sendHash.toUpperCase()!==journal.xnoResponse.sendHash) {
-    throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace reports a different XNO SEND for this funding request.');
-  }
-  return status;
-}
-
-function hasValidFundingStatuses(status:Record<string,unknown>):boolean {
-  const financialStates=['PENDING','ACCEPTED','SETTLED','REJECTED'];
-  return financialStates.includes(String(status.state))
-    && (status.paymentState===null || financialStates.includes(String(status.paymentState)))
-    && (status.receiveStatus===null || financialStates.includes(String(status.receiveStatus)));
-}
-
-function validateFundingStatus(status:Record<string,unknown>,profile:MarketplaceProfile,assetName:'ATTO'|'XNO',amountAtomic:string,
-  intentId?:string,network?:string):void {
-  if (status.asset!==assetName || status.amountAtomic!==amountAtomic || typeof status.intentId!=='string'
-    || (intentId!==undefined && status.intentId!==intentId) || typeof status.network!=='string'
-    || (network!==undefined && status.network!==network) || !hasValidFundingStatuses(status)
-    || typeof status.expiresAt!=='string' || !Number.isFinite(Date.parse(status.expiresAt))) {
-    throw new MarketplaceApiError('FUNDING_BINDING','Marketplace returned a funding intent that does not match the exact asset, amount and request.');
-  }
-  if (assetName==='XNO' && !['nano:mainnet','nano:dev'].includes(status.network)) throw new MarketplaceApiError('FUNDING_BINDING','Marketplace returned an unsupported XNO network for its exact funding intent.');
-  if (assetName==='ATTO' && !['atto:live','atto:beta','atto:dev','atto:local'].includes(status.network)) throw new MarketplaceApiError('FUNDING_BINDING','Marketplace returned an unsupported Atto network for its exact funding intent.');
-    void profile;
-}
-
-function validateAssetNetwork(assetName:string,network:unknown,operation:string):void {
-  if (network===undefined) return;
-  const allowed=assetName==='ATTO'
-    ? ['atto:live','atto:beta','atto:dev','atto:local']
-    : assetName==='XNO' && operation==='funding'
-      ? ['nano:mainnet','nano:dev']
-      : assetName==='XNO'
-        ? ['nano:mainnet','nano:beta','nano:dev']
-        : [];
-  if (typeof network!=='string' || !allowed.includes(network)) {
-    throw new MarketplaceApiError('NETWORK_ASSET_MISMATCH',`The requested ${operation} network is not available for ${assetName}.`);
-  }
-}
-
-function fundingFailed(status:Record<string,unknown>):boolean {
-  return status.state==='REJECTED';
-}
-
-function fundingUsable(status:Record<string,unknown>):boolean {
-  return status.state==='ACCEPTED' || status.state==='SETTLED';
-}
-
-async function bestEffortAttoPaymentStatus(env:NodeJS.ProcessEnv,profile:MarketplaceProfile,requestIdValue:string):Promise<AttoIntentPaymentStatus|undefined> {
-  try {
-    return await attoIntentPaymentStatus({env,requestId:requestIdValue,
-      apiUrl:`${profile.origin}/v1/agent/topups`,audience:profile.audience});
-  } catch {
-    return undefined;
-  }
-}
-
-function assertAttoPaymentStatusBinding(observation:AttoIntentPaymentStatus,journal:MarketplaceFundingJournal,
-  marketplaceStatus?:Record<string,unknown>):void {
-  if (observation.paymentState==='NOT_FOUND') return;
-  if (observation.requestId!==journal.requestId || observation.intentId!==journal.intentId
-    || observation.network!==journal.network || observation.amountAtomic!==journal.amountAtomic) {
-    throw new ProfileError('FUNDING_BINDING','The managed Atto wallet returned native status for a different Marketplace intent.');
-  }
-  if (observation.paymentState==='FAILED') {
-    if (observation.failureReason==='MARKETPLACE_CHALLENGE_EXPIRED') {
-      if (journal.attoPayment || typeof marketplaceStatus?.sendHash==='string' || typeof marketplaceStatus?.payer==='string') {
-        throw new ProfileError('FUNDING_BINDING','An unsigned ATTO expiry cannot replace an observed native payment.');
-      }
-      return;
-    }
-    if (journal.attoPayment && (journal.attoPayment.hash.toUpperCase()!==observation.hash.toUpperCase()
-      || journal.attoPayment.payer!==observation.payer)) {
-      throw new ProfileError('FUNDING_BINDING','The managed Atto wallet rejection does not match its saved native payment.');
-    }
-    if (typeof marketplaceStatus?.sendHash==='string' && marketplaceStatus.sendHash.toUpperCase()!==observation.hash.toUpperCase()) {
-      throw new ProfileError('FUNDING_BINDING','The managed Atto wallet rejection does not match the Marketplace intent transaction.');
-    }
-    if (typeof marketplaceStatus?.payer==='string' && marketplaceStatus.payer!==observation.payer) {
-      throw new ProfileError('FUNDING_BINDING','The managed Atto wallet rejection does not match the Marketplace intent payer.');
-    }
-    return;
-  }
-  if (observation.paymentState==='READY') {
-    assertAttoPaymentBinding(observation,journal);
-    if (typeof marketplaceStatus?.sendHash==='string' && marketplaceStatus.sendHash.toUpperCase()!==observation.hash.toUpperCase()) {
-      throw new ProfileError('FUNDING_BINDING','The managed Atto wallet payment hash does not match the Marketplace intent transaction.');
-    }
-    if (typeof marketplaceStatus?.payer==='string' && marketplaceStatus.payer!==observation.payer) {
-      throw new ProfileError('FUNDING_BINDING','The managed Atto wallet payer does not match the Marketplace intent transaction.');
-    }
-    if (journal.attoPayment && (journal.attoPayment.hash.toUpperCase()!==observation.hash.toUpperCase()
-      || journal.attoPayment.payer!==observation.payer
-      || journal.attoPayment.paymentSignature!==observation.paymentSignature)) {
-      throw new ProfileError('FUNDING_BINDING','The managed Atto wallet returned a different saved native payment.');
-    }
-    return;
-  }
-  if (journal.attoPayment) throw new ProfileError('FUNDING_BINDING','The managed Atto wallet lost the saved identity of a signed payment.');
-}
-
-function recordAttoPaymentStatus(journal:MarketplaceFundingJournal,observation:AttoIntentPaymentStatus):MarketplaceFundingJournal {
-  if (observation.paymentState==='NOT_FOUND') return journal;
-  if (observation.paymentState==='FAILED') return {...journal,attoFailure:observation,attoNativeState:observation.nativeState,state:'FAILED'};
-  if (observation.paymentState==='PENDING_SIGNATURE') return {...journal,attoNativeState:'challenged'};
-  return {...journal,attoPayment:journal.attoPayment??observation,attoNativeState:observation.nativeState??'unknown'};
-}
-
-function assertAttoPaymentBinding(payment:AttoIntentPayment,journal:MarketplaceFundingJournal):void {
-  if (payment.requestId!==journal.requestId || payment.intentId!==journal.intentId
-    || payment.paymentIdentifier!==journal.requestId || payment.amountAtomic!==journal.amountAtomic
-    || payment.network!==journal.network || payment.paymentState!=='READY') {
-    throw new ProfileError('FUNDING_BINDING','The managed Atto wallet returned payment facts for a different saved Marketplace intent.');
-  }
-}
-
-function validateAttoPaymentReceipt(header:string|null,status:Record<string,unknown>,payment:AttoIntentPayment,httpStatus:number):'PENDING'|'ACCEPTED'|'SETTLED'|'REJECTED' {
-  if (header===null) return validatePendingPaymentStatus(status,payment.hash,payment.payer,payment.network,httpStatus);
-  const receipt=decodeHeader(header);
-  if (receipt.network!==payment.network || typeof receipt.transaction!=='string'
-    || receipt.transaction.toUpperCase()!==payment.hash.toUpperCase() || status.sendHash?.toString().toUpperCase()!==payment.hash.toUpperCase()
-    || receipt.payer!==payment.payer || status.payer!==payment.payer) throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace returned a receipt for a different ATTO transaction.');
-  if (receipt.success===true && httpStatus===200 && fundingUsable(status)
-    && ['ACCEPTED','SETTLED'].includes(String(status.paymentState)) && receipt.errorReason===undefined) {
-    return status.state as 'ACCEPTED'|'SETTLED';
-  }
-  if (receipt.success===false && receipt.errorReason==='settlement_pending' && httpStatus===202
-    && status.state==='PENDING' && status.paymentState==='PENDING') return 'PENDING';
-  if (receipt.success===false && receipt.errorReason==='invalid_transaction_state' && httpStatus===409
-    && fundingFailed(status) && status.paymentState==='REJECTED') return 'REJECTED';
-  throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace returned an inconsistent ATTO settlement receipt and status.');
-}
-
-async function fundingPublicResult(api:MarketplaceApiClient,journal:MarketplaceFundingJournal,
-  status:Record<string,unknown>,statusSource:'Fresh Marketplace API intent read'|'Marketplace API response to payment submission (POST)'):
-  Promise<Record<string,unknown>> {
-  const balances=(await api.request('/v1/agent/balances')).json;
-  const nativeHash = journal.asset === 'ATTO' ? journal.attoFailure?.hash ?? journal.attoPayment?.hash ?? null
-    : journal.xnoNativeObservation?.sendHash ?? journal.xnoResponse?.sendHash ?? null;
-  const rejected = journal.asset === 'ATTO' ? Boolean(journal.attoFailure) : journal.xnoNativeObservation?.state === 'COMPETING';
-  const confirmed = journal.asset === 'ATTO' ? journal.attoNativeState === 'confirmed' : journal.xnoNativeObservation?.state === 'CONFIRMED';
-  const nativePayment = {
-    state: rejected ? 'REJECTED' : confirmed ? 'SETTLED' : 'PENDING',
-    hash: nativeHash,
-    failureReason: rejected ? journal.attoFailure?.failureReason === 'MARKETPLACE_CHALLENGE_EXPIRED'
-      ? 'CHALLENGE_EXPIRED' : 'NATIVE_TRANSACTION_REJECTED' : null,
-  };
-  return {requestId:journal.requestId,asset:journal.asset,amountAtomic:journal.amountAtomic,intentId:journal.intentId,
-    ...(journal.network?{network:journal.network}:{}),status:jsonSafeStatus(status),statusSource,
-    nativePayment,nativePaymentSource:'Managed wallet observation saved in the Marketplace MCP private journal',
-    balances,balancesSource:'Fresh Marketplace API account ledger read',
-    savedObservation:{source:'Marketplace MCP private funding journal',journalState:journal.state,
-      interpretation:'Saved wallet metadata does not override current Marketplace intent or balance status.'},
-    next:journal.attoFailure?(journal.attoFailure.failureReason==='MARKETPLACE_CHALLENGE_EXPIRED'
-      ?'The original ATTO challenge expired before signing. This requestId will not be signed or submitted again; check Marketplace status before starting another funding request.'
-      :'The managed Atto wallet has recorded a terminal native rejection. This requestId will not be signed or submitted again; wait for Marketplace status to reconcile before starting another funding request.')
-      :fundingFailed(status)?'Marketplace rejected this native payment without credit. Reconcile the original request before starting another funding request.'
-      :fundingUsable(status)?'Funding is credited and usable in this Marketplace account.':status.state==='PENDING'
-      ?'Marketplace has saved this exact native payment and its outcome is pending. Recheck marketplace_funding_status with the same requestId.'
-      :status.state==='REJECTED'?'Marketplace rejected this exact payment without credit. Reconcile the original request before creating another.'
-      :'The original intent remains open. Retry marketplace_fund with this same requestId to continue its saved payment.',
-    statusTool:'marketplace_funding_status',statusIdentifierField:'requestId',
-    recovery:{tool:'marketplace_funding_status',arguments:{requestId:journal.requestId}}};
 }
 
 function requireScope(profile: MarketplaceProfile, scope: string): void {
@@ -2273,11 +1506,6 @@ function requireAtomic(value: string): bigint {
   return BigInt(value);
 }
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (value===null || typeof value!=='object' || Array.isArray(value)) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace returned an unexpected response.');
-  return value as Record<string,unknown>;
-}
-
 function sameDraft(current:Record<string,unknown>,requested:Record<string,unknown>):boolean {
   return current.title===String(requested.title).trim()
     && current.description===String(requested.description).trim()
@@ -2297,16 +1525,6 @@ function sameInstant(current:unknown,requested:unknown):boolean {
     return Number.isFinite(whole)?`${whole}:${fraction.padEnd(6,'0').slice(0,6)}`:'invalid';
   };
   return key(current)===key(requested);
-}
-
-function redact(value: unknown, preserveCredentialId = false): unknown {
-  if (Array.isArray(value)) return value.map(item => redact(item, preserveCredentialId));
-  if (value && typeof value==='object') {
-    return Object.fromEntries(Object.entries(value).filter(([key])=>(preserveCredentialId && (key==='apiKeyId' || key==='targetApiKeyId'))
-      || !/(?:access|refresh)?token|apiKey|signature|paymentSignature|paymentPayload|privatePayload/i.test(key))
-      .map(([key,item])=>[key,redact(item, preserveCredentialId)]));
-  }
-  return value;
 }
 
 function credentialMetadata(input: unknown): unknown {
@@ -2337,77 +1555,4 @@ function safeError(error: unknown): {code:string;message:string;httpStatus?:numb
     ...(error instanceof MarketplaceApiError && error.httpStatus?{httpStatus:error.httpStatus}:{}),
     ...(error instanceof MarketplaceApiError && error.details?{details:error.details}:{})};
   return {code:'INTERNAL_ERROR',message:'The Marketplace MCP operation failed. Check the local server log for a non-sensitive diagnostic.'};
-}
-
-function decodeHeader(header: string): Record<string,unknown> {
-  if (header.length>100_000 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(header)) throw new MarketplaceApiError('PAYMENT_PROTOCOL','Marketplace returned an invalid payment requirement header.');
-  const bytes=Buffer.from(header,'base64');
-  if (bytes.toString('base64')!==header || bytes.length>75_000) throw new MarketplaceApiError('PAYMENT_PROTOCOL','Marketplace returned an invalid payment requirement header.');
-  try { return asRecord(JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes))); }
-  catch { throw new MarketplaceApiError('PAYMENT_PROTOCOL','Marketplace returned an invalid payment requirement body.'); }
-}
-
-function validatePendingPaymentStatus(status:Record<string,unknown>,hash:string,payer:string,network:string,httpStatus:number):'PENDING' {
-  if (httpStatus===202 && status.state==='PENDING' && status.paymentState==='PENDING'
-    && status.network===network && typeof status.sendHash==='string'
-    && status.sendHash.toUpperCase()===hash.toUpperCase() && status.payer===payer) return 'PENDING';
-  throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace omitted the native payment receipt without an exact pending payment status.');
-}
-
-function validatePaymentReceipt(header:string|null,status:Record<string,unknown>,response:XnoPaymentResponse,httpStatus:number):'PENDING'|'ACCEPTED'|'SETTLED'|'REJECTED' {
-  if (header===null) return validatePendingPaymentStatus(status,response.sendHash,response.payer,response.network,httpStatus);
-  const receipt=decodeHeader(header);
-  if (receipt.network!==response.network || typeof receipt.transaction!=='string'
-    || receipt.transaction.toUpperCase()!==response.sendHash || String(status.sendHash).toUpperCase()!==response.sendHash
-    || receipt.payer!==response.payer || status.payer!==response.payer) throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace returned a receipt for a different XNO SEND.');
-  if (receipt.success===true && httpStatus===200 && fundingUsable(status)
-    && ['ACCEPTED','SETTLED'].includes(String(status.paymentState)) && receipt.errorReason===undefined) {
-    return status.state as 'ACCEPTED'|'SETTLED';
-  }
-  if (receipt.success===false && receipt.errorReason==='error_block_already_confirmed' && httpStatus===200
-    && fundingUsable(status) && ['ACCEPTED','SETTLED'].includes(String(status.paymentState))) return status.state as 'ACCEPTED'|'SETTLED';
-  if (receipt.success===false && ['settlement_pending','error_block_awaiting_confirmation','error_timeout_expired'].includes(String(receipt.errorReason)) && httpStatus===202
-    && status.state==='PENDING' && status.paymentState==='PENDING') return 'PENDING';
-  if (receipt.success===false && ['error_previous_not_frontier','error_invalid_block'].includes(String(receipt.errorReason)) && httpStatus===409
-    && fundingFailed(status) && status.paymentState==='REJECTED') return 'REJECTED';
-  throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace returned an inconsistent XNO settlement receipt and status.');
-}
-
-function jsonSafeStatus(value:Record<string,unknown>):Record<string,unknown> {
-  return Object.fromEntries(Object.entries(value).filter(([key])=>!/(?:signature|payload|token|apiKey)/i.test(key)));
-}
-
-function requirePaymentHandoffDirectory(directory:string|undefined):string {
-  if (!directory) throw new ProfileError('SETUP_REQUIRED','Configure MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR as the private directory shared with the Nano payer before using XNO funding.');
-  return ensurePaymentHandoffDirectory(directory);
-}
-
-function assertPaymentRequestProfile(request:XnoPaymentRequest,profile:MarketplaceProfile):void {
-  if (request.origin!==profile.origin || request.audience!==profile.audience || request.accountId!==profile.accountId
-    || request.requestId!==request.paymentIdentifier) throw new MarketplaceApiError('PAYMENT_BINDING','The XNO payment handoff belongs to a different configured Marketplace profile.');
-}
-
-interface NanoFundingObservation {
-  handoffId:string;network:string;sourceAddress:string;sendHash:string|null;
-  candidateState:'PRESENT'|'ABSENT';state:'PREPARED'|'UNKNOWN'|'CONFIRMED'|'COMPETING'|'READY';requestSha256?:string;
-}
-/** API settlement and wallet reservation recovery are separate observations of the same SEND. */
-async function reconcileXnoWallet(env:NodeJS.ProcessEnv,handle:string,request:XnoPaymentRequest,response:XnoPaymentResponse|undefined,status:Record<string,unknown>):Promise<NanoFundingObservation|undefined> {
-  let observation:Record<string,unknown>;
-  try {observation=await callWallet(env,{asset:'XNO',operation:'payment.status',input:{handoffId:handle}});}
-  catch {return;} // An unavailable wallet keeps its own source lane fenced.
-  const present=observation.candidateState==='PRESENT';
-  if(observation.handoffId!==handle||observation.network!==request.network
-    ||typeof observation.sourceAddress!=='string'||!/^nano_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(observation.sourceAddress)
-    ||!['PRESENT','ABSENT'].includes(String(observation.candidateState))
-    ||(present?typeof observation.sendHash!=='string'||! /^[A-F0-9]{64}$/.test(observation.sendHash):observation.sendHash!==null)
-    ||!(present?['PREPARED','UNKNOWN','CONFIRMED','COMPETING']:['READY']).includes(String(observation.state))
-    ||(response!==undefined&&(observation.sourceAddress!==response.payer||observation.sendHash!==response.sendHash||!present))
-    ||((response===undefined||observation.requestSha256!==undefined)&&observation.requestSha256!==request.requestSha256)) {
-    throw new MarketplaceApiError('PAYMENT_BINDING','The local Nano wallet status does not match this saved Marketplace request and SEND.');
-  }
-  if(observation.state==='COMPETING'&&fundingUsable(status))throw new MarketplaceApiError('PAYMENT_BINDING','Marketplace reports credit for a Nano SEND that the native wallet proved ineffective. Reconcile this intent before continuing.');
-  return {handoffId:handle,network:request.network,sourceAddress:observation.sourceAddress,sendHash:observation.sendHash as string|null,
-    candidateState:observation.candidateState as 'PRESENT'|'ABSENT',state:observation.state as NanoFundingObservation['state'],
-    ...(typeof observation.requestSha256==='string'?{requestSha256:observation.requestSha256}:{})};
 }

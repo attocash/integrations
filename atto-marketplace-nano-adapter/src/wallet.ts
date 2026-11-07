@@ -1,7 +1,8 @@
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
+import { parseJsonObject } from './json.js';
 import { NanoStateBlock, MAX_RAW, ZERO_HASH, addressPublicKey, canonicalAddress, canonicalHash, upperHex, validWork, type NanoNetwork } from './protocol.js';
-import { NanoRpcClient, DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, parseJsonObject, requireConfirmedFrontier, type NanoAccountSnapshot, type NanoConfirmedAccount } from './rpc.js';
+import { NanoRpcClient, DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, requireConfirmedFrontier, type NanoAccountSnapshot, type NanoConfirmedAccount } from './rpc.js';
 import { canonical, defaultDataDirectory, exactKeys, loadConfiguration, object, positiveRaw, sha256, text, withPrivateKey, type NanoWalletConfiguration } from './configuration.js';
 import { signControllerProof, validateControllerProof, verifyNanoMessage, type ControllerProofRequest } from './controller.js';
 import { HANDLE, UUID, buildPaymentResponse, instant, parsePaymentRequest, validatePaymentResponse, type PaymentRequest } from './handoff.js';

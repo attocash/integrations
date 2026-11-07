@@ -1,3 +1,4 @@
+import { attoNetworks, nanoNetworks } from './asset-network.js';
 import { AttoAddress } from '@attocash/commons-core';
 import { validateMarketplaceUserProofApproval } from '@attocash/cli/internal-marketplace';
 import { canonicalAddress } from '@attocash/atto-marketplace-nano-adapter/protocol';
@@ -25,8 +26,8 @@ export function validateTypedApproval(input: unknown, options: {
       const address = action.kind === 'payout-address' ? action.canonicalTargetAddress : action.destinationAddress;
       const route = action.network;
       if (typeof address !== 'string' || canonicalController(address) !== address
-        || (command.asset === 'ATTO' ? !['atto:live','atto:beta','atto:dev','atto:local'].includes(String(route))
-          : !['nano:mainnet','nano:beta','nano:dev'].includes(String(route)))
+        || (command.asset === 'ATTO' ? !attoNetworks.some(value => value === String(route))
+          : !nanoNetworks.some(value => value === String(route)))
         || (command.asset === 'ATTO') !== address.startsWith('atto://')
         || (action.kind === 'payout-address' && command.action === 'ENROLL'
           && (typeof command.address !== 'string' || canonicalController(command.address) !== address))) throw invalid();

@@ -1,7 +1,8 @@
+import { xnoFundingNetworks } from './asset-network.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { addressPublicKey, upperHex } from '@attocash/atto-marketplace-nano-adapter/protocol';
-import { canonicalJson } from './marketplace-api.js';
+import { canonicalJson } from './canonical-json.js';
 
 const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const amount = z.string().regex(/^[1-9][0-9]{0,64}$/);
@@ -18,7 +19,7 @@ const paymentRequestShape = z.strictObject({
   audience: z.string().min(1).max(512),
   accountId: uuid,
   asset: z.literal('XNO'),
-  network: z.enum(['nano:mainnet', 'nano:dev']),
+  network: z.enum(xnoFundingNetworks),
   amountAtomic: amount,
   requestId: uuid,
   paymentIdentifier: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),
@@ -39,7 +40,7 @@ const paymentResponseShape = z.strictObject({
   requestId: uuid,
   accountId: uuid,
   asset: z.literal('XNO'),
-  network: z.enum(['nano:mainnet', 'nano:dev']),
+  network: z.enum(xnoFundingNetworks),
   amountAtomic: amount,
   origin: z.string().min(1).max(2048),
   paymentIdentifier: z.string().regex(/^[A-Za-z0-9_-]{16,128}$/),

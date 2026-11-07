@@ -1,5 +1,5 @@
 import { NanoStateBlock, addressPublicKey, canonicalAddress, hexBytes, sign, upperHex, validWork, verify } from './protocol.js';
-import { parseJsonObject } from './rpc.js';
+import { parseJsonObject } from './json.js';
 import { canonical, canonicalOrigin, exactKeys, framedHash, object, positiveRaw, sha256, text, type NanoWalletConfiguration } from './configuration.js';
 import { fail } from './errors.js';
 export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;

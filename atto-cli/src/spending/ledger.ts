@@ -600,6 +600,12 @@ export class SpendLedger {
     });
   }
 
+  /** Caller owns this account's lock; unresolved plans keep their accounts reserved. */
+  assertAccountAvailable(index: number): void {
+    const record = this.pending().find(record => (record.plan?.indexes ?? [record.index]).includes(index));
+    if (record) throw new AttoError('ACCOUNT_RESERVED', 'This account belongs to an unfinished payment. Resume that request first.', { requestId: record.id });
+  }
+
   pending(): SendRecord[] {
     return this.records().filter((record) => ['reserved', 'signed', 'unknown'].includes(record.status));
   }

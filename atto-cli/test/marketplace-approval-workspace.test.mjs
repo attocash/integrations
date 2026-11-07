@@ -295,3 +295,27 @@ test('task moderation signs the current TASK target and rejects retired target k
   assert.throws(()=>createClient().inspectProofApproval({...valid,action:{...action,action:'SUSPEND'}}),
     {code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 });
+
+test('withdrawal approval preview escapes every field at the terminal boundary', () => {
+  // Given a proof-bound destination containing terminal controls and a Unicode display override.
+  const destinationAddress = 'nano_destination\u001b[2J\r\n  Amount: 0\u202E';
+  const destinationId = '00000000-0000-4000-8000-000000000202';
+  const action = { kind: 'withdrawal', network: 'nano:mainnet', destinationAddress,
+    command: { asset: 'XNO', atomicAmount: '25', destinationId, expectedSelectionVersion: 2, idempotencyKey } };
+  const binding = sha256(['withdrawal-create-v2', accountId, identityId, 'XNO', '25', action.network,
+    destinationId, destinationAddress, '2', idempotencyKey].join('\n'));
+  const original = request({ action, purpose: 'withdrawal creation', binding });
+  const { preview } = createClient().inspectProofApproval(original);
+
+  // When the accepted request is formatted for local approval.
+  const rendered = formatMarketplaceApprovalPreview(preview);
+
+  // Then it cannot control the terminal or inject a line, while the signed request is untouched.
+  assert.doesNotMatch(rendered, /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u202E]/u);
+  assert.equal(rendered.split('\n').filter(line => line.startsWith('  Action:')).length, 1);
+  assert.equal(rendered.split('\n').filter(line => line.startsWith('  Destination:')).length, 1);
+  assert.match(rendered, /Action: withdraw 25 XNO on nano:mainnet/);
+  assert.ok(rendered.includes(String.raw`\u{1B}[2J\u{D}\u{A}  Amount: 0\u{202E}`));
+  assert.equal(preview.action.destinationAddress, destinationAddress);
+  assert.equal(original.challenge.message.includes(binding), true);
+});

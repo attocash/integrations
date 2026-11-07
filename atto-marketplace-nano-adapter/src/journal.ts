@@ -74,13 +74,16 @@ export class NanoJournal {
     }
     checkLimit(source: string, network: string, now: number, limit: bigint): void {
         this.transaction(() => {
-            const rows = this.db.prepare(`SELECT amount FROM operations WHERE source=? AND network=? AND kind IN ('payment','transfer') AND
-        (state IN ('PREPARING','PREPARED','UNKNOWN') OR (state='CONFIRMED' AND confirmedAt>=?))`).all(source, network, now - 86400000) as {
-                amount: string;
-            }[];
-            if (rows.reduce((sum, row) => sum + BigInt(row.amount), 0n) > limit)
+            if (this.reservedSpend(source, network, now) > limit)
                 fail('DAILY_LIMIT');
         });
+    }
+    private reservedSpend(source: string, network: string, now: number): bigint {
+        const rows = this.db.prepare(`SELECT amount FROM operations WHERE source=? AND network=? AND kind IN ('payment','transfer') AND
+        (state IN ('PREPARING','PREPARED','UNKNOWN') OR (state='CONFIRMED' AND confirmedAt>=?))`).all(source, network, now - 86400000) as {
+            amount: string;
+        }[];
+        return rows.reduce((sum, row) => sum + BigInt(row.amount), 0n);
     }
     private transaction<T>(action: () => T): T {
         this.db.exec('BEGIN IMMEDIATE');
@@ -132,11 +135,7 @@ export class NanoJournal {
             const alias = this.db.prepare('SELECT id FROM operations WHERE uniqueId=?').get(input.uniqueId);
             if (alias)
                 fail('INTENT_ALREADY_USED');
-            const rows = this.db.prepare(`SELECT amount FROM operations WHERE source=? AND network=? AND kind IN ('payment','transfer') AND
-        (state IN ('PREPARING','PREPARED','UNKNOWN') OR (state='CONFIRMED' AND confirmedAt>=?))`).all(input.source, input.network, now - 86400000) as {
-                amount: string;
-            }[];
-            const reserved = rows.reduce((sum, row) => sum + BigInt(row.amount), 0n);
+            const reserved = this.reservedSpend(input.source, input.network, now);
             if (reserved + BigInt(input.amount) > limit)
                 fail('DAILY_LIMIT', 'The Nano payment exceeds the approved rolling 24-hour spend ceiling.');
             this.db.prepare(`INSERT INTO operations(id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner) VALUES(?,?,?,?,?,?,?,?,?,?,'PREPARING',?)`).run(input.id, input.kind, input.digest, input.requestJson, input.uniqueId, input.source, input.network, input.amount, input.destination, now, this.token);

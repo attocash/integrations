@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -411,18 +411,6 @@ function validateCommandPointer(value: MarketplaceCommandPointer): MarketplaceCo
   return { commandId: value.commandId, statusUrl: value.statusUrl };
 }
 
-export function mutationHash(value: unknown): string {
-  return createHash('sha256').update(canonicalJson(value), 'utf8').digest('hex');
-}
-
-export function canonicalJson(value: unknown): string {
-  if (value === null || typeof value !== 'object') return JSON.stringify(value);
-  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(',')}]`;
-  const record = value as Record<string, unknown>;
-  const keys = Object.keys(record).sort();
-  return `{${keys.map(key => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(',')}}`;
-}
-
 export function newRequestId(): string { return randomUUID(); }
 
 async function readBounded(response: Response, overflowError?: MarketplaceApiError): Promise<string> {
@@ -467,4 +455,10 @@ function dateMillis(value: unknown): number {
   const timestamp = Date.parse(value);
   if (!Number.isSafeInteger(timestamp) || timestamp <= 0) throw new Error('bad date');
   return timestamp;
+}
+
+export function commandPointerFromError(error:unknown):MarketplaceCommandPointer|undefined {
+  if (!(error instanceof MarketplaceApiError) || !error.details) return undefined;
+  try { return parseCommandPointer(error.details); }
+  catch { return undefined; }
 }

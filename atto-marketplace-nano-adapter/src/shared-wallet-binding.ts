@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import type { NanoWalletConfiguration } from './configuration.js';
 import { absolutePath, privateDirectory, publishPrivate, readPrivate, recoverPublication } from './private-files.js';
 import { fail } from './errors.js';
-import { parseJsonObject } from './rpc.js';
+import { parseJsonObject } from './json.js';
 
 type SharedConfiguration = NanoWalletConfiguration & { keySource: Extract<NanoWalletConfiguration['keySource'], { type: 'shared-recovery' }> };
 function isShared(config: NanoWalletConfiguration): config is SharedConfiguration {

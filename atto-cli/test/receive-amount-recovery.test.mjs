@@ -247,5 +247,6 @@ test('completed recovery refuses an outward hash that differs from the original 
   await assert.rejects(mcp.call('receive', { index: 1, hash: sent.hash }), { code: 'TRANSACTION_MISMATCH' });
   // Then the conflicting identity is rejected without changing its record or reaching the node.
   unchangedRecovery(f, { key, saved: corrupted }, reads, 2);
-  assert.equal(f.state.requests.length, requests);
+  // Earlier confirmed transactions may still trigger speculative worker requests.
+  assert.deepEqual(f.state.requests.slice(requests).filter(request => !(request.method === 'POST' && request.path === '/works')), []);
 });

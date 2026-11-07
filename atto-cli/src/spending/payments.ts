@@ -144,12 +144,6 @@ export class Payments {
     if (record.plan?.steps.length && !pool.consolidate) throw new AttoError('CONSOLIDATION_REQUIRED', 'Approve consolidation before continuing this payment.');
   }
 
-  /** Caller owns this account's lock; unresolved plans keep their accounts reserved. */
-  requireAvailable(index: number): void {
-    const record = this.ledger.pending().find(record => this.indexes(record).includes(index));
-    if (record) throw new AttoError('ACCOUNT_RESERVED', 'This account belongs to an unfinished payment. Resume that request first.', { requestId: record.id });
-  }
-
   async marketplaceTopUp(request: MarketplaceTopUpRequest): Promise<unknown> {
     const previous = typeof request.requestId === 'string' ? this.ledger.get(request.requestId) : undefined;
     if (previous && this.isLegacyCreditedMarketplaceTopUp(previous)) {

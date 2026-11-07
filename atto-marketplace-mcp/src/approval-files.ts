@@ -2,7 +2,7 @@ import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, link
 import { createHash, randomBytes } from 'node:crypto';
 import { dirname, join, resolve } from 'node:path';
 import { ProfileError } from './profile-store.js';
-import { canonicalJson } from './marketplace-api.js';
+import { canonicalJson } from './canonical-json.js';
 import { validAttoProof } from './atto-proof.js';
 import { offchainVerify } from '@attocash/atto-marketplace-nano-adapter/protocol';
 

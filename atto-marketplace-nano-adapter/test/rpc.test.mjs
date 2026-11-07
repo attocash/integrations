@@ -3,8 +3,9 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { test } from 'node:test';
 import { addressFromPublicKey, hexBytes, NanoStateBlock, publicKey, sign, upperHex, validWork, ZERO_HASH } from '../dist/protocol.js';
+import { parseJsonObject } from '../dist/json.js';
 import { DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, epochLink, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, NanoRpcClient,
-  parseJsonObject, requireConfirmedFrontier } from '../dist/rpc.js';
+  requireConfirmedFrontier } from '../dist/rpc.js';
 
 const SOURCE_KEY = new Uint8Array(32).fill(1);
 const SOURCE = addressFromPublicKey(publicKey(SOURCE_KEY));

@@ -379,7 +379,7 @@ test('historical payment accounting does not resume old Marketplace authorizatio
   // Then neither current entrypoint accepts the old authorization, and pending accounts remain fenced.
   await assert.rejects(topup, { code: 'REQUEST_CONFLICT' });
   await assert.rejects(intent, { code: 'REQUEST_CONFLICT' });
-  assert.throws(() => payments.requireAvailable(1), { code: 'ACCOUNT_RESERVED' });
+  assert.throws(() => ledger.assertAccountAvailable(1), { code: 'ACCOUNT_RESERVED' });
   assert.equal(JSON.stringify(store.get('spending.records')), before);
 });
 

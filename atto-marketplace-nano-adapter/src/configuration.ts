@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path';
 import { withMarketplaceRecoverySeed, type MarketplaceRecoverySource } from '@attocash/cli/internal-marketplace';
 import { createHash } from 'node:crypto';
 import { addressFromPublicKey, canonicalAddress, derivePrivateKey, deriveNanoRecoveryPrivateKey, publicKey, MAX_RAW, type NanoNetwork } from './protocol.js';
-import { parseJsonObject } from './rpc.js';
+import { parseJsonObject } from './json.js';
 import { absolutePath, privateDirectory, privateFile, publishPrivate, readPrivate, recoverPublication, replacePrivate } from './private-files.js';
 import { checkSharedWalletBindingIfPresent, claimSharedWalletBinding, requireSharedWalletBinding } from './shared-wallet-binding.js';
 import { fail } from './errors.js';

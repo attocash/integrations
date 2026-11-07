@@ -45,6 +45,31 @@ also exercised. Linux container integration tests and isolated native
 password-store tests are separate checks; no test sends live funds or publishes
 a package.
 
+## Source ownership
+
+| Responsibility | Owner |
+| --- | --- |
+| Released wallet operations and session lifecycle | `atto-cli/src/application/`; public library entry point `core.ts` |
+| Receive candidates, recovery, and unresolved receive fences | `atto-cli/src/wallet/receive.ts`, shared by explicit and automatic receiving |
+| Spending policy, reservations, and account availability | `atto-cli/src/spending/ledger.ts`; `payments.ts` owns selection, signing, publication, and reconciliation |
+| Terminal Marketplace approval presentation | `atto-cli/src/marketplace/approval-preview.ts`; all rendered fields pass through terminal escaping |
+| Wallet MCP protocol and transport | `atto-mcp/src/`, using the released CLI engine |
+| Marketplace tools and resource-specific commands | `atto-marketplace-mcp/src/server.ts` |
+| Marketplace funding intent and native-payment recovery | `atto-marketplace-mcp/src/marketplace-funding.ts` |
+| Protected Marketplace mutations and terminal approval recovery | `atto-marketplace-mcp/src/protected-mutation.ts` |
+| Marketplace profile persistence and submission claims | `atto-marketplace-mcp/src/profile-store.ts` |
+| Marketplace canonical serialization and asset/network rules | `atto-marketplace-mcp/src/canonical-json.ts` and `asset-network.ts` |
+| Nano native operation lifecycle and spend reservations | `atto-marketplace-nano-adapter/src/wallet.ts` and `journal.ts` |
+| Bounded Nano JSON parsing | `atto-marketplace-nano-adapter/src/json.ts`, shared by RPC and local recovery inputs |
+
+The CLI and wallet MCP are released contracts. Keep their exported interfaces,
+operation schemas, command behavior, and persisted wallet records compatible.
+Marketplace packages are unreleased; their internal interfaces can change. Preserve
+financial recovery guarantees across all packages: retry the original request ID,
+retain uncertain reservations and exact signed candidates, and hold the existing
+account and wallet locks around the same state transitions. Moving a workflow
+must include its recovery path and journal validation.
+
 ## Packaging
 
 ```sh
@@ -55,7 +80,7 @@ npm run pack -- --pack-destination /tmp/atto-artifacts
 Source checkouts use `0.0.0` as a development placeholder. CI replaces it with
 the version calculated by semantic-release before testing and publishing.
 
-This produces CLI, wallet MCP, and Marketplace MCP tarballs. The Marketplace MCP tarball
+This produces CLI, wallet MCP, Nano adapter, and Marketplace MCP tarballs. The Marketplace MCP tarball
 is an accepted workspace artifact and is not in the trusted npm publisher.
 The root `package-lock.json` records the development dependency tree for
 `npm ci`.
@@ -68,7 +93,7 @@ dependencies to preserve patched `ws` resolution. Native password-store
 bindings remain normal npm dependencies so npm selects the correct platform
 binaries. The wallet MCP stays a separate package with an exact dependency on
 `@attocash/cli`; its SDK is not bundled. The Marketplace MCP package depends on the
-matching CLI and wallet MCP artifacts plus Commons 8.0.2. For local Commons
+matching CLI and Nano adapter artifacts plus Commons 8.0.2. For local Commons
 packages, `ATTO_COMMONS_LOCAL_VERSION` makes staging verify the one installed
 Commons closure and rewrites only the staged CLI dependency versions; source
 manifests remain registry-pinned.
