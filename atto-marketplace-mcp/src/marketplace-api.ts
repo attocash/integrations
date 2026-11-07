@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import { resolve } from 'node:path';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
 
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -6,6 +7,10 @@ const COMMAND_WAIT_TIMEOUT_MS = 30_000;
 const COMMAND_POLL_INTERVAL_MS = 250;
 const RESPONSE_LIMIT_BYTES = 1_048_576;
 const TOKEN_LIMIT = 8192;
+
+// Only join refreshes owned by this process and this exact persisted session.
+// SQLite remains the authority for attempt ownership across processes and logins.
+const sessionRefreshes = new Map<string, Promise<string>>();
 
 export interface MarketplaceCommandPointer {
   commandId: string;
@@ -274,6 +279,28 @@ export class MarketplaceApiClient {
     if (profile.authMode !== 'controller-session') throw new ProfileError('AUTH_MODE', 'This profile has no supported authentication mode.');
     if (profile.accessToken && profile.accessExpiresAt && profile.accessExpiresAt > Date.now() + 30_000) return profile.accessToken;
 
+    const key = createHash('sha256').update(JSON.stringify([
+      resolve(this.profiles.home), profile.id, profile.origin, profile.audience,
+      profile.accountId, profile.agentId, profile.identityId, profile.controllerNetwork,
+      profile.controllerAddress, profile.controllerIndex, profile.refreshToken,
+    ])).digest('hex');
+    let pending = sessionRefreshes.get(key);
+    if (!pending) {
+      pending = this.refreshAuthorization(profile);
+      sessionRefreshes.set(key, pending);
+    }
+    let accessToken: string;
+    try { accessToken = await pending; }
+    finally { if (sessionRefreshes.get(key) === pending) sessionRefreshes.delete(key); }
+    const current = this.profiles.getProfile(profile.id);
+    if (current.authMode !== 'controller-session' || current.refreshState !== 'READY'
+      || current.accessToken !== accessToken || !current.accessExpiresAt || current.accessExpiresAt <= Date.now()) {
+      throw new ProfileError('REAUTH_REQUIRED', 'The controller session changed while refreshing. Inspect the current session from the local terminal before retrying.');
+    }
+    return accessToken;
+  }
+
+  private async refreshAuthorization(profile: MarketplaceProfile): Promise<string> {
     const attempt = this.profiles.beginRefresh(profile.id);
     if (attempt.kind === 'fresh') return attempt.accessToken;
     if (attempt.kind === 'busy') {

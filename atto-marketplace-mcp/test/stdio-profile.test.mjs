@@ -275,6 +275,41 @@ test('profile publication error projection keeps authorization and unknown error
   }
 });
 
+test('parallel stdio tool reads share the owning process refresh without transient busy errors', async () => {
+  // Given an expired controller session and a held refresh response in one MCP process.
+  let refreshCount=0;let releaseRefresh;let announceRefresh;
+  const enteredRefresh=new Promise(resolve=>{announceRefresh=resolve;});
+  const authorization=[];
+  const http=await listen(async(req,res)=>{
+    if(req.url==='/v1/agent/auth/sessions/refresh') {
+      refreshCount++;announceRefresh();await new Promise(resolve=>{releaseRefresh=resolve;});
+      return json(res,200,{accessToken:'rotated-access-token',accessExpiresAt:new Date(Date.now()+60_000).toISOString(),
+        refreshToken:'rotated-refresh-token',refreshExpiresAt:new Date(Date.now()+120_000).toISOString()});
+    }
+    if(req.url?.startsWith('/v1/discovery/tasks')) return json(res,200,{items:[],nextCursor:null});
+    if(req.url==='/v1/agent/profile') {authorization.push(req.headers.authorization);return json(res,200,{handle:null,displayName:null});}
+    return json(res,404,{});
+  });
+  const fixture=await profileHome({origin:http.origin,authMode:'controller-session',accessToken:'expired-access-token',accessExpiresAt:Date.now()-1000,
+    refreshToken:'old-refresh-token',refreshExpiresAt:Date.now()+120_000});
+  const client=await connect(fixture.home,'agent');
+  try {
+    const first=client.callTool({name:'marketplace_profile_get',arguments:{}});await enteredRefresh;
+    // When more tool reads arrive on this process during the outstanding refresh.
+    const reads=[first,...Array.from({length:5},()=>client.callTool({name:'marketplace_profile_get',arguments:{}}))];
+    // A later public read proves the process has handled the queued calls before releasing refresh.
+    await client.callTool({name:'marketplace_tasks_search',arguments:{}});
+    releaseRefresh();const results=await Promise.all(reads);
+    // Then all reads succeed and the rotating refresh token was sent once.
+    assert.equal(refreshCount,1);assert.ok(results.every(result=>result.isError===undefined));
+    assert.deepEqual(authorization,Array(6).fill('Bearer rotated-access-token'));
+    assert.equal(fixture.store.getProfile('agent').refreshState,'READY');
+    assert.doesNotMatch(JSON.stringify(results),/old-refresh-token|rotated-access-token|rotated-refresh-token/);
+  } finally {
+    releaseRefresh?.();await client.close();http.close();fixture.store.close();await rm(fixture.home,{recursive:true,force:true});
+  }
+});
+
 test('two stdio MCP processes coordinate rotating refresh tokens through the SQLite attempt fence', async () => {
   // Given an expired controller session shared by two independent MCP processes.
   let refreshCount=0;
