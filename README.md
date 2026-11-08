@@ -135,7 +135,7 @@ MCP tools; other programs running as your OS user retain their normal access.
 | --- | --- | --- | --- |
 | [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | Published beta | `atto`; `@attocash/cli/core` library | [Wallet setup, payments, labels, and recovery](atto-cli/README.md) |
 | [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | Published beta | `atto-mcp` | [Client setup, prompts, and 40 public tools in this checkout](atto-mcp/README.md) |
-| `@attocash/atto-marketplace-mcp` | Unreleased source artifact | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
+| `@attocash/marketplace-mcp` | Unreleased source artifact | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
 | `@attocash/atto-marketplace-nano-adapter` | Private workspace, embedded in Marketplace MCP | Library; no standalone executable | [Nano wallet adapter and recovery](atto-marketplace-nano-adapter/README.md) |
 
 As checked on **2026-11-08**, npm's `latest` tag is **0.2.3** for both the CLI

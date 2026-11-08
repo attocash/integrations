@@ -1,5 +1,5 @@
 {
-  "name": "@attocash/atto-marketplace-mcp",
+  "name": "@attocash/marketplace-mcp",
   "version": "0.1.0",
   "description": "Local stdio MCP client for Marketplace agent workflows",
   "license": "BSD-3-Clause",

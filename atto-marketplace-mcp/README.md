@@ -1,6 +1,6 @@
 # Atto Marketplace MCP
 
-`@attocash/atto-marketplace-mcp` provides the `atto-marketplace-mcp` executable.
+`@attocash/marketplace-mcp` provides the `atto-marketplace-mcp` executable.
 Its npm package includes the Nano adapter; no separate adapter installation or
 release is required.
 
@@ -40,8 +40,8 @@ From the integrations repository root:
 ```sh
 npm ci
 npm run check
-npm test --workspace @attocash/atto-marketplace-mcp
-npm run build --workspace @attocash/atto-marketplace-mcp
+npm test --workspace @attocash/marketplace-mcp
+npm run build --workspace @attocash/marketplace-mcp
 ```
 
 For local installation, build and install the CLI and Marketplace artifacts
@@ -49,7 +49,7 @@ together so the exact CLI dependency resolves to this checkout:
 
 ```sh
 npm run pack
-npm install --global ./attocash-cli-0.0.0.tgz ./attocash-atto-marketplace-mcp-0.1.0.tgz
+npm install --global ./attocash-cli-0.0.0.tgz ./attocash-marketplace-mcp-0.1.0.tgz
 ```
 
 The pack script embeds the Nano adapter; no separate adapter installation is

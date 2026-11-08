@@ -51,7 +51,7 @@ async function pack() {
   if (cli.name !== '@attocash/cli' || mcp.name !== '@attocash/mcp' || mcp.dependencies?.[cli.name] !== cli.version) {
     throw new Error('The MCP package must depend on the exact CLI version being packaged.');
   }
-  if (marketplace.name !== '@attocash/atto-marketplace-mcp' || marketplace.dependencies?.[cli.name] !== cli.version
+  if (marketplace.name !== '@attocash/marketplace-mcp' || marketplace.dependencies?.[cli.name] !== cli.version
       || marketplace.dependencies?.[nano.name] !== nano.version || marketplace.dependencies?.['@attocash/commons-core'] !== '8.0.2') {
     throw new Error('The Marketplace MCP artifact must retain Commons 8.0.2 and depend on the exact CLI and Nano wallet versions being packaged.');
   }

@@ -94,7 +94,7 @@ jobs:
           mv "./attocash-cli-$RELEASE_VERSION.tgz" artifacts/
           mv "./attocash-mcp-$RELEASE_VERSION.tgz" artifacts/
           MARKETPLACE_VERSION="$(node -p "require('./atto-marketplace-mcp/package.json').version")"
-          mv "./attocash-atto-marketplace-mcp-$MARKETPLACE_VERSION.tgz" artifacts/
+          mv "./attocash-marketplace-mcp-$MARKETPLACE_VERSION.tgz" artifacts/
       - uses: actions/upload-artifact@v4
         with:
           name: atto-release-packages

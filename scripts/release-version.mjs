@@ -34,7 +34,7 @@ export function prepareRelease(version, directory = repository) {
   if (root?.name !== '@attocash/integrations' || root.private !== true || 'version' in root
       || cli?.name !== '@attocash/cli' || mcp?.name !== '@attocash/mcp'
       || typeof mcp.dependencies?.['@attocash/cli'] !== 'string'
-      || marketplace?.name !== '@attocash/atto-marketplace-mcp' || marketplace.dependencies?.['@attocash/cli'] !== cli.version
+      || marketplace?.name !== '@attocash/marketplace-mcp' || marketplace.dependencies?.['@attocash/cli'] !== cli.version
       || nano?.name !== '@attocash/atto-marketplace-nano-adapter' || nano.dependencies?.['@attocash/cli'] !== cli.version
       || nanoLock?.name !== nano.name || nanoLock.version !== nano.version
       || nanoLock.dependencies?.['@attocash/cli'] !== cli.version

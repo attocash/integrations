@@ -52,7 +52,7 @@ async function verifySourceInstall() {
   for (const [packageName, directory] of [
     ['cli', 'atto-cli'],
     ['mcp', 'atto-mcp'],
-    ['atto-marketplace-mcp', 'atto-marketplace-mcp'],
+    ['marketplace-mcp', 'atto-marketplace-mcp'],
     ['atto-marketplace-nano-adapter', 'atto-marketplace-nano-adapter'],
   ]) {
     assert.equal(await realpath(join(source, 'node_modules', '@attocash', packageName)), join(source, directory));
@@ -62,7 +62,7 @@ async function verifySourceInstall() {
 
 async function verifyMarketplace(directory, cliDirectory) {
   const published = await manifest(directory);
-  assert.equal(published.name, '@attocash/atto-marketplace-mcp');
+  assert.equal(published.name, '@attocash/marketplace-mcp');
   assert.equal(published.dependencies['@attocash/cli'], cliManifest.version);
   assert.equal(published.dependencies['@attocash/atto-marketplace-nano-adapter'], nanoManifest.version);
   assert.equal(published.dependencies['@attocash/commons-core'], '8.0.2');
@@ -210,7 +210,7 @@ try {
   const pairModules = await install(pairPrefix, [cliArtifact, mcpArtifact, marketplaceArtifact]);
   const cliDirectory = join(pairModules, '@attocash', 'cli');
   const mcpDirectory = join(pairModules, '@attocash', 'mcp');
-  const marketplaceDirectory = join(pairModules, '@attocash', 'atto-marketplace-mcp');
+  const marketplaceDirectory = join(pairModules, '@attocash', 'marketplace-mcp');
   await verifyCli(cliDirectory, pairPrefix, false);
   await verifyMarketplace(marketplaceDirectory, cliDirectory);
   const mcp = await manifest(mcpDirectory);
@@ -295,7 +295,7 @@ try {
   }
 
   const globalModules = await install(join(temporary, 'global'), [cliArtifact, mcpArtifact, marketplaceArtifact], true);
-  await verifyMarketplace(join(globalModules, '@attocash', 'atto-marketplace-mcp'), join(globalModules, '@attocash', 'cli'));
+  await verifyMarketplace(join(globalModules, '@attocash', 'marketplace-mcp'), join(globalModules, '@attocash', 'cli'));
   const resolution = await execute(process.execPath, ['--input-type=module', '-e', `
     import { fileURLToPath } from 'node:url';
     const core = await import('@attocash/cli/core');
@@ -307,7 +307,7 @@ try {
   const mcpVersion = await execute(process.execPath, [join(globalModules, '@attocash/mcp/dist/main.js'), '--version'], { cwd: temporary, timeout: 15_000 });
   assert.equal(cli.stdout.trim(), cliManifest.version);
   assert.equal(mcpVersion.stdout.trim(), mcpManifest.version);
-  const marketplaceHelpGlobal = await execute(process.execPath, [join(globalModules, '@attocash/atto-marketplace-mcp/dist/main.js'), '--help'], { cwd: temporary, timeout: 15_000 });
+  const marketplaceHelpGlobal = await execute(process.execPath, [join(globalModules, '@attocash/marketplace-mcp/dist/main.js'), '--help'], { cwd: temporary, timeout: 15_000 });
   assert.match(marketplaceHelpGlobal.stdout, /Usage: atto-marketplace-mcp/);
   const detached = await execute(process.execPath, ['--test', '--test-concurrency=1', '--test-name-pattern=detached|background|stop retains|unavailable credentials|dead owner|real CLI send|lost receive|startup acknowledges',
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'), join(root, 'atto-cli/test/payments.test.mjs'),
