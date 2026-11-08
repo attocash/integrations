@@ -10,8 +10,12 @@ an MCP client access with spending limits you choose. Both packages are
 available as an initial beta.
 
 This workspace also contains a separate Marketplace MCP for Marketplace account
-workflows. It is built and smoke-tested here, but the current npm release still
-publishes only the CLI and wallet MCP packages.
+workflows and its embedded Nano wallet adapter. Both are unreleased; the npm
+release publishes only the CLI and wallet MCP packages.
+
+This guide and the package guides describe the current source checkout. npm
+releases can lag behind it; check your installed command's `--help` or your MCP
+client's tool list for available features. See [release status](#release-status).
 
 [Get started](#get-started) · [What you can do](#what-you-can-do) ·
 [CLI guide](atto-cli/README.md) · [MCP guide](atto-mcp/README.md)
@@ -24,8 +28,9 @@ publishes only the CLI and wallet MCP packages.
 
 ## Get started
 
-Requires **Node.js 24**. Use the latest 24.x release and an available OS password
-store: Keychain on macOS, Credential Manager on Windows, or Secret Service on
+Requires **Node.js 24.15.0 or newer**. CI runs Node.js 24; use the latest 24.x
+release and an available OS password store: Keychain on macOS, Credential Manager
+on Windows, or Secret Service on
 Linux. Linux also needs `secret-tool` and an unlocked desktop keyring.
 
 ### Use Atto in your terminal
@@ -124,11 +129,24 @@ MCP tools; other programs running as your OS user retain their normal access.
 
 ## Find your way around
 
-| Package | Command | Guide |
-| --- | --- | --- |
-| [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | `atto` | [Wallet setup, payments, labels, and recovery](atto-cli/README.md) |
-| [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | `atto-mcp` | [Client setup, prompts, and all 40 public tools](atto-mcp/README.md) |
-| Marketplace MCP workspace | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
+### Release status
+
+| Package | Availability | Command or interface | Guide |
+| --- | --- | --- | --- |
+| [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | Published beta | `atto`; `@attocash/cli/core` library | [Wallet setup, payments, labels, and recovery](atto-cli/README.md) |
+| [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | Published beta | `atto-mcp` | [Client setup, prompts, and 40 public tools in this checkout](atto-mcp/README.md) |
+| `@attocash/atto-marketplace-mcp` | Unreleased source artifact | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
+| `@attocash/atto-marketplace-nano-adapter` | Private workspace, embedded in Marketplace MCP | Library; no standalone executable | [Nano wallet adapter and recovery](atto-marketplace-nano-adapter/README.md) |
+
+As checked on **2026-11-08**, npm's `latest` tag is **0.2.3** for both the CLI
+and wallet MCP. That MCP artifact exposes 36 tools. The four additional tools
+in this checkout are `message_sign`, `message_verify`, `marketplace_topup`, and
+`marketplace_topup_status`; build from source to use them with the matching CLI
+engine. Check the linked npm pages for subsequent releases.
+
+The wallet MCP includes bounded Marketplace account top-ups after terminal
+configuration. Task, hiring, and Shop workflows belong to the separate
+Marketplace MCP. [Wallet MCP top-up setup](atto-mcp/README.md#marketplace-account-top-ups).
 
 Use `atto --help` or `atto-mcp --help` to explore commands. For updates, rerun
 the npm installation command; npx with `@latest` selects the current published
@@ -143,7 +161,8 @@ repository. Protocol signing and publication use [Atto Commons](https://github.c
 
 ## Install from source
 
-Clone the repository, build the two local artifacts, and install them together:
+Clone the repository, build the local artifacts, and install the CLI and wallet
+MCP together:
 
 ```sh
 git clone https://github.com/attocash/integrations.git
@@ -157,5 +176,9 @@ atto wallet create
 To use only the terminal wallet, install just `attocash-cli-0.0.0.tgz`. Install
 both artifacts in the same npm command when testing MCP from this checkout so
 its exact CLI dependency resolves to the local artifact.
+
+`npm run pack` also produces the Marketplace MCP artifact, with its Nano adapter
+embedded. See its [source installation guide](atto-marketplace-mcp/README.md)
+to install it with the matching CLI artifact.
 
 For development and testing, see the [contributor guide](docs/contributing.md).

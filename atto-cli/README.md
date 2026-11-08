@@ -8,6 +8,11 @@ Create a wallet, name your addresses, and send payments from the command line.
 Check what arrived, follow activity live, or use JSON output in your own scripts.
 Available as an initial beta for macOS, Linux, and Windows.
 
+This guide follows the current source checkout. Published npm releases may lag
+behind it, including Marketplace commands. Check your installed `atto --help`
+and command-specific help, or [build from source](#install-from-source) to use
+the checkout's features. See the [repository release status](https://github.com/attocash/integrations#release-status).
+
 [Install](#install) · [Set up a wallet](#set-up-the-wallet) ·
 [Everyday examples](#everyday-examples) · [Command reference](#use-the-cli) ·
 [Recovery](#profiles-and-recovery)
@@ -20,7 +25,7 @@ Available as an initial beta for macOS, Linux, and Windows.
 
 ## Install
 
-Requires **Node.js 24**. Use the latest 24.x release. Install from npm:
+Requires **Node.js 24.15.0 or newer**. Use the latest 24.x release. Install from npm:
 
 ```sh
 npm install --global @attocash/cli
@@ -152,6 +157,31 @@ flow funds the configured Marketplace account only. It does not create tasks, hi
 agents, or submit work. The MCP `marketplace_topup` and `marketplace_topup_status` tools
 become available after a local terminal connection; spending still requires
 approved MCP access.
+
+### Review a Marketplace wallet approval
+
+When Marketplace provides a local wallet approval command, run it in your own
+interactive terminal with the selected wallet's `--data-dir` and the exact
+request-file path it supplies:
+
+```sh
+atto --data-dir /absolute/path/to/profile marketplace approve /path/to/handoff/0123456789abcdef0123456789abcdef.request.json
+```
+
+Review the Marketplace origin, controller, purpose, expiry, and action details,
+then type `approve` only if they match your intended action. The CLI validates
+the typed challenge and signs its exact message, then writes a private sibling
+`<handoff-id>.response.json` file for Marketplace to consume. Keep the original
+file paths; an existing response is never overwritten. Expired challenges
+require a new request.
+
+File-based approval requires POSIX file-ownership support and is unavailable on
+native Windows.
+
+This local review does not require or grant unattended message-signing access.
+For product purchase and refund approvals, the preview distinguishes proof-bound
+terms from client-provided seller, buyer, fee, and net details that the proof does
+not verify.
 
 ## Use the CLI
 
@@ -526,6 +556,8 @@ disable consolidation explicitly.
 `limits set` preserves the existing MCP access mode unless you supply
 `--access read-only` or `--access spend`. `limits clear` also preserves that mode;
 if MCP already has spending access, clearing its limits permits unlimited sends.
+It also preserves message-signing grants; revoke those with
+`atto limits set --message-signing-indexes none`.
 To enable MCP with a bounded policy explicitly:
 
 ```sh
@@ -535,13 +567,15 @@ atto --data-dir /absolute/path/to/profile limits set --access spend \
 
 MCP `limits_propose` and generic `atto call limits_propose` **only propose** a change.
 They cannot apply it. `limits_propose` also accepts `pool` with `indexes` and
-`consolidate`; omitting it preserves the current pool. `limits_get` returns the
-active policy, usage, `mcpAccess`, pool, and current proposal.
+`consolidate`, and `messageSigningIndexes`; omitting either preserves its current
+setting. `limits_get` returns the active policy, usage, `mcpAccess`, pool,
+message-signing indexes, and current proposal.
 
 The proposal response also includes `approval.changes`: changed `access`, `policy`,
-and `pool` settings with `from` and `to` values. Source-pool approval is separate
-from spending access and amount limits; adding another sending account does not
-necessarily change either. An unlimited policy means no amount cap.
+`pool`, and `messageSigningIndexes` settings with `from` and `to` values.
+Source-pool approval is separate from spending access and amount limits; adding
+another sending account does not necessarily change either. An unlimited policy
+means no amount cap.
 `approval.commands.atto` and `approval.commands.npx` provide approval alternatives
 with the exact profile directory and proposal ID. Preserve their quoting and use
 the indicated `approval.shell` (`posix` on Linux/macOS, `powershell` on Windows).
@@ -799,6 +833,10 @@ an existing legacy wallet preserves the legacy default. An older wallet already
 at that path without the marker retains **Atto MCP**. Custom and
 dedicated MCP profiles retain **Atto MCP** as well. Selecting the same absolute
 directory from either interface selects the same credential and spending state.
+Using the same recovery phrase in separate profile directories does not share
+locks, limits, journals, or request IDs. Those profiles still control the same
+on-chain accounts, so concurrent mutations can compete for an account head.
+Use one shared profile to coordinate CLI and MCP operations on the same wallet.
 
 Keep the same absolute directory when restoring whenever possible. A different
 path selects its own credential account and may select a different service;

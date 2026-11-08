@@ -28,11 +28,27 @@ rechecks the profile's approved access before wallet mutations. Automatic
 receiving follows that access mode too. Generic `limits_propose` only creates a
 proposal in either mode.
 
-The entry point also exports `operations`, `errorResult`, and the `Operation`,
-`ApplicationOptions`, and `ApplicationSession` types. It does not expose recovery
-methods. Wallet creation, import, backup, and reset remain terminal commands. The MCP
+The entry point also exports `operations`, `errorResult`, and `runDoctor`, plus
+the `Operation`, `ApplicationOptions`, `ApplicationSession`, `DoctorOptions`,
+`DoctorReport`, `DoctorCheck`, and `DoctorStatus` types. `operations` contains the
+40 public operations in this checkout; adapters can use their schemas and
+descriptions rather than maintaining a separate operation list. Installed npm
+releases may expose an earlier set.
+
+`runDoctor({ directory, access: 'mcp' })` runs diagnostics without opening a
+persistent application session. It accepts an optional abort `signal` and
+`globalDirectory` check, returns a structured report, and can take up to 60
+seconds. It does not repair settings or grant access. See the
+[diagnostics guide](../atto-cli/README.md#diagnostics) for checks and report semantics.
+
+The public session does not expose recovery methods. Wallet creation, import,
+backup, and reset remain terminal commands. The MCP
 package calls this API directly and keeps one application session for its stdio
 connection. `@attocash/cli/profiles` provides shared directory resolution;
 `@attocash/cli/terminal` provides interactive setup and proposal review for the
 terminal executables.
+
+`@attocash/cli/internal-marketplace` is an internal integration boundary for the
+Marketplace workspaces. Use `@attocash/cli/core` for other adapters; the ordinary
+MCP server does not register the private signed-intent operations.
 

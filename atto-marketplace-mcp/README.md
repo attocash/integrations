@@ -4,6 +4,9 @@
 Its npm package includes the Nano adapter; no separate adapter installation or
 release is required.
 
+Marketplace MCP is currently unreleased. Build it from this checkout and use the
+staged package for local installation. Requires Node.js **24.15.0 or newer**.
+
 Atto Marketplace MCP is a separate local stdio server for named buyer and worker
 operations. Human users keep using the Marketplace browser workspace. A private
 Node wallet host uses the existing Atto CLI wallet engine and a Node Nano adapter
@@ -40,6 +43,19 @@ npm run check
 npm test --workspace @attocash/atto-marketplace-mcp
 npm run build --workspace @attocash/atto-marketplace-mcp
 ```
+
+For local installation, build and install the CLI and Marketplace artifacts
+together so the exact CLI dependency resolves to this checkout:
+
+```sh
+npm run pack
+npm install --global ./attocash-cli-0.0.0.tgz ./attocash-atto-marketplace-mcp-0.1.0.tgz
+```
+
+The pack script embeds the Nano adapter; no separate adapter installation is
+needed. Packing the source workspace directly is unsupported. See the
+[contributor guide](../docs/contributing.md#packaging) for package verification
+and release-version filenames.
 
 ## Connect a local agent
 
@@ -288,14 +304,17 @@ Scoped credentials need `files:write` plus `submissions:write` to attach and
 ## Browse and publish Shop products
 
 `marketplace_products_search` and `marketplace_product_get` read current public releases
-without a profile. They return the public summary, seller profile, exact asset
-and price, license, immutable release hash, and file names/sizes/types. They do
-not return paid Markdown, file bytes, storage URLs, or buyer data.
+without sending account credentials. The server still requires a selected local
+profile to pin the Marketplace origin. These tools return the public summary,
+seller profile, exact asset and price, license, immutable release hash, and file
+names/sizes/types. They do not return paid Markdown, file bytes, storage URLs,
+or buyer data.
 
 Private seller tools require the selected account's `products:read` to list and
 read drafts, `products:write` to create or edit drafts, and `products:publish`
-to publish or unpublish. A file-bearing draft also requires `files:write` when
-created or edited; publishing that draft requires both `products:write` and
+to publish or unpublish. Publishing additionally requires `products:read` so the
+MCP can inspect the current draft. A file-bearing draft also requires `files:write`
+when created or edited; publishing that draft requires both `products:write` and
 `files:write` as well as `products:publish`. Publishing requires an explicit
 `confirmsDistributionRights: true` argument and the current draft version.
 Each mutation uses a caller-supplied `requestId`; retry an uncertain request
@@ -326,6 +345,36 @@ checks file size and SHA-256 against that release before publishing bytes and
 never overwrites an existing destination. Seller draft/release reads and file
 access stay account-scoped; a file ID by itself grants no access.
 
+### Buy and retrieve Shop content
+
+Read the current public offer before calling `marketplace_product_purchase` with
+its exact `productId`, `releaseId`, `expectedReleaseHash`, `asset`, `grossAtomic`,
+and a stable `requestId`. A changed release or price requires a fresh review.
+Controller sessions require a one-off typed terminal approval; scoped credentials
+need `products:purchase` and the matching `purchaseAttoLimit` or `purchaseXnoLimit`
+ceiling. Provision those ceilings with `--purchase-atto-limit` or
+`--purchase-xno-limit`. Purchases spend the account's Marketplace balance.
+
+Use `marketplace_purchases_list` and `marketplace_purchase_get` for account order
+history, and `marketplace_product_orders_list` for seller-owned product orders.
+Buyers retrieve paid Markdown and the immutable file manifest with
+`marketplace_purchase_content_get`. Download a purchased file with
+`marketplace_purchase_file_download`, using its purchase ID, file ID and a new
+destination beneath `--files-dir`; size and SHA-256 are checked before writing.
+Scoped buyer reads require `purchases:read`, with `files:read` for downloads;
+seller order listing requires `products:read`.
+
+`marketplace_purchase_receipt_get` with `kind: PURCHASE` or `REFUND` verifies the
+signed receipt against the historical order and Marketplace's published key.
+A seller can issue a full refund through `marketplace_product_refund`, providing
+the current purchase version, original purchase receipt hash, exact asset and
+gross amount, and a stable request ID. Controller sessions require typed terminal
+approval; scoped keys need `purchases:read` and `purchases:refund`. Refunded orders
+retain their receipts and lose access to paid content. Retry uncertain purchases
+or refunds with their original request ID and unchanged terms.
+
+## Credentials and local recovery
+
 Run `node atto-marketplace-mcp/dist/main.js --help` for explicit scoped-key provisioning
 and activation options. Use a different profile ID for a scoped credential;
 changing from controller-session mode is never automatic. Funding tools require
@@ -339,12 +388,14 @@ a controller session after an authorization error. Controller approvals and
 XNO payment handoffs use private typed files with opaque handles at the MCP
 boundary. Configure `MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR` or pass
 `--payment-handoff-dir` to select a dedicated 0700 directory shared locally
-with the private Nano payer process. The default is `<Marketplace home>/payment-handoffs`. The two files are named
+with the private wallet host. The default is `<Marketplace home>/payment-handoffs`.
+The two files are named
 `<32-lowercase-hex-handle>.request.json` and `.response.json`; only the opaque
 handle crosses MCP tool calls. The profile database and bearer credentials stay
-outside this shared handoff directory. For XNO funding, configure the Nano
-adapter's profile and `MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR`; the
-Marketplace process invokes the payer only for the exact private request it created.
+outside this shared handoff directory. Setup configures the Nano adapter's
+profile and handoff directory; override the directory only when needed. The
+Marketplace process invokes the wallet host only for the exact private request
+it created.
 Before using either wallet, confirm it is configured for the same Marketplace
 origin, account, and exact network shown by Marketplace MCP.
 
@@ -367,6 +418,14 @@ and current version. Use `marketplace_engagement_get({taskId})` for the full agr
 The API chooses the account from the configured credential and supports no role
 or state filter. This private history stays available when the account changes
 between buyer and worker roles.
+
+Read `marketplace_engagement_get` before sending task feedback or accepting work.
+`marketplace_activity_add` appends a `MESSAGE` or `STATUS_NOTE` only while the task
+is `IN_PROGRESS` and its engagement is `ACTIVE`. Acceptance or dispute blocks new
+ordinary activity, so send feedback first. An exact retry of an already successful
+activity request still recovers its saved result after closure. Use
+`marketplace_activity_list` to read earlier messages; scoped keys need
+`activity:write` to append and `activity:read` to read.
 
 ## Public task history and receipts
 
@@ -407,6 +466,11 @@ journal and Marketplace intent and reports the bound network; it does not create
 replacement intent or payment. The tools return Marketplace status and account
 ledger balances, never a native key or signed payment.
 
+A confirmed native SEND produces Marketplace `ACCEPTED` and credits the account
+once. A later linked RECEIVE produces `SETTLED` without another credit. Both
+Marketplace states are successful; native receipt settlement can follow account
+crediting. Recover the same request while either side remains uncertain.
+
 The optional browser context fields `expectedMarketplaceOrigin` and
 `expectedAccountId` are a pair: supply both to check the copied request against
 the selected Marketplace profile, or omit both for an ordinary agent call. A lone
@@ -442,6 +506,17 @@ Payout address changes and withdrawal creation accept an optional `network`; whe
 supplied, it must match the destination route and appears in the exact typed
 approval. Existing calls without a network remain valid where the Marketplace
 configuration provides one route.
+
+Controller sessions inspect payout destinations with
+`marketplace_payout_addresses_list` and the current selection version and cooldown
+with `marketplace_payout_selection_get`. Use that exact selection version and
+destination in `marketplace_withdrawal_create`, then approve its typed request
+locally. `marketplace_withdrawals_list` and `marketplace_withdrawal_get` retain the
+original `requestId` and a nullable `nativeSend`: it is `null` before a saved
+candidate, then contains `transactionId`, `hash`, and a `CANDIDATE`, `CONFIRMED`, or
+`REJECTED` state. A confirmed outgoing SEND can settle the withdrawal; receiving
+those funds at the destination is a separate native operation. Retry an uncertain
+creation with its original request ID and terms.
 
 ATTO uses the existing CLI wallet engine in the private Node host. Its bounded
 payment methods require Marketplace's pinned `/v1/agent/topups` URL and configured

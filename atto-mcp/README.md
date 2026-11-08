@@ -9,6 +9,10 @@ wallet history in your MCP client. When you are ready, approve spending limits
 in your terminal so the assistant can make payments within those limits.
 Available as an initial beta, with 40 public tools over local stdio.
 
+This guide describes the current source checkout. Published npm releases may
+have fewer tools or options; check your client's tool list and the
+[workspace release status](https://github.com/attocash/integrations#release-status).
+
 [Connect](#install-and-connect) · [Try it](#try-these-prompts) ·
 [Spending approvals](#approve-access-and-limit-changes) · [Tools](#tools) ·
 [Troubleshooting](#troubleshooting)
@@ -20,9 +24,9 @@ Available as an initial beta, with 40 public tools over local stdio.
 
 ## Install and connect
 
-Requires **Node.js 24** and an available OS password store. Use the latest 24.x
-release. For your first wallet, run setup in your own interactive terminal and
-choose **Dedicated MCP wallet (default)**:
+Requires **Node.js 24.15.0 or newer** and an available OS password store. CI uses
+Node.js 24; use the latest 24.x release. For your first wallet, run setup in your
+own interactive terminal and choose **Dedicated MCP wallet (default)**:
 
 ```sh
 npx --yes @attocash/mcp@latest setup
@@ -218,6 +222,41 @@ changes do not consume a sending allowance. A policy with `perRequest: null` and
 proposal. These controls constrain MCP tools, not programs or shell commands
 running as the same OS user.
 
+## Marketplace account top-ups
+
+This checkout includes `marketplace_topup` and `marketplace_topup_status`.
+They fund the selected wallet's configured Marketplace ATTO account. Task,
+hiring, and Shop workflows use the separate
+[Marketplace MCP](https://github.com/attocash/integrations/tree/main/atto-marketplace-mcp).
+
+First use the CLI from the same checkout to connect the **same profile directory**
+selected for MCP. Run this in your own interactive terminal, using Marketplace's
+exact API URL, controller-proof audience, and a saved controller index:
+
+```sh
+atto --data-dir /absolute/path/to/mcp-wallet marketplace connect --api-url https://<marketplace-host>/v1/agent/topups --audience <agent-api-audience> --controller-index 0
+```
+
+This connection authenticates the account; it does not grant MCP spending access.
+Approve that access, the source pool, and amount limits through the normal local
+approval flow before funding. The wallet and Marketplace must use the same
+network. See the [CLI connection guide](https://github.com/attocash/integrations/tree/main/atto-cli#fund-a-marketplace-account)
+for browser-origin configuration and isolated LOCAL environments.
+
+Example tool calls:
+
+```json
+{"name":"marketplace_topup","arguments":{"amount":"1","unit":"ATTO","requestId":"marketplace-funding-001"}}
+{"name":"marketplace_topup_status","arguments":{"requestId":"marketplace-funding-001"}}
+```
+
+Use `ATTO` or `RAW`; an omitted `index` selects from the approved pool. Top-ups
+share the profile's allowance with CLI and MCP sends. If the result is uncertain,
+query status and retry with the original request ID and terms. Recovery preserves
+the original intent and exact signed payment; pending reservations remain held.
+Public tool results contain status and native payment identifiers, with signed
+payloads kept private.
+
 ## Personal names
 
 Personal labels are separate for each profile and network. Read-only MCP
@@ -276,11 +315,12 @@ for storage, backup, and reset details.
 | Bounded lists | `history_list`, `receivables_list` |
 | Address labels | `labels_set`, `labels_remove`, `labels_get`, `labels_list` |
 | Payments | `send`, `receive`, `receive_all` |
+| Marketplace account funding | `marketplace_topup`, `marketplace_topup_status` |
 | Message signatures | `message_sign`, `message_verify` |
 | Payment pool | `pool_get` |
 | Local payment journal | `journal_list`, `journal_get` |
 | Representatives | `representative_change` |
-| Marketplace information | `metrics_get`, `price_quote` |
+| Market prices | `metrics_get`, `price_quote` |
 | USD payment terms | `terms_get`, `terms_accept` |
 | Shared budgets | `limits_get`, `limits_propose` |
 | Session watches | `watch_start`, `watch_list`, `watch_read`, `watch_stop` |
@@ -501,7 +541,7 @@ apply only changes authorized by the user, then rerun doctor. See the
 
 ## Install from source
 
-Clone the repository, build both workspaces, and run setup from source:
+Clone the repository, build the workspaces, and run setup from source:
 
 ```sh
 git clone https://github.com/attocash/integrations.git

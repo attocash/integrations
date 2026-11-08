@@ -6,6 +6,10 @@ installed separately. The source workspace remains separate for development and
 testing. It implements Nano Ed25519-Blake2b, state-block signing, confirmed chain checks,
 controller proofs and durable payment recovery without a Java runtime.
 
+Requires Node.js **24.15.0 or newer**. Marketplace MCP is currently unreleased;
+use the source checkout and locally staged artifacts described in the
+[repository README](../README.md).
+
 Nano x402 v2 uses asset `XNO`, network `nano:mainnet` (or `nano:dev`), and
 `payload.block` containing the native signed state block and its matching
 `link_as_account`. Base offers need no `extra` fields or extensions. The wallet
@@ -67,8 +71,19 @@ provisioning, policy approval and key callbacks consistently return Promises;
 public metadata loading and signature verification stay synchronous.
 
 The exported adapter API is for trusted local code. No raw signing operation is
-exposed through public MCP tools. See the Marketplace MCP README for configuration,
+exposed through public MCP tools. See the [Marketplace MCP README](../atto-marketplace-mcp/README.md) for configuration,
 exact request-id retry rules and explicit Atto wallet-profile reuse.
+
+Recovery keeps each native candidate's signed bytes and original operation
+identity in `nano-wallet.sqlite3`. `payment.status` reconciles an existing handoff
+and `transfer.status` reconciles an existing external-transfer request; neither
+creates or publishes a replacement payment. Retry `payment.prepare`,
+`transfer.send`, or `receive` with the original handle, request ID or incoming SEND
+hash to resume that operation. Receive retries preserve the original RECEIVE/OPEN
+candidate. Uncertain candidates keep the account lane and outgoing reservation,
+including beyond 24 hours; only confirmed spending ages out of the rolling
+window. Native chain evidence must resolve a signed candidate before a new
+operation can use that lane.
 
 The configured chain RPC must expose pinned `version` evidence, `account_info`,
 `block_info`, `blocks_info` with its `pending` option, `receivable` and `process`.
@@ -86,3 +101,18 @@ Exact receipt checks use one-hash `blocks_info` pending evidence,
 plus independently verified confirmed SEND and predecessor balances; a truncated
 account receivables list cannot establish absence. Missing pending evidence fails
 closed. Receipt listing remains separately bounded to 1–100 results.
+
+## Develop and package
+
+From the integrations repository root, after `npm ci`:
+
+```sh
+npm run check
+npm test --workspace @attocash/atto-marketplace-nano-adapter
+```
+
+`npm run check` builds the CLI recovery-source library and Nano adapter before
+checking the workspace types. To create installable artifacts, run `npm run pack`
+at the repository root. Its staging script embeds this adapter and its README
+inside the Marketplace MCP artifact and places its external dependencies on the
+containing package. There is no separate Nano adapter tarball or executable.

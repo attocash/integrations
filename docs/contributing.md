@@ -5,6 +5,8 @@ For installation and wallet usage, see the [public guide](../README.md).
 
 ## Development
 
+Requires Node.js 24.15.0 or newer; CI uses Node.js 24 on Linux, macOS, and Windows.
+
 Run these commands from the repository root. The build compiles CLI first so
 the wallet MCP and Nano adapter can resolve its exported library declarations.
 The check command also builds the Nano adapter before checking Marketplace MCP:
@@ -44,7 +46,10 @@ The executables in a checkout are:
 ```sh
 node atto-cli/dist/cli/main.js --help
 node atto-mcp/dist/main.js --help
+node atto-marketplace-mcp/dist/main.js --help
 ```
+
+The Nano adapter is a library workspace and has no executable.
 
 Tests use temporary profiles and mock nodes/workers. They cover CLI and MCP
 parity, real SDK stdio sessions, shutdown, recovery restrictions, signing,
@@ -86,8 +91,11 @@ npm run pack
 npm run pack -- --pack-destination /tmp/atto-artifacts
 ```
 
-Source checkouts use `0.0.0` as a development placeholder. CI replaces it with
-the version calculated by semantic-release before testing and publishing.
+The CLI and wallet MCP use `0.0.0` as a development placeholder; Marketplace MCP
+and the private Nano adapter currently use `0.1.0`. CI assigns the CLI and wallet
+MCP the shared version calculated by semantic-release before testing and
+publishing. It also aligns their CLI dependency pins in both Marketplace
+workspaces, without changing the Marketplace package versions.
 
 This produces CLI, wallet MCP, and Marketplace MCP tarballs. The Nano adapter
 is a private source workspace bundled inside the Marketplace MCP tarball; it
@@ -95,6 +103,11 @@ does not need a separate npm release or installation. The Marketplace MCP tarbal
 is an accepted workspace artifact and is not in the trusted npm publisher.
 The root `package-lock.json` records the development dependency tree for
 `npm ci`.
+
+Repository guides follow the source checkout, so they can describe commands and
+tools absent from an older npm release. The release workflow publishes only
+the tested CLI and wallet MCP tarballs; Marketplace MCP remains a source artifact.
+
 Packaging uses a temporary staging directory and leaves source package files
 unchanged. Use the root script to produce release artifacts; plain `npm pack`
 is blocked. `npm run test:package` builds and verifies the installed artifacts.
