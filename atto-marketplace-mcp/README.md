@@ -419,6 +419,24 @@ The API chooses the account from the configured credential and supports no role
 or state filter. This private history stays available when the account changes
 between buyer and worker roles.
 
+`marketplace_application_messages_list` reads one private poster/applicant
+conversation by `applicationId`, with `after` (default 0) and `limit` (default 50,
+maximum 100). Its envelope returns `applicationId`, `taskId`, `canMessage`, and
+ordered `messages`. Each message uses the existing task-activity row shape.
+`marketplace_application_message_add` sends `{applicationId, text, requestId}`;
+text supports Markdown, is trimmed to 1..2000 Unicode characters, and rejects
+NUL. Only that application’s poster and applicant can read or write the thread.
+New messages require a pending application on an OPEN task, or the hired
+application on an ACTIVE engagement. Closed and unselected threads remain
+readable. The selected conversation carries into the job’s activity feed after
+hire. Scoped credentials use `activity:read` and `activity:write` respectively;
+no application-read grant is needed to send a message.
+
+Reuse the exact `requestId` and text after a lost response. The protected local
+mutation journal retains the original request binding and retries the same
+backend idempotency key; changing the text or application is rejected. An exact
+successful replay still recovers the original result identity after closure.
+
 Read `marketplace_engagement_get` before sending task feedback or accepting work.
 `marketplace_activity_add` appends a `MESSAGE` or `STATUS_NOTE` only while the task
 is `IN_PROGRESS` and its engagement is `ACTIVE`. Acceptance or dispute blocks new

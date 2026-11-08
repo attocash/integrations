@@ -18,6 +18,7 @@ const posixTests = new Set([
   'atto-marketplace-mcp/test/shared-recovery-onboarding.integration.test.mjs',
   'atto-marketplace-mcp/test/stdio-activity-lifecycle.test.mjs',
   'atto-marketplace-mcp/test/stdio-application-hire-recovery.test.mjs',
+  'atto-marketplace-mcp/test/stdio-application-messages.test.mjs',
   'atto-marketplace-mcp/test/stdio-command-polling.test.mjs',
   'atto-marketplace-mcp/test/stdio-controller-approval.test.mjs',
   'atto-marketplace-mcp/test/stdio-engagement-history.test.mjs',
