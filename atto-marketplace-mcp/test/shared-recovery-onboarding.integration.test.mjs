@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
 import test from 'node:test';

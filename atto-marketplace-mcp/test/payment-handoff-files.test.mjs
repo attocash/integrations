@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile, chmod } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import {
   ensurePaymentHandoffDirectory, readXnoPaymentRequest, readXnoPaymentResponse,

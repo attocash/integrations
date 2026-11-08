@@ -48,9 +48,17 @@ function child(source, args = []) {
 test('version 1 profiles migrate without changing saved rows and wait for existing sessions before the version fence', t => {
   // Given a wallet database with existing journal and allowance rows plus an older process lease.
   const directory = mkdtempSync(join(tmpdir(), 'atto-state-migration-'));
-  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const connections = [];
+  const track = connection => { connections.push(connection); return connection; };
+  t.after(() => {
+    for (const connection of connections.reverse()) {
+      if (connection instanceof DatabaseSync && !connection.isOpen) continue;
+      connection.close();
+    }
+    rmSync(directory, { recursive: true, force: true });
+  });
   const statePath = join(directory, 'state.sqlite');
-  const state = new DatabaseSync(statePath);
+  const state = track(new DatabaseSync(statePath));
   state.exec('CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL); PRAGMA user_version = 1;');
   state.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('spending.records', JSON.stringify([
     { id: 'existing-unknown-send', index: 0, destination: 'existing-destination', raw: '7', createdAt: 100,
@@ -61,27 +69,26 @@ test('version 1 profiles migrate without changing saved rows and wait for existi
   }));
   state.close();
   const lifecyclePath = join(directory, 'lifecycle.sqlite');
-  const oldSession = new DatabaseSync(lifecyclePath);
+  const oldSession = track(new DatabaseSync(lifecyclePath));
   oldSession.exec('PRAGMA busy_timeout = 0; PRAGMA journal_mode = DELETE; CREATE TABLE lease (id INTEGER PRIMARY KEY); BEGIN; SELECT COUNT(*) FROM lease;');
 
   // When a new version attempts to upgrade while the old process still owns its profile lease.
   assert.throws(() => new StateStore(directory), { code: 'WALLET_BUSY' });
-  const blocked = new DatabaseSync(statePath);
+  const blocked = track(new DatabaseSync(statePath));
   assert.equal(blocked.prepare('PRAGMA user_version').get().user_version, 1);
   blocked.close();
   oldSession.exec('ROLLBACK;');
   oldSession.close();
 
   // Then migration applies only the compatibility fence and preserves every prior row verbatim.
-  const store = new StateStore(directory);
-  t.after(() => store.close());
+  const store = track(new StateStore(directory));
   assert.deepEqual(store.get('spending.records'), [{ id: 'existing-unknown-send', index: 0,
     destination: 'existing-destination', raw: '7', createdAt: 100, status: 'unknown',
     hash: 'existing-hash', blockJson: '{"type":"SEND"}' }]);
   assert.deepEqual(store.get('spending.policy'), {
     perRequest: { amount: '10', unit: 'RAW' }, rolling: [{ days: 1, amount: '20', unit: 'RAW' }],
   });
-  const migrated = new DatabaseSync(statePath);
+  const migrated = track(new DatabaseSync(statePath));
   assert.equal(migrated.prepare('PRAGMA user_version').get().user_version, 2);
   migrated.close();
 });

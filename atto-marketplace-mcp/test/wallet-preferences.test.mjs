@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {execFile, spawn} from 'node:child_process';
 import {chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
+import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import {DatabaseSync} from 'node:sqlite';
 import {promisify} from 'node:util';

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { mkdtempSync, mkdirSync, chmodSync, writeFileSync, openSync, fsyncSync, closeSync, readFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { randomUUID, randomBytes } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';

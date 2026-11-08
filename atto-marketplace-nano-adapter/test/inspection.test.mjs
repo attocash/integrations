@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import {readFileSync,writeFileSync,existsSync,readdirSync} from 'node:fs';
-import {mkdtemp,rm} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
+import {mkdtemp,rm,symlink} from 'node:fs/promises';
+import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import test from 'node:test';
 import {inspectNanoSeed,inspectNanoWallet,provisionNanoWallet} from '../dist/index.js';
@@ -73,4 +73,19 @@ test('native key callbacks are awaited and erase their key after success or reje
  assert.deepEqual([...retained],Array(32).fill(0));
  await assert.rejects(withPrivateKey(config,async key=>{retained=key;await Promise.resolve();throw Error('callback failed');}),/callback failed/);
  assert.deepEqual([...retained],Array(32).fill(0));
+});
+
+test('canonical fixture roots do not allow symlinked wallet ancestors', async t => {
+ // Given a private seed reachable through a symlinked ancestor.
+ const root=await mkdtemp(join(tmpdir(),'nano-symlink-parent-'));t.after(()=>rm(root,{recursive:true,force:true}));
+ const seedFile=join(root,'seed.hex');writeFileSync(seedFile,'04'.repeat(32)+'\n',{mode:0o600});
+ const alias=join(root,'alias');await symlink(root,alias);
+ const options={dataDir:join(root,'wallet'),seedFile:join(alias,'seed.hex'),derivationIndex:0,network:'nano:dev',rpcUrl:'http://localhost:17076',origin:'http://localhost:8080',audience:'symlink-parent',handoffDirectory:join(root,'handoffs'),terminalConfirmed:true};
+ // When wallet provisioning uses that alias.
+ await assert.rejects(provisionNanoWallet(options),{code:'PRIVATE_FILE'});
+ // Then it creates no wallet state, while the physical seed remains usable.
+ assert.equal(existsSync(options.dataDir),false);
+ const configured=await provisionNanoWallet({...options,seedFile});
+ assert.equal((await inspectNanoSeed(seedFile,0)).address,configured.address);
+ await assert.rejects(inspectNanoSeed(join(alias,'seed.hex'),0),{code:'PRIVATE_FILE'});
 });

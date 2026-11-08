@@ -4,7 +4,7 @@ import {createServer} from 'node:http';
 import {createRequire} from 'node:module';
 import {randomUUID} from 'node:crypto';
 import {mkdtemp, mkdir, readFile, rm, writeFile} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
+import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {setTimeout as delay} from 'node:timers/promises';
 import {join} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -16,12 +16,22 @@ const require=createRequire(import.meta.url);
 const payer='nano_3e3j5tkog48pnny9dmfzj1r16pg8t1e76dz5tmac6iq689wyjfpiij4txtdo';
 const accountId='11111111-1111-4111-8111-111111111111';
 for(const loseSubmitResponse of [false,true]) {
-  test(`XNO ${loseSubmitResponse?'lost submit recovery':'successful submit'} reconciles the private wallet source lane before another funding`,async()=>{
+  test(`XNO ${loseSubmitResponse?'lost submit recovery':'successful submit'} reconciles the private wallet source lane before another funding`,async t=>{
     const home=await mkdtemp(join(tmpdir(),'marketplace-node-wallet-lane-'));
+    let client,http;
+    t.after(async()=>{
+      try {await client?.close();}
+      finally {
+        try {
+          http?.closeAllConnections();
+          if(http)await new Promise(resolve=>http.close(resolve));
+        } finally {await rm(home,{recursive:true,force:true});}
+      }
+    });
     const directory=join(home,'handoffs');await mkdir(directory,{mode:0o700});
     const host=await walletHost(home);
     const intents=new Map(),accepted=[];let creates=0,submits=0,drop=loseSubmitResponse;
-    const http=createServer((req,res)=>{void(async()=>{
+    http=createServer((req,res)=>{void(async()=>{
       let text='';for await(const chunk of req)text+=chunk;const body=text?JSON.parse(text):null;
       if(req.method==='POST'&&req.url==='/v1/agent/topups') {
         creates++;const intentId=randomUUID(),hash=(creates===1?'A':'B').repeat(64);
@@ -42,41 +52,50 @@ for(const loseSubmitResponse of [false,true]) {
       }
     })().catch(()=>{res.writeHead(500);res.end('{}');});});
     await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));http.origin=`http://127.0.0.1:${http.address().port}`;
-    const store=await MarketplaceProfileStore.open(home);store.createProfile({id:'native',origin:http.origin,audience:'marketplace-agent-api',accountId,
+    const store=await MarketplaceProfileStore.open(home);
+    try {store.createProfile({id:'native',origin:http.origin,audience:'marketplace-agent-api',accountId,
       agentId:'22222222-2222-4222-8222-222222222222',identityId:'33333333-3333-4333-8333-333333333333',controllerNetwork:'NANO',
       controllerAddress:payer,controllerIndex:1,authMode:'controller-session',accessToken:'fake-fixture-access-token',accessExpiresAt:Date.now()+120000,
-      refreshToken:'fake-fixture-refresh-token',refreshExpiresAt:Date.now()+240000});store.close();
-    let client=await open(home,directory,host);
-    try{
-      const firstArgs={asset:'XNO',network:'nano:dev',amountAtomic:'100',requestId:randomUUID()};
-      const first=await client.callTool({name:'marketplace_fund',arguments:firstArgs});
-      if(loseSubmitResponse){
-        assert.equal(first.structuredContent.error.code,'MARKETPLACE_UNAVAILABLE');
-        assert.notEqual((await state(directory)).lane,null,'Lost response leaves original wallet candidate fenced until status recovery');
-        await client.close();client=await open(home,directory,host);
-        const recovered=await client.callTool({name:'marketplace_funding_status',arguments:{requestId:firstArgs.requestId}});
-        assert.equal(recovered.structuredContent.result.status.state,'ACCEPTED');
-      }else assert.equal(first.structuredContent.result.status.state,'ACCEPTED');
-      let observed=await state(directory);assert.equal(observed.lane,null,'Credited SEND must reconcile and release its private wallet source lane');
-      assert.ok(observed.statuses>=1);
-      const second=await client.callTool({name:'marketplace_fund',arguments:{...firstArgs,requestId:randomUUID()}});
-      assert.notEqual(second.isError,true,JSON.stringify(second.structuredContent));
-      assert.equal(second.structuredContent.result.balances.balances.find(balance=>balance.asset==='XNO').availableAtomic,'200');
-      observed=await state(directory);assert.equal(observed.prepares,2);assert.equal(observed.lane,null);
-      const replay=await client.callTool({name:'marketplace_fund',arguments:firstArgs});assert.equal(replay.structuredContent.result.status.sendHash,'A'.repeat(64));
-      assert.equal((await state(directory)).prepares,2);assert.equal(creates,2);assert.equal(submits,2);
-    }finally{await client.close();await new Promise(resolve=>http.close(resolve));await rm(home,{recursive:true,force:true});}
+      refreshToken:'fake-fixture-refresh-token',refreshExpiresAt:Date.now()+240000});} finally {store.close();}
+    client=await open(home,directory,host);
+    const firstArgs={asset:'XNO',network:'nano:dev',amountAtomic:'100',requestId:randomUUID()};
+    const first=await client.callTool({name:'marketplace_fund',arguments:firstArgs});
+    if(loseSubmitResponse){
+      assert.equal(first.structuredContent.error.code,'MARKETPLACE_UNAVAILABLE');
+      assert.notEqual((await state(directory)).lane,null,'Lost response leaves original wallet candidate fenced until status recovery');
+      await client.close();client=await open(home,directory,host);
+      const recovered=await client.callTool({name:'marketplace_funding_status',arguments:{requestId:firstArgs.requestId}});
+      assert.equal(recovered.structuredContent.result.status.state,'ACCEPTED');
+    }else assert.equal(first.structuredContent.result.status.state,'ACCEPTED');
+    let observed=await state(directory);assert.equal(observed.lane,null,'Credited SEND must reconcile and release its private wallet source lane');
+    assert.ok(observed.statuses>=1);
+    const second=await client.callTool({name:'marketplace_fund',arguments:{...firstArgs,requestId:randomUUID()}});
+    assert.notEqual(second.isError,true,JSON.stringify(second.structuredContent));
+    assert.equal(second.structuredContent.result.balances.balances.find(balance=>balance.asset==='XNO').availableAtomic,'200');
+    observed=await state(directory);assert.equal(observed.prepares,2);assert.equal(observed.lane,null);
+    const replay=await client.callTool({name:'marketplace_fund',arguments:firstArgs});assert.equal(replay.structuredContent.result.status.sendHash,'A'.repeat(64));
+    assert.equal((await state(directory)).prepares,2);assert.equal(creates,2);assert.equal(submits,2);
   });
 }
 
 for(const tamperDigest of [false,true]) {
-  test(`XNO interrupted signing ${tamperDigest?'rejects a mismatched candidate digest':'preserves its unknown candidate'} after intent expiry without a response file`,async()=>{
+  test(`XNO interrupted signing ${tamperDigest?'rejects a mismatched candidate digest':'preserves its unknown candidate'} after intent expiry without a response file`,async t=>{
     // Given the wallet persists its original candidate, then dies before publishing a response.
     const home=await mkdtemp(join(tmpdir(),'marketplace-node-wallet-interrupted-'));
+    let client,http;
+    t.after(async()=>{
+      try {await client?.close();}
+      finally {
+        try {
+          http?.closeAllConnections();
+          if(http)await new Promise(resolve=>http.close(resolve));
+        } finally {await rm(home,{recursive:true,force:true});}
+      }
+    });
     const directory=join(home,'handoffs');await mkdir(directory,{mode:0o700});
     const host=await walletHost(home,{interruptBeforeResponse:true});
     let intent,creates=0,submits=0;
-    const http=createServer((req,res)=>{void(async()=>{
+    http=createServer((req,res)=>{void(async()=>{
       let text='';for await(const chunk of req)text+=chunk;const body=text?JSON.parse(text):null;
       if(req.method==='POST'&&req.url==='/v1/agent/topups') {
         creates++;
@@ -94,58 +113,65 @@ for(const tamperDigest of [false,true]) {
       res.writeHead(404);res.end('{}');
     })().catch(()=>{res.writeHead(500);res.end('{}');});});
     await new Promise(resolve=>http.listen(0,'127.0.0.1',resolve));http.origin=`http://127.0.0.1:${http.address().port}`;
-    const store=await MarketplaceProfileStore.open(home);store.createProfile({id:'native',origin:http.origin,audience:'marketplace-agent-api',accountId,
+    const store=await MarketplaceProfileStore.open(home);
+    try {store.createProfile({id:'native',origin:http.origin,audience:'marketplace-agent-api',accountId,
       agentId:'22222222-2222-4222-8222-222222222222',identityId:'33333333-3333-4333-8333-333333333333',controllerNetwork:'NANO',
       controllerAddress:payer,controllerIndex:1,authMode:'controller-session',accessToken:'fake-fixture-access-token',accessExpiresAt:Date.now()+120000,
-      refreshToken:'fake-fixture-refresh-token',refreshExpiresAt:Date.now()+240000});store.close();
-    let client=await open(home,directory,host);
-    try {
-      const args={asset:'XNO',network:'nano:dev',amountAtomic:'100',requestId:randomUUID()};
-      const interrupted=await client.callTool({name:'marketplace_fund',arguments:args});
-      assert.equal(interrupted.isError,true);
-      const saved=await state(directory),candidate=Object.values(saved.payments)[0];
-      assert.ok(candidate,'The killed child must leave one durable candidate');
-      assert.equal(saved.prepares,1);assert.equal(saved.lane,candidate.handoffId);
-      const request=JSON.parse(await readFile(join(directory,`${candidate.handoffId}.request.json`),'utf8'));
-      const responsePath=join(directory,`${candidate.handoffId}.response.json`);
-      assert.equal(candidate.requestSha256,request.requestSha256);
-      await assert.rejects(readFile(responsePath),{code:'ENOENT'});
-      await client.close();
-      await delay(Math.max(0,Date.parse(request.expiresAt)-Date.now()+25));
-      if(tamperDigest)await writeFile(join(directory,'tamper-digest'),'1',{mode:0o600});
-      client=await open(home,directory,host);
+      refreshToken:'fake-fixture-refresh-token',refreshExpiresAt:Date.now()+240000});} finally {store.close();}
+    client=await open(home,directory,host);
+    const args={asset:'XNO',network:'nano:dev',amountAtomic:'100',requestId:randomUUID()};
+    const interrupted=await client.callTool({name:'marketplace_fund',arguments:args});
+    assert.equal(interrupted.isError,true);
+    const saved=await state(directory),candidate=Object.values(saved.payments)[0];
+    assert.ok(candidate,'The killed child must leave one durable candidate');
+    assert.equal(saved.prepares,1);assert.equal(saved.lane,candidate.handoffId);
+    const request=JSON.parse(await readFile(join(directory,`${candidate.handoffId}.request.json`),'utf8'));
+    const responsePath=join(directory,`${candidate.handoffId}.response.json`);
+    assert.equal(candidate.requestSha256,request.requestSha256);
+    await assert.rejects(readFile(responsePath),{code:'ENOENT'});
+    await client.close();
+    await delay(Math.max(0,Date.parse(request.expiresAt)-Date.now()+25));
+    if(tamperDigest)await writeFile(join(directory,'tamper-digest'),'1',{mode:0o600});
+    client=await open(home,directory,host);
 
-      // When the original request is recovered after expiry through the restarted public MCP.
-      const recovered=await client.callTool({name:'marketplace_funding_status',arguments:{requestId:args.requestId}});
-      if(tamperDigest) {
-        // Then a candidate from different request bytes is rejected before it can be trusted.
-        assert.equal(recovered.isError,true);
-        assert.equal(recovered.structuredContent.error.code,'PAYMENT_BINDING');
-      } else {
-        // Then missing response bytes do not erase the original candidate or permit replacement spending.
-        assert.notEqual(recovered.isError,true,JSON.stringify(recovered.structuredContent));
-        const result=recovered.structuredContent.result;
-        assert.equal(result.status.state,'REJECTED');assert.ok(Date.parse(result.status.expiresAt)<=Date.now());
-        assert.equal(result.status.sendHash,null);assert.equal(result.status.paymentState,null);
-        assert.deepEqual(result.nativePayment,{state:'PENDING',hash:candidate.sendHash,failureReason:null});
-        for(const field of ['localPaymentState','localPaymentStateSource','nativePaymentState','nativePaymentStateSource','nativePaymentStatus']) assert.equal(field in result,false);
-        const replay=await client.callTool({name:'marketplace_fund',arguments:args});
-        assert.notEqual(replay.isError,true,JSON.stringify(replay.structuredContent));
-        assert.deepEqual(replay.structuredContent.result.nativePayment,result.nativePayment);
-      }
-      const after=await state(directory);
-      assert.ok(after.statuses>saved.statuses,'Recovery must query the private wallet despite the missing response');
-      assert.equal(after.prepares,1);assert.equal(after.lane,candidate.handoffId);
-      assert.equal(Object.keys(after.payments).length,1);assert.equal(after.payments[candidate.handoffId].sendHash,candidate.sendHash);
-      assert.equal(after.payments[candidate.handoffId].requestSha256,request.requestSha256);
-      assert.equal(creates,1);assert.equal(submits,0);
-      await assert.rejects(readFile(responsePath),{code:'ENOENT'});
-    } finally {await client.close();await new Promise(resolve=>http.close(resolve));await rm(home,{recursive:true,force:true});}
+    // When the original request is recovered after expiry through the restarted public MCP.
+    const recovered=await client.callTool({name:'marketplace_funding_status',arguments:{requestId:args.requestId}});
+    if(tamperDigest) {
+      // Then a candidate from different request bytes is rejected before it can be trusted.
+      assert.equal(recovered.isError,true);
+      assert.equal(recovered.structuredContent.error.code,'PAYMENT_BINDING');
+    } else {
+      // Then missing response bytes do not erase the original candidate or permit replacement spending.
+      assert.notEqual(recovered.isError,true,JSON.stringify(recovered.structuredContent));
+      const result=recovered.structuredContent.result;
+      assert.equal(result.status.state,'REJECTED');assert.ok(Date.parse(result.status.expiresAt)<=Date.now());
+      assert.equal(result.status.sendHash,null);assert.equal(result.status.paymentState,null);
+      assert.deepEqual(result.nativePayment,{state:'PENDING',hash:candidate.sendHash,failureReason:null});
+      for(const field of ['localPaymentState','localPaymentStateSource','nativePaymentState','nativePaymentStateSource','nativePaymentStatus']) assert.equal(field in result,false);
+      const replay=await client.callTool({name:'marketplace_fund',arguments:args});
+      assert.notEqual(replay.isError,true,JSON.stringify(replay.structuredContent));
+      assert.deepEqual(replay.structuredContent.result.nativePayment,result.nativePayment);
+    }
+    const after=await state(directory);
+    assert.ok(after.statuses>saved.statuses,'Recovery must query the private wallet despite the missing response');
+    assert.equal(after.prepares,1);assert.equal(after.lane,candidate.handoffId);
+    assert.equal(Object.keys(after.payments).length,1);assert.equal(after.payments[candidate.handoffId].sendHash,candidate.sendHash);
+    assert.equal(after.payments[candidate.handoffId].requestSha256,request.requestSha256);
+    assert.equal(creates,1);assert.equal(submits,0);
+    await assert.rejects(readFile(responsePath),{code:'ENOENT'});
   });
 }
 
 async function state(directory){return JSON.parse(await readFile(join(directory,'wallet-state.json'),'utf8'));}
-async function open(home,directory,host){const client=new Client({name:'native-lane-fixture',version:'1.0.0'});await client.connect(new StdioClientTransport({command:process.execPath,args:[fileURLToPath(new URL('../dist/main.js',import.meta.url)),'--profile','native','--home',home],env:{...process.env,MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:directory,MARKETPLACE_MCP_WALLET_HOST_COMMAND:host},stderr:'pipe'}));return client;}
+async function open(home,directory,host){
+  const client=new Client({name:'native-lane-fixture',version:'1.0.0'});
+  try {
+    await client.connect(new StdioClientTransport({command:process.execPath,
+      args:[fileURLToPath(new URL('../dist/main.js',import.meta.url)),'--profile','native','--home',home],
+      env:{...process.env,MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:directory,MARKETPLACE_MCP_WALLET_HOST_COMMAND:host},stderr:'pipe'}));
+    return client;
+  } catch(error) {await client.close();throw error;}
+}
 function balances(availableAtomic){return {balances:[{asset:'ATTO',availableAtomic:'0',reservedAtomic:'0'},{asset:'XNO',availableAtomic,reservedAtomic:'0'}]};}
 function json(res,body){res.writeHead(200,{'content-type':'application/json'});res.end(JSON.stringify(body));}
 function xnoChallenge(resourceUrl,amount){return {x402Version:2,resource:{url:resourceUrl,description:'Fund this Marketplace account',mimeType:'application/json'},accepts:[{scheme:'exact',network:'nano:dev',amount,asset:'XNO',payTo:payer,maxTimeoutSeconds:300,extra:{assetTransferMethod:'native-state',paymentFlow:'upfront'}}],extensions:{'payment-identifier':{info:{required:true},schema:{type:'object',properties:{id:{type:'string'}}}}}};}

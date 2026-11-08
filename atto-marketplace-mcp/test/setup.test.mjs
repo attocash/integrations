@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import { chmod, mkdtemp, rm, writeFile, mkdir, readdir, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { AttoPrivateKey } from '@attocash/commons-core';
@@ -811,7 +811,8 @@ test('a late failed login cannot replace a newer reauthentication challenge',asy
   }finally{releaseFirst?.();releaseSecond?.();store?.close();await stopSetupServer(http);await rm(home,{recursive:true,force:true});}
 });
 
-test('guided reauthentication keeps the desktop keyring environment and original saved wallet',async()=>{
+test('guided reauthentication keeps the desktop keyring environment and original saved wallet',
+  {skip:process.platform!=='linux' && 'Requires the isolated Linux secret-tool and D-Bus environment fixture.'},async()=>{
   // Given a real existing wallet, its original OS credential, and an expired matching Marketplace profile.
   const phrase='abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
   const home=await mkdtemp(join(tmpdir(),'marketplace-guided-reauth-'));

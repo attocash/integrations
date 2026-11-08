@@ -4,7 +4,7 @@ import {randomBytes, createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
 import {createRequire, findPackageJSON} from 'node:module';
-import {tmpdir} from 'node:os';
+import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
 import {stripVTControlCharacters} from 'node:util';

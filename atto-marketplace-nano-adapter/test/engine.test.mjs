@@ -3,7 +3,7 @@ import { test } from 'node:test';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, symlinkSync, rmSync, lstatSync, linkSync, renameSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { NanoWallet, provisionNanoWallet, inspectNanoWallet, approveNanoWalletPolicy, verifyNanoMessage, derivePrivateKey, publicKey, addressFromPublicKey, addressPublicKey, NanoStateBlock, ZERO_HASH, upperHex, validWork } from '../dist/index.js';

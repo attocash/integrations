@@ -26,7 +26,11 @@ and product-file tools accept source or destination paths, and those paths must
 stay beneath that configured directory. Other tool arguments cannot select a
 filesystem path, API origin, credential, or arbitrary route. Profiles pin the Marketplace
 origin and account, choose exactly one auth mode, and use 0700/0600 permissions
-on POSIX systems.
+on POSIX systems. Marketplace MCP and its Nano wallet storage currently support
+Linux and macOS; native Windows is unsupported and profile access fails closed.
+The separate Atto CLI and Atto MCP support Windows, including Credential Manager
+custody. Windows CI still verifies those packages and Marketplace's portable
+cryptography, API contracts, and installed package layout.
 
 From the integrations repository root:
 

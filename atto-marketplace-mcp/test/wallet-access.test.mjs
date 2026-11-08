@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {mkdtemp,mkdir,readFile,rm} from 'node:fs/promises';
 import {join} from 'node:path';
-import {tmpdir} from 'node:os';
+import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {AttoPrivateKey} from '@attocash/commons-core';
 import {pathToFileURL,fileURLToPath} from 'node:url';
 const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??join(import.meta.dirname,'..');

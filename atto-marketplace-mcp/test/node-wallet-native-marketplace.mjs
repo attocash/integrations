@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {spawn, spawnSync} from 'node:child_process';
 import {createHash, randomBytes, randomUUID} from 'node:crypto';
 import {mkdtempSync, mkdirSync, chmodSync, writeFileSync, readFileSync, symlinkSync} from 'node:fs';
-import {tmpdir} from 'node:os';
+import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {DatabaseSync} from 'node:sqlite';

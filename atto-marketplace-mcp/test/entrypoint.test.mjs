@@ -1,14 +1,14 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { mkdtemp, readdir, rm, symlink } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 
 const execute = promisify(execFile);
-test('npm-style executable symlink runs the CLI instead of exiting silently', async () => {
+test('npm-style executable symlink runs the CLI instead of exiting silently', { skip: process.platform === 'win32' }, async () => {
   const directory = await mkdtemp(join(tmpdir(), 'atto-marketplace-mcp-bin-'));
   try {
     const bin = join(directory, 'atto-marketplace-mcp');

@@ -29,6 +29,13 @@ JavaScript verifier API. A regular `npm ci` installs the supported package set;
 the optional `ATTO_COMMONS_LOCAL_VERSION` override is only for deliberate local
 Commons development and does not change source package pins.
 
+The root test runner keeps all Atto CLI and wallet MCP suites enabled on Linux,
+macOS and Windows. Marketplace's private storage and executable-fixture suites
+require POSIX permissions; Windows still runs portable protocol/API tests and
+checks that private wallet startup fails closed. Tests have a three-minute
+individual deadline and an eight-minute runner deadline, with separate CI step
+and job limits. Package verification follows the same platform policy.
+
 Individual workspaces support `build`, `check`, and `test` scripts. Build before
 running a workspace test directly. Build CLI first, then the Nano adapter before
 building or checking Marketplace MCP.

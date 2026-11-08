@@ -4,7 +4,7 @@ import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync, unlinkSync, linkSync, symlinkSync, statSync, rmSync, mkdtempSync } from 'node:fs';
 import { join, dirname } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { promisify } from 'node:util';
 import { AttoApplication } from '../../atto-cli/dist/application/app.js';
 import { inspectWalletProfile } from '@attocash/cli/profiles';
@@ -40,7 +40,7 @@ async function childProvision(options, environment) {
   return JSON.parse(result.stdout);
 }
 
-test('one shared account owns one exact journal directory; retries, restarts and separate accounts preserve its claim', async t => {
+test('one shared account owns one exact journal directory; retries, restarts and separate accounts preserve its claim', {skip: process.platform !== 'linux' && 'Requires the isolated Linux secret-tool fixture.'}, async t => {
   const f = await fixture(t), options = f.options('original'), first = await provisionNanoWallet(options), config = loadConfiguration(options.dataDir);
   const claimPath = f.claim(config), originalClaim = readFileSync(claimPath), originalConfig = readFileSync(first.configurationPath);
   assert.equal(statSync(claimPath).mode & 0o777, 0o600); assert.equal(statSync(dirname(claimPath)).mode & 0o777, 0o700);
@@ -56,7 +56,7 @@ test('one shared account owns one exact journal directory; retries, restarts and
   assert.deepEqual(readFileSync(claimPath), originalClaim);
 });
 
-test('copied, missing, corrupted and source-tampered bindings fail before creating a journal or consulting RPC', async t => {
+test('copied, missing, corrupted and source-tampered bindings fail before creating a journal or consulting RPC', {skip: process.platform !== 'linux' && 'Requires the isolated Linux secret-tool fixture.'}, async t => {
   const f = await fixture(t), options = f.options('original'), result = await provisionNanoWallet(options), config = loadConfiguration(options.dataDir);
   const claimPath = f.claim(config), claimBytes = readFileSync(claimPath), configBytes = readFileSync(result.configurationPath);
   const copied = f.options('copied').dataDir; mkdirSync(copied, { mode: 0o700 }); writeFileSync(join(copied, 'wallet.json'), configBytes, { mode: 0o600 });
@@ -78,7 +78,7 @@ test('copied, missing, corrupted and source-tampered bindings fail before creati
   assert.equal(existsSync(claimPath), false); noJournal(options.dataDir);
 });
 
-test('claim-before-config crashes resume only the original directory and recover an exact interrupted hardlink publication', async t => {
+test('claim-before-config crashes resume only the original directory and recover an exact interrupted hardlink publication', {skip: process.platform !== 'linux' && 'Requires the isolated Linux secret-tool fixture.'}, async t => {
   const f = await fixture(t), options = f.options('original'), result = await provisionNanoWallet(options), config = loadConfiguration(options.dataDir);
   const claimPath = f.claim(config), bytes = readFileSync(claimPath);
   unlinkSync(result.configurationPath);
@@ -105,7 +105,7 @@ test('claim-before-config crashes resume only the original directory and recover
   assert.deepEqual(readFileSync(join(options.dataDir,'nano-wallet.sqlite3')),retained);assert.deepEqual(readFileSync(claimPath),bytes);
 });
 
-test('concurrent processes cannot claim different journal directories; exact same-directory setup is idempotent', async t => {
+test('concurrent processes cannot claim different journal directories; exact same-directory setup is idempotent', {skip: process.platform !== 'linux' && 'Requires the isolated Linux secret-tool fixture.'}, async t => {
   const f = await fixture(t), left = f.options('left'), right = f.options('right');
   const outcomes = await Promise.all([childProvision(left, f.environment), childProvision(right, f.environment)]);
   assert.equal(outcomes.filter(value => value.ok).length, 1);

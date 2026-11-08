@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
+import { reportPlatformExclusions, selectPlatformTests } from './test-platform.mjs';
 
 const execute = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -241,7 +242,8 @@ try {
     env: { ...process.env, ATTO_TEST_CLI_PACKAGE_DIR: cliDirectory, ATTO_TEST_MCP_PACKAGE_DIR: mcpDirectory },
   });
   process.stdout.write(tests.stdout);
-  const marketplaceTests = await execute(process.execPath, ['--test', '--test-concurrency=1',
+  const marketplaceSelection = selectPlatformTests([
+    join(root, 'atto-marketplace-mcp/test/platform-support.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/marketplace-api-signer.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/node-wallet-host.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/wallet-results.test.mjs'),
@@ -254,13 +256,17 @@ try {
     join(root, 'atto-marketplace-mcp/test/stdio-profile.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/unified-approval-native.integration.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/shared-recovery-onboarding.integration.test.mjs'),
-  ], {
+  ]);
+  reportPlatformExclusions(marketplaceSelection.excluded);
+  const marketplaceTests = await execute(process.execPath, ['--test', '--test-concurrency=1', ...marketplaceSelection.included], {
     cwd: temporary, timeout: 180_000, maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR: marketplaceDirectory, ATTO_TEST_CLI_PACKAGE_DIR: cliDirectory,
       ...(process.platform !== 'win32' ? { ATTO_TEST_MARKETPLACE_MCP_BIN: join(pairModules, '.bin', 'atto-marketplace-mcp') } : {}) },
   });
   process.stdout.write(marketplaceTests.stdout);
-  process.stdout.write('Installed Atto pair and Marketplace MCP passed: stdio tools, controller setup, signer failures, refresh recovery, signing, and payment journals.\n');
+  process.stdout.write(process.platform === 'win32'
+    ? 'Installed Atto pair passed; Marketplace portable contracts and Windows storage rejection passed.\n'
+    : 'Installed Atto pair and Marketplace MCP passed: stdio tools, controller setup, signer failures, refresh recovery, signing, and payment journals.\n');
   // npm exec is the npx runner. The private Marketplace artifact is tested beside
   // the matching Atto artifacts but remains outside the trusted npm publisher.
   const npxHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'setup', '--help'], temporary);

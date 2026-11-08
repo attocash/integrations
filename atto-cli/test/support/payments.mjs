@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { setImmediate as yieldToServer, setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';

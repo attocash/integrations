@@ -48,6 +48,10 @@ fails before journal creation or native RPC. Provisioning retries may finish the
 same original directory after interruption, without reclaiming another wallet's
 binding. Back up this source-side metadata together with the Nano journal.
 
+Wallet storage currently requires POSIX owner-only directory and file permissions
+and supports Linux and macOS. Native Windows storage is unsupported and fails
+closed; the portable cryptographic and RPC APIs remain covered on Windows.
+
 Profile directories must be owner-only. Protect the recovery source (or imported
 seed file) and the entire journal together; restoring an old journal can lose knowledge of signatures
 already issued. Fence writes and reconcile against the native chain before

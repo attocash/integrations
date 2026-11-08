@@ -19,17 +19,23 @@ async function fixture(t, handler) {
   const http = createServer((req, res) => {
     Promise.resolve(handler(req, res)).catch(error => { res.statusCode = 500; res.end(String(error)); });
   });
-  http.listen(0, '127.0.0.1');
-  await once(http, 'listening');
-  const app = new AttoApplication({ directory, secrets: { get: async () => { secretReads++; return null; }, set: async () => assert.fail('Read queries cannot write credentials') } });
+  const applications = new Set();
+  const open = (options = {}) => {
+    const app = new AttoApplication({ directory, ...options });
+    applications.add(app);
+    return app;
+  };
   t.after(async () => {
-    await app.close();
+    for (const app of applications) await app.close();
     http.closeAllConnections();
     await new Promise(resolve => http.close(resolve));
     await rm(directory, { recursive: true, force: true });
   });
+  http.listen(0, '127.0.0.1');
+  await once(http, 'listening');
+  const app = open({ secrets: { get: async () => { secretReads++; return null; }, set: async () => assert.fail('Read queries cannot write credentials') } });
   await app.call('wallet_configure', { network: 'LOCAL', nodeUrl: `http://127.0.0.1:${http.address().port}`, nodeBatchSize: 5, autoReceive: false });
-  return { app, directory, secretReads: () => secretReads };
+  return { app, directory, open, secretReads: () => secretReads };
 }
 
 test('batch override persists, resetting to auto follows the configured endpoint, and status reports the effective size', async t => {
@@ -50,8 +56,7 @@ test('batch override persists, resetting to auto follows the configured endpoint
   assert.equal((await f.app.call('wallet_status')).effectiveNodeBatchSize, 1000);
   await f.app.call('account_get', { addresses });
   await f.app.call('wallet_configure', { nodeBatchSize: 2 });
-  const reopened = new AttoApplication({ directory: f.directory });
-  t.after(() => reopened.close());
+  const reopened = f.open();
   const saved = await reopened.call('wallet_status');
   await reopened.call('account_get', { addresses });
   await reopened.call('wallet_configure', { nodeUrl: 'https://gatekeeper.live.application.atto.cash', nodeBatchSize: null });

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chmod, lstat, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { approvalRequestDigest, readApprovalRequest, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest } from '../dist/approval-files.js';
 

@@ -4,7 +4,7 @@ import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
 import {DatabaseSync} from 'node:sqlite';
 import {chmod, mkdtemp, mkdir, readFile, rm, writeFile} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
+import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import {createRequire} from 'node:module';
 import {fileURLToPath,pathToFileURL} from 'node:url';

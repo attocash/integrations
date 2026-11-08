@@ -1,21 +1,23 @@
 import assert from 'node:assert/strict';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import test, {before,after} from 'node:test';
 import { provisionNanoWallet, inspectNanoRecoveryWallet } from '@attocash/atto-marketplace-nano-adapter';
 import {AttoApplication} from '../../atto-cli/dist/application/app.js';
+import {OsSecretStore} from '../../atto-cli/dist/storage/secrets.js';
 import { setupNanoWalletInteractive } from '../dist/nano-setup.js';
 import {readWalletSelection,saveWalletSelection} from '../dist/wallet-preferences.js';
 
 const phrase = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
-let keyringDirectory, originalPath;
-before(async()=>{
-  keyringDirectory=await mkdtemp(join(tmpdir(),'nano-guided-keyring-'));
-  await writeFile(join(keyringDirectory,'secret-tool'),`#!/bin/sh\nif [ "$1" = lookup ]; then printf '%s\\n' '${phrase}'; else exit 77; fi\n`,{mode:0o700});
-  originalPath=process.env.PATH;process.env.PATH=keyringDirectory+':'+originalPath;
+let originalSecretGet;
+before(() => {
+  // Exercise setup and recovery with a local credential fixture on every OS.
+  // A fake secret-tool alone would still reach the native macOS Keychain.
+  originalSecretGet = OsSecretStore.prototype.get;
+  OsSecretStore.prototype.get = async () => phrase;
 });
-after(async()=>{process.env.PATH=originalPath;await rm(keyringDirectory,{recursive:true,force:true});});
+after(() => { OsSecretStore.prototype.get = originalSecretGet; });
 const origin = 'http://localhost:8080';
 const audience = 'guided-nano-test';
 const initialPurposes = ['link authorizer'];
