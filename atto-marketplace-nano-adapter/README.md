@@ -1,7 +1,9 @@
 # Atto Marketplace Nano adapter
 
 `@attocash/atto-marketplace-nano-adapter` is the private Node wallet engine used by Marketplace MCP.
-It implements Nano Ed25519-Blake2b, state-block signing, confirmed chain checks,
+It is bundled inside the Marketplace MCP npm package and is not released or
+installed separately. The source workspace remains separate for development and
+testing. It implements Nano Ed25519-Blake2b, state-block signing, confirmed chain checks,
 controller proofs and durable payment recovery without a Java runtime.
 
 Nano x402 v2 uses asset `XNO`, network `nano:mainnet` (or `nano:dev`), and

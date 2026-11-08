@@ -6,7 +6,8 @@ For installation and wallet usage, see the [public guide](../README.md).
 ## Development
 
 Run these commands from the repository root. The build compiles CLI first so
-the wallet MCP and Marketplace MCP can resolve its exported library declarations:
+the wallet MCP and Nano adapter can resolve its exported library declarations.
+The check command also builds the Nano adapter before checking Marketplace MCP:
 
 ```sh
 npm ci
@@ -29,7 +30,8 @@ the optional `ATTO_COMMONS_LOCAL_VERSION` override is only for deliberate local
 Commons development and does not change source package pins.
 
 Individual workspaces support `build`, `check`, and `test` scripts. Build before
-running a workspace test directly; build CLI before building or checking MCP.
+running a workspace test directly. Build CLI first, then the Nano adapter before
+building or checking Marketplace MCP.
 The executables in a checkout are:
 
 ```sh
@@ -80,7 +82,9 @@ npm run pack -- --pack-destination /tmp/atto-artifacts
 Source checkouts use `0.0.0` as a development placeholder. CI replaces it with
 the version calculated by semantic-release before testing and publishing.
 
-This produces CLI, wallet MCP, Nano adapter, and Marketplace MCP tarballs. The Marketplace MCP tarball
+This produces CLI, wallet MCP, and Marketplace MCP tarballs. The Nano adapter
+is a private source workspace bundled inside the Marketplace MCP tarball; it
+does not need a separate npm release or installation. The Marketplace MCP tarball
 is an accepted workspace artifact and is not in the trusted npm publisher.
 The root `package-lock.json` records the development dependency tree for
 `npm ci`.
@@ -93,7 +97,10 @@ dependencies to preserve patched `ws` resolution. Native password-store
 bindings remain normal npm dependencies so npm selects the correct platform
 binaries. The wallet MCP stays a separate package with an exact dependency on
 `@attocash/cli`; its SDK is not bundled. The Marketplace MCP package depends on the
-matching CLI and Nano adapter artifacts plus Commons 8.0.2. For local Commons
+matching CLI artifact and Commons 8.0.2. Its bundled Nano adapter shares that
+CLI engine; the adapter's crypto dependencies remain normal npm dependencies.
+Package verification installs Marketplace MCP without a separate adapter artifact
+and verifies the embedded adapter in paired, global, and npm exec installations. For local Commons
 packages, `ATTO_COMMONS_LOCAL_VERSION` makes staging verify the one installed
 Commons closure and rewrites only the staged CLI dependency versions; source
 manifests remain registry-pinned.

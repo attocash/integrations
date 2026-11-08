@@ -1,6 +1,8 @@
 # Atto Marketplace MCP
 
 `@attocash/atto-marketplace-mcp` provides the `atto-marketplace-mcp` executable.
+Its npm package includes the Nano adapter; no separate adapter installation or
+release is required.
 
 Atto Marketplace MCP is a separate local stdio server for named buyer and worker
 operations. Human users keep using the Marketplace browser workspace. A private
@@ -30,7 +32,7 @@ From the integrations repository root:
 
 ```sh
 npm ci
-npm run check --workspace @attocash/atto-marketplace-mcp
+npm run check
 npm test --workspace @attocash/atto-marketplace-mcp
 npm run build --workspace @attocash/atto-marketplace-mcp
 ```

@@ -11,7 +11,7 @@ import {spawn} from 'node:child_process';
 import {createHash, randomUUID} from 'node:crypto';
 import {createServer} from 'node:http';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
-import {createRequire} from 'node:module';
+import {createRequire, findPackageJSON} from 'node:module';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
@@ -20,9 +20,12 @@ import {setTimeout as delay} from 'node:timers/promises';
 const packageDirectory = process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR ?? join(import.meta.dirname, '..');
 const cliDirectory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? fileURLToPath(new URL('../', import.meta.resolve('@attocash/cli/core')));
 const targetRequire = createRequire(join(packageDirectory, 'package.json'));
+const adapterManifestPath = findPackageJSON('@attocash/atto-marketplace-nano-adapter', pathToFileURL(join(packageDirectory, 'package.json')));
+const adapterManifest = JSON.parse(await readFile(adapterManifestPath, 'utf8'));
+const adapterUrl = new URL(adapterManifest.exports['.'].import, pathToFileURL(adapterManifestPath)).href;
 const {Client} = await import(pathToFileURL(targetRequire.resolve('@modelcontextprotocol/client')).href);
 const {StdioClientTransport} = await import(pathToFileURL(targetRequire.resolve('@modelcontextprotocol/client/stdio')).href);
-const {offchainVerify} = await import(pathToFileURL(join(packageDirectory, '..', 'atto-marketplace-nano-adapter', 'dist/index.js')).href);
+const {offchainVerify} = await import(adapterUrl);
 const {AttoApplication} = await import(pathToFileURL(join(cliDirectory, 'dist/application/app.js')).href);
 const {MarketplaceProfileStore} = await import(pathToFileURL(join(packageDirectory, 'dist/profile-store.js')).href);
 const {saveWalletSelection} = await import(pathToFileURL(join(packageDirectory, 'dist/wallet-preferences.js')).href);
@@ -135,8 +138,7 @@ async function fixture(t, network, origin, actualBackend = false) {
     audience, handoffDirectory: join(root, 'handoffs'), grants: {marketplaceFunding: false, externalTransfers: false,
       controllerPurposes: actualBackend ? ['login'] : []},
     limits: {maxPaymentAtomic: '0', rolling24hAtomic: '0'}, terminalConfirmed: true};
-  const adapter = pathToFileURL(join(packageDirectory, '..', 'atto-marketplace-nano-adapter', 'dist/index.js')).href;
-  const provision = `import {provisionNanoWallet} from ${JSON.stringify(adapter)};process.stdout.write(JSON.stringify(await provisionNanoWallet(JSON.parse(process.argv[1]))));`;
+  const provision = `import {provisionNanoWallet} from ${JSON.stringify(adapterUrl)};process.stdout.write(JSON.stringify(await provisionNanoWallet(JSON.parse(process.argv[1]))));`;
   const nanoConfig = JSON.parse(await run(process.execPath, ['--input-type=module', '--eval', provision, JSON.stringify(nanoOptions)], env));
   const savedNano = JSON.parse(await readFile(nanoConfig.configurationPath, 'utf8'));
   assert.equal(savedNano.version, 1); assert.equal(savedNano.keySource.seedFile, undefined);

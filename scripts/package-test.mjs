@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
+import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -24,8 +24,7 @@ const tarball = entry => join(artifacts, `${entry.name.replace(/^@/, '').replace
 const cliArtifact = tarball(cliManifest);
 const mcpArtifact = tarball(mcpManifest);
 const marketplaceArtifact = tarball(marketplaceManifest);
-const nanoArtifact = tarball(nanoManifest);
-await Promise.all([cliArtifact, mcpArtifact, nanoArtifact, marketplaceArtifact].map(async path => assert.ok((await stat(path)).isFile(), `Missing artifact: ${path}`)));
+await Promise.all([cliArtifact, mcpArtifact, marketplaceArtifact].map(async path => assert.ok((await stat(path)).isFile(), `Missing artifact: ${path}`)));
 const temporary = await realpath(await mkdtemp(join(tmpdir(), 'atto package verification-')));
 
 async function runNpm(args, cwd) {
@@ -60,7 +59,7 @@ async function verifySourceInstall() {
   process.stdout.write('Clean source npm ci passed.\n');
 }
 
-async function verifyMarketplace(directory) {
+async function verifyMarketplace(directory, cliDirectory) {
   const published = await manifest(directory);
   assert.equal(published.name, '@attocash/atto-marketplace-mcp');
   assert.equal(published.dependencies['@attocash/cli'], cliManifest.version);
@@ -69,9 +68,62 @@ async function verifyMarketplace(directory) {
   assert.deepEqual(published.bin, { 'atto-marketplace-mcp': 'dist/main.js' });
   assert.equal(published.scripts, undefined);
   assert.equal(published.devDependencies, undefined);
-  assert.equal(published.bundleDependencies, undefined);
+  assert.deepEqual(published.bundleDependencies, [nanoManifest.name]);
+  for (const [name, version] of Object.entries(nanoManifest.dependencies)) {
+    assert.equal(published.dependencies[name], version, `Marketplace must declare the embedded adapter's external dependency ${name}.`);
+  }
   assert.equal(Object.values(published.dependencies).some(value => /^(?:file:|workspace:|link:)/.test(value)), false);
   for (const file of ['dist/main.js', 'README.md', 'LICENSE']) await stat(join(directory, file));
+
+  // Given a clean consumer install with no standalone Nano adapter artifact,
+  // the Marketplace package must contain the exact compiled adapter itself.
+  const adapterDirectory = join(directory, 'node_modules', nanoManifest.name);
+  assert.ok((await lstat(adapterDirectory)).isDirectory(), 'The embedded adapter must be a directory, not a source workspace symlink.');
+  assert.ok((await lstat(join(adapterDirectory, 'dist'))).isDirectory(), 'The embedded adapter must contain a regular dist directory.');
+  const adapter = await manifest(adapterDirectory);
+  assert.equal(adapter.name, nanoManifest.name);
+  assert.equal(adapter.version, nanoManifest.version);
+  assert.equal(adapter.dependencies, undefined, 'Marketplace must own the embedded adapter dependencies so npm installs them outside the bundle.');
+  assert.deepEqual(adapter.exports, nanoManifest.exports);
+  assert.equal(adapter.scripts, undefined);
+  assert.equal(adapter.devDependencies, undefined);
+  for (const file of ['package.json', 'dist/index.js', 'dist/index.d.ts', 'dist/protocol.js', 'dist/protocol.d.ts']) {
+    assert.ok((await lstat(join(adapterDirectory, file))).isFile(), `The embedded adapter must include a regular ${file} file.`);
+  }
+  for (const parent of [directory, adapterDirectory]) {
+    await assert.rejects(lstat(join(parent, 'node_modules', '@attocash', 'cli')), { code: 'ENOENT' },
+      'The Marketplace package and its adapter must use the external shared CLI.');
+  }
+
+  // When the installed Marketplace package and embedded adapter import their
+  // dependencies, both must load one CLI engine and the adapter's real runtime.
+  const source = `
+    import assert from 'node:assert/strict';
+    import { NanoWallet } from '@attocash/atto-marketplace-nano-adapter';
+    import { publicKey } from '@attocash/atto-marketplace-nano-adapter/protocol';
+    import { createApplication } from '@attocash/cli/core';
+    assert.equal(typeof NanoWallet, 'function');
+    assert.equal(typeof publicKey, 'function');
+    assert.equal(typeof createApplication, 'function');
+    process.stdout.write(JSON.stringify({
+      adapter: import.meta.resolve('@attocash/atto-marketplace-nano-adapter'),
+      protocol: import.meta.resolve('@attocash/atto-marketplace-nano-adapter/protocol'),
+      core: import.meta.resolve('@attocash/cli/core'),
+      recovery: import.meta.resolve('@attocash/cli/internal-marketplace'),
+    }));
+  `;
+  const resolutions = [];
+  for (const cwd of [directory, adapterDirectory]) {
+    const result = await execute(process.execPath, ['--input-type=module', '-e', source], { cwd, timeout: 15_000, maxBuffer: 1024 * 1024 });
+    resolutions.push(JSON.parse(result.stdout));
+  }
+  // Then resolution stays inside the installed bundle and reaches the same CLI
+  // artifact, without falling back to the checkout or an independently installed adapter.
+  assert.deepEqual(resolutions[0], resolutions[1]);
+  assert.equal(resolutions[0].adapter, pathToFileURL(join(adapterDirectory, 'dist/index.js')).href);
+  assert.equal(resolutions[0].protocol, pathToFileURL(join(adapterDirectory, 'dist/protocol.js')).href);
+  assert.equal(resolutions[0].core, pathToFileURL(join(cliDirectory, 'dist/core.js')).href);
+  assert.equal(resolutions[0].recovery, pathToFileURL(join(cliDirectory, 'dist/internal-marketplace.js')).href);
 }
 
 async function verifyCli(directory, prefix, noMcp) {
@@ -154,12 +206,12 @@ try {
   process.stdout.write('CLI-only artifact passed: isolated public engine and no MCP SDK.\n');
 
   const pairPrefix = join(temporary, 'pair');
-  const pairModules = await install(pairPrefix, [cliArtifact, mcpArtifact, nanoArtifact, marketplaceArtifact]);
+  const pairModules = await install(pairPrefix, [cliArtifact, mcpArtifact, marketplaceArtifact]);
   const cliDirectory = join(pairModules, '@attocash', 'cli');
   const mcpDirectory = join(pairModules, '@attocash', 'mcp');
   const marketplaceDirectory = join(pairModules, '@attocash', 'atto-marketplace-mcp');
   await verifyCli(cliDirectory, pairPrefix, false);
-  await verifyMarketplace(marketplaceDirectory);
+  await verifyMarketplace(marketplaceDirectory, cliDirectory);
   const mcp = await manifest(mcpDirectory);
   assert.equal(mcp.dependencies['@attocash/cli'], cliManifest.version);
   assert.equal(mcp.bundleDependencies, undefined);
@@ -224,7 +276,7 @@ try {
   const nameSchema = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto', '--json', 'operations', 'send'], temporary);
   assert.equal(JSON.parse(nameSchema.stdout).result.inputSchema.properties.destinationLabel.type, 'string');
   const marketplaceHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact,
-    '--package', nanoArtifact, '--package', marketplaceArtifact, '--', 'atto-marketplace-mcp', '--help'], temporary);
+    '--package', marketplaceArtifact, '--', 'atto-marketplace-mcp', '--help'], temporary);
   assert.match(marketplaceHelp.stdout, /Usage: atto-marketplace-mcp/);
   process.stdout.write('npx runner passed: artifact setup and no noninteractive approval bypass.\n');
   if (process.env.ATTO_TEST_PACKAGE_INTEGRATION === '1') {
@@ -236,7 +288,8 @@ try {
     process.stdout.write('Installed pair passed real Commons node/worker integration.\n');
   }
 
-  const globalModules = await install(join(temporary, 'global'), [cliArtifact, mcpArtifact, nanoArtifact, marketplaceArtifact], true);
+  const globalModules = await install(join(temporary, 'global'), [cliArtifact, mcpArtifact, marketplaceArtifact], true);
+  await verifyMarketplace(join(globalModules, '@attocash', 'atto-marketplace-mcp'), join(globalModules, '@attocash', 'cli'));
   const resolution = await execute(process.execPath, ['--input-type=module', '-e', `
     import { fileURLToPath } from 'node:url';
     const core = await import('@attocash/cli/core');

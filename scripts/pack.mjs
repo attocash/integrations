@@ -95,7 +95,7 @@ async function pack() {
     const cliStage = join(stage, 'cli');
     const mcpStage = join(stage, 'mcp');
     const marketplaceStage = join(stage, 'atto-marketplace-mcp');
-    const nanoStage = join(stage, 'atto-marketplace-nano-adapter');
+    const nanoStage = join(marketplaceStage, 'node_modules', nano.name);
     for (const [source, target] of [[cliDirectory, cliStage], [mcpDirectory, mcpStage], [marketplaceDirectory, marketplaceStage], [nanoDirectory, nanoStage]]) {
       await mkdir(target, { recursive: true });
       for (const file of ['dist', 'README.md', 'LICENSE']) await cp(join(source, file), join(target, file), { recursive: true });
@@ -108,7 +108,7 @@ async function pack() {
       await cp(directory, target, { recursive: true, dereference: true, filter: source => source === directory || !source.slice(directory.length + 1).split(/[\\/]/).includes('node_modules') });
     }
     await mkdir(destination, { recursive: true });
-    for (const [manifest, directory] of [[cli, cliStage], [mcp, mcpStage], [marketplace, marketplaceStage], [nano, nanoStage]]) {
+    for (const [manifest, directory] of [[cli, cliStage], [mcp, mcpStage], [nano, nanoStage], [marketplace, marketplaceStage]]) {
       const { scripts, devDependencies, overrides, bundleDependencies, bundledDependencies, ...published } = manifest;
       if (manifest === cli) {
         published.bundleDependencies = bundled;
@@ -122,7 +122,23 @@ async function pack() {
           }
         }
       }
+      // External dependencies belong to the containing package; retaining them
+      // here makes npm global installs misclassify them as bundled dependencies.
+      if (manifest === nano) delete published.dependencies;
+      if (manifest === marketplace) {
+        published.bundleDependencies = [nano.name];
+        // npm does not install missing transitive dependencies of bundled packages.
+        // Keep the adapter's external dependencies on the Marketplace package.
+        for (const [name, version] of Object.entries(nano.dependencies)) {
+          if (published.dependencies[name] && published.dependencies[name] !== version) {
+            throw new Error(`The embedded Nano adapter requires the same ${name} version as Marketplace MCP.`);
+          }
+          published.dependencies[name] = version;
+        }
+      }
       await writeFile(join(directory, 'package.json'), `${JSON.stringify(published, null, 2)}\n`);
+    }
+    for (const [manifest, directory] of [[cli, cliStage], [mcp, mcpStage], [marketplace, marketplaceStage]]) {
       await execute(process.execPath, [npm, 'pack', '--ignore-scripts', '--quiet', '--pack-destination', destination], {
         cwd: directory, timeout: 60_000, maxBuffer: 1024 * 1024,
       });

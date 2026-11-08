@@ -26,7 +26,7 @@ jobs:
       - run: npm test
       - run: npm run test:integration
         if: runner.os == 'Linux'
-      - name: Verify both artifacts in clean CLI-only, paired, and global installations
+      - name: Verify CLI, wallet MCP, and Marketplace MCP artifacts in clean installations
         run: npm run test:package
         env:
           ATTO_TEST_PACKAGE_INTEGRATION: ${{ runner.os == 'Linux' && '1' || '0' }}
