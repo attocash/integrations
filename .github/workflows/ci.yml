@@ -10,6 +10,7 @@ permissions:
 
 jobs:
   test:
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -22,16 +23,22 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+        timeout-minutes: 5
       - run: npm run check
+        timeout-minutes: 5
       - run: npm test
+        timeout-minutes: 10
       - run: npm run test:integration
+        timeout-minutes: 8
         if: runner.os == 'Linux'
       - name: Verify CLI, wallet MCP, and Marketplace MCP artifacts in clean installations
         run: npm run test:package
+        timeout-minutes: 20
         env:
           ATTO_TEST_PACKAGE_INTEGRATION: ${{ runner.os == 'Linux' && '1' || '0' }}
 
   password-store:
+    timeout-minutes: 15
     env:
       ATTO_TEST_KEYCHAIN: '1'
     strategy:
@@ -46,10 +53,13 @@ jobs:
           node-version: '24'
           cache: npm
       - run: npm ci
+        timeout-minutes: 5
       - name: Install Linux Secret Service tools
+        timeout-minutes: 5
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libsecret-tools gnome-keyring dbus-x11
       - name: Verify Linux credential persistence in an isolated session
+        timeout-minutes: 3
         if: runner.os == 'Linux'
         shell: bash
         run: |
@@ -58,5 +68,6 @@ jobs:
             npm run test:keychain
           '
       - name: Verify native credential persistence
+        timeout-minutes: 3
         if: runner.os != 'Linux'
         run: npm run test:keychain
