@@ -13,10 +13,27 @@ const recoveryPhrase = 'abandon abandon abandon abandon abandon abandon abandon 
 const packageDirectory = fileURLToPath(new URL('../', import.meta.url));
 const require = createRequire(import.meta.url);
 
+// Replace only the native credential binding. OsSecretStore still selects the
+// platform adapter, writes through it, and verifies the stored phrase itself.
+const nativeKeyringFixtureUrl = 'data:text/javascript,' + encodeURIComponent(`
+  const entries = new Map();
+  export const operations = [];
+  export class AsyncEntry {
+    constructor(service, account) { this.service = service; this.account = account; }
+    key() { return JSON.stringify([this.service, this.account]); }
+    record(operation) { operations.push({ operation, service: this.service, account: this.account }); }
+    async getPassword() { this.record('lookup'); return entries.get(this.key()) ?? null; }
+    async setPassword(value) { this.record('store'); entries.set(this.key(), value); }
+    async deleteCredential() { this.record('clear'); entries.delete(this.key()); }
+  }
+`);
+
 function runTerminalHarness({ env, steps, timeoutMs = 30_000 }) {
   const harness = [
     "import os from 'node:os';",
-    "import { syncBuiltinESMExports } from 'node:module';",
+    "import { registerHooks, syncBuiltinESMExports } from 'node:module';",
+    "Object.defineProperty(process, 'platform', { value: process.env.ATTO_TEST_PLATFORM });",
+    `registerHooks({ resolve(specifier, context, nextResolve) { return specifier === '@napi-rs/keyring' ? { url: ${JSON.stringify(nativeKeyringFixtureUrl)}, shortCircuit: true } : nextResolve(specifier, context); } });`,
     "import { writeFile } from 'node:fs/promises';",
     'os.homedir = () => process.env.ATTO_TEST_HOME;',
     'syncBuiltinESMExports();',
@@ -40,7 +57,10 @@ function runTerminalHarness({ env, steps, timeoutMs = 30_000 }) {
     'const afterCancelStatus = await afterCancel.call(\'wallet_status\');',
     'const afterCancelLimits = await afterCancel.call(\'limits_get\');',
     'await afterCancel.close();',
-    'await writeFile(process.env.ATTO_TEST_TRACE, JSON.stringify({ firstStatus, firstLimits, reconfigurationCode, afterCancelStatus, afterCancelLimits }));',
+    "const { inspectWalletProfile } = await import('@attocash/cli/profiles');",
+    'const credentialProfile = inspectWalletProfile(process.env.ATTO_TEST_WALLET);',
+    "const { operations } = await import('@napi-rs/keyring');",
+    'await writeFile(process.env.ATTO_TEST_TRACE, JSON.stringify({ firstStatus, firstLimits, reconfigurationCode, afterCancelStatus, afterCancelLimits, credentialProfile, secretStoreOperations: operations }));',
   ].join('\n');
   const child = spawn(process.execPath, ['--input-type=module', '--eval', harness], {
     cwd: packageDirectory,
@@ -78,7 +98,12 @@ function runTerminalHarness({ env, steps, timeoutMs = 30_000 }) {
   });
 }
 
-test('wallet setup uses its private default home, preserves its selected wallet on mismatched reconfiguration and uses the installed shared Atto wallet engine', async t => {
+// Linux also exercises the macOS branch without loading a native Keychain binding.
+for (const platform of new Set([process.platform, 'darwin'])) {
+  test(`wallet setup uses its private default home, preserves its selected wallet on mismatched reconfiguration and uses the installed shared Atto wallet engine (${platform} credential adapter)`, t => verifyWalletSetup(t, platform));
+}
+
+async function verifyWalletSetup(t, platform) {
   const root = await mkdtemp(join(tmpdir(), 'marketplace-wallet-setup-wrapper-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const home = join(root, 'home');
@@ -88,9 +113,9 @@ test('wallet setup uses its private default home, preserves its selected wallet 
   await writeFile(fakeSecretTool, [
     '#!/bin/sh',
     'case "$1" in',
-    '  store) cat >/dev/null; exit 0 ;;',
-    '  lookup) printf "%s\\n" "$ATTO_TEST_PHRASE"; exit 0 ;;',
-    '  clear) exit 0 ;;',
+    '  store) cat >"$ATTO_TEST_CREDENTIAL"; exit 0 ;;',
+    '  lookup) test -f "$ATTO_TEST_CREDENTIAL" || exit 1; cat "$ATTO_TEST_CREDENTIAL"; exit 0 ;;',
+    '  clear) rm -f "$ATTO_TEST_CREDENTIAL"; exit 0 ;;',
     '  *) exit 2 ;;',
     'esac',
     '',
@@ -107,7 +132,8 @@ test('wallet setup uses its private default home, preserves its selected wallet 
     XDG_RUNTIME_DIR: '',
     DBUS_SESSION_BUS_ADDRESS: '',
     ATTO_TEST_HOME: home,
-    ATTO_TEST_PHRASE: recoveryPhrase,
+    ATTO_TEST_CREDENTIAL: join(root, 'synthetic-credential'),
+    ATTO_TEST_PLATFORM: platform,
     ATTO_TEST_MAIN: new URL('../dist/main.js', import.meta.url).href,
     ATTO_TEST_WALLET: walletDirectory,
     ATTO_TEST_TRACE: tracePath,
@@ -141,6 +167,19 @@ test('wallet setup uses its private default home, preserves its selected wallet 
 
   const trace = JSON.parse(await readFile(tracePath, 'utf8'));
   assert.equal(trace.reconfigurationCode, 'PROFILE_CONFLICT');
+  if (platform === 'linux') {
+    assert.deepEqual(trace.secretStoreOperations, []);
+    assert.equal(await readFile(env.ATTO_TEST_CREDENTIAL, 'utf8'), recoveryPhrase);
+  } else {
+    assert.equal(trace.secretStoreOperations.filter(entry => entry.operation === 'store').length, 1);
+    const stored = trace.secretStoreOperations.findIndex(entry => entry.operation === 'store');
+    assert.ok(trace.secretStoreOperations.slice(stored + 1).some(entry => entry.operation === 'lookup'));
+    for (const entry of trace.secretStoreOperations) {
+      assert.equal(entry.service, trace.credentialProfile.credentialService);
+      assert.equal(entry.account, trace.credentialProfile.credentialAccount);
+    }
+    await assert.rejects(access(env.ATTO_TEST_CREDENTIAL), {code: 'ENOENT'});
+  }
   const savedAddress = trace.firstStatus.addresses.find(address => address.index === result.index);
   assert.ok(savedAddress);
   assert.equal(result.address, savedAddress.address);
@@ -187,4 +226,4 @@ test('wallet setup uses its private default home, preserves its selected wallet 
     message,
   }));
   // Then the raw signing request cannot use one-off Marketplace approval authority.
-});
+}

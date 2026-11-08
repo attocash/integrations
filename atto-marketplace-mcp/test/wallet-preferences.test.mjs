@@ -65,17 +65,19 @@ test('saved role selections survive process restart and a profiles.sqlite restor
 test('environment overrides saved roles and a shared controller follows the primary wallet', async t => {
   const f = await fixture(t);
   await saveWalletSelection(f.home, {attoDirectory: f.atto, nanoDirectory: f.nano});
-  const env = {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: '/tmp/explicit-atto', MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: '/tmp/explicit-nano'};
+  const env = {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: join(f.parent, 'explicit-atto'),
+    MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: join(f.parent, 'explicit-nano')};
+  const explicitController = join(f.parent, 'explicit-controller');
   const selected = managedWalletEnvironment(f.home, env);
   assert.equal(selected.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR);
   assert.equal(selected.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR);
   await saveWalletSelection(f.home, {nanoControllerDirectory: f.controller});
   assert.equal(managedWalletEnvironment(f.home, env).MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, f.controller);
-  assert.equal(managedWalletEnvironment(f.home, {...env, MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR: '/tmp/explicit-controller'})
-    .MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, '/tmp/explicit-controller');
+  assert.equal(managedWalletEnvironment(f.home, {...env, MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR: explicitController})
+    .MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, explicitController);
   await saveWalletSelection(f.home, {nanoControllerDirectory: f.nano});
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto, nanoDirectory: f.nano});
-  assert.equal(managedWalletEnvironment(f.home, env).MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, '/tmp/explicit-nano');
+  assert.equal(managedWalletEnvironment(f.home, env).MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR);
 });
 
 test('simultaneous independent processes merge role updates even on the first database creation', async t => {

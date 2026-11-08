@@ -38,6 +38,14 @@ checks that private wallet startup fails closed. Tests have a three-minute
 individual deadline and an eight-minute runner deadline, with separate CI step
 and job limits. Package verification follows the same platform policy.
 
+Private-wallet fixtures use `test/support/temporary-directory.mjs` and place
+explicit wallet overrides beneath that canonical temporary root. Do not
+hard-code `/tmp` or relax production symlink checks for macOS. Terminal
+tests must mock the selected platform credential adapter rather than reach
+a real user keychain. PTY EOF may be an empty read or `EIO`; both require
+collecting the child exit status within the existing deadline before
+classifying the command as a timeout.
+
 Individual workspaces support `build`, `check`, and `test` scripts. Build before
 running a workspace test directly. Build CLI first, then the Nano adapter before
 building or checking Marketplace MCP.

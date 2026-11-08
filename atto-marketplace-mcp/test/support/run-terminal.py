@@ -13,6 +13,17 @@ import termios
 import time
 
 
+def wait_for_child(child, deadline):
+    while True:
+        waited, status = os.waitpid(child, os.WNOHANG)
+        if waited:
+            return status
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return None
+        time.sleep(min(0.01, remaining))
+
+
 def main():
     request = json.loads(sys.argv[1])
     command = request["command"]
@@ -39,10 +50,14 @@ def main():
                     chunk = os.read(master, 4096)
                 except OSError as error:
                     if error.errno == errno.EIO:
-                        _, status = os.waitpid(child, 0)
-                        break
-                    raise
+                        chunk = b""
+                    else:
+                        raise
                 if not chunk:
+                    # Linux reports PTY EOF as EIO; macOS returns empty bytes.
+                    # Either can precede child exit, so retain the deadline
+                    # while waiting for its actual status.
+                    status = wait_for_child(child, deadline)
                     break
                 captured.extend(chunk)
                 if len(captured) > 1_048_576:

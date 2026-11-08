@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdir, mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -9,9 +9,11 @@ import { managedWalletEnvironment } from '../dist/wallet-home.js';
 
 const execute = promisify(execFile);
 
-test('Marketplace MCP home selects dedicated native wallets without modifying caller environment', () => {
+test('Marketplace MCP home selects dedicated native wallets without modifying caller environment', async t => {
   // Given
-  const home = '/tmp/marketplace-private-home';
+  const parent = await mkdtemp(join(tmpdir(), 'marketplace-wallet-home-'));
+  t.after(() => rm(parent, {recursive:true,force:true}));
+  const home = join(parent, 'private-home');
   const env = { PATH: '/usr/bin' };
   // When
   const selected = managedWalletEnvironment(home, env);
@@ -22,23 +24,29 @@ test('Marketplace MCP home selects dedicated native wallets without modifying ca
   assert.equal(selected.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, join(home, 'payment-handoffs'));
   assert.equal(selected.MARKETPLACE_MCP_HOME, home);
   assert.deepEqual(env, { PATH: '/usr/bin' });
-  assert.notEqual(managedWalletEnvironment('/tmp/other-marketplace-home', env).MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR,
+  assert.notEqual(managedWalletEnvironment(join(parent, 'other-home'), env).MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR,
     selected.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR);
 });
 
-test('explicit existing wallet selections remain stable and relative paths fail closed', () => {
+test('explicit existing wallet selections remain stable and relative paths fail closed', async t => {
   // Given
-  const env = { MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: '/tmp/explicit-existing-wallet',
-    MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: '/tmp/explicit-payer.json', MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR: '/tmp/old-handoffs' };
+  const parent = await mkdtemp(join(tmpdir(), 'marketplace-explicit-wallets-'));
+  t.after(() => rm(parent, {recursive:true,force:true}));
+  const home = join(parent, 'home');
+  const handoffs = join(parent, 'selected-handoffs');
+  const env = { MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: join(parent, 'explicit-atto'),
+    MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: join(parent, 'explicit-nano'), MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR: join(parent, 'old-handoffs') };
+  await mkdir(env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, {mode:0o700});
+  await mkdir(env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR, {mode:0o700});
   // When
-  const selected = managedWalletEnvironment('/tmp/marketplace-home', env, '/tmp/selected-handoffs');
+  const selected = managedWalletEnvironment(home, env, handoffs);
   // Then
   assert.equal(selected.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR);
   assert.equal(selected.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR, env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR);
-  assert.equal(selected.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, '/tmp/selected-handoffs');
+  assert.equal(selected.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, handoffs);
   for (const key of ['MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR', 'MARKETPLACE_MCP_NANO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR',
     'MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR']) {
-    assert.throws(() => managedWalletEnvironment('/tmp/marketplace-home', { [key]: 'relative/wallet' }),
+    assert.throws(() => managedWalletEnvironment(home, { [key]: 'relative/wallet' }),
       error => error.code === 'WALLET_SETUP_REQUIRED');
   }
 });
