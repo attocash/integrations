@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import {isDeepStrictEqual} from 'node:util';
 import {createServer} from 'node:http';
 import {mkdtemp, rm} from 'node:fs/promises';
 import {tmpdir} from '../../test/support/temporary-directory.mjs';
@@ -17,55 +18,89 @@ const serverMain=join(import.meta.dirname,'../dist/main.js');
 const draft={title:'Durable command test',description:'A focused command recovery test.',deliverable:'A test result.',
   acceptanceTerms:'The durable result is returned once.',asset:'ATTO',grossAtomic:'10'};
 
-test('a 202 financial command is saved and resumed by GET after a timeout and process restart',async t=>{
-  const requests=[];
-  let commandStatus='PENDING';
-  const result={taskId:'66666666-6666-4666-8666-666666666666',state:'DRAFT',version:0};
-  const http=await listen(async(req,res)=>{
-    const body=await readBody(req);
-    requests.push({method:req.method,path:req.url,authorization:req.headers.authorization,
-      idempotencyKey:req.headers['idempotency-key'],body});
-    if(req.method==='POST'&&req.url==='/v1/agent/tasks') return json(res,202,
-      {commandId,status:'PENDING',statusUrl:`/v1/agent/commands/${commandId}`});
-    if(req.method==='GET'&&req.url===`/v1/agent/commands/${commandId}`) {
-      return json(res,200,{commandId,status:commandStatus,statusUrl:`/v1/agent/commands/${commandId}`,
-        ...(commandStatus==='SETTLED'?{result}:{})});
-    }
-    return json(res,404,{});
-  });
-  const home=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-command-'));
-  const store=await MarketplaceProfileStore.open(home);
-  store.createProfile({id:'agent',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
-    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',apiKey:'test-api-key',
-    apiScopes:['tasks:draft:write']});
-  let client=await connect(home,'agent',100);
-  try {
+for(const scenario of [
+  {name:'PENDING status responses',disconnectStatusRequests:false},
+  {name:'status transport failures',disconnectStatusRequests:true},
+]) {
+  test(`a 202 financial command survives ${scenario.name} and resumes by GET after process restart`,async t=>{
+    // Given an accepted command whose status remains pending or cannot be fetched.
+    const requests=[];
+    const pointer={commandId,statusUrl:`/v1/agent/commands/${commandId}`};
+    let commandStatus='PENDING';
+    let http,home,store,client;
+    t.after(async()=>{
+      await client?.close();
+      if(http) {
+        http.closeAllConnections();
+        await new Promise(resolve=>http.close(resolve));
+      }
+      store?.close();
+      if(home) await rm(home,{recursive:true,force:true});
+    });
+    const result={taskId:'66666666-6666-4666-8666-666666666666',state:'DRAFT',version:0};
+    http=await listen(async(req,res)=>{
+      const body=await readBody(req);
+      requests.push({method:req.method,path:req.url,authorization:req.headers.authorization,
+        idempotencyKey:req.headers['idempotency-key'],body});
+      if(req.method==='POST'&&req.url==='/v1/agent/tasks') return json(res,202,
+        {...pointer,status:'PENDING'});
+      if(req.method==='GET'&&req.url===pointer.statusUrl) {
+        if(commandStatus==='PENDING'&&scenario.disconnectStatusRequests) {
+          req.socket.destroy();
+          return;
+        }
+        return json(res,200,{...pointer,status:commandStatus,
+          ...(commandStatus==='SETTLED'?{result}:{})});
+      }
+      return json(res,404,{});
+    });
+    home=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-command-'));
+    store=await MarketplaceProfileStore.open(home);
+    store.createProfile({id:'agent',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
+      controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',apiKey:'test-api-key',
+      apiScopes:['tasks:draft:write']});
+    client=await connect(home,'agent',2_000);
     const args={requestId,draft};
+
+    // When the original request exhausts its command polling budget.
     const pending=await client.callTool({name:'marketplace_task_draft_create',arguments:args});
+
+    // Then only the unresolved pointer and the permitted transport diagnostic are returned and saved.
     assert.equal(pending.isError,true);
     assert.equal(pending.structuredContent.error.code,'COMMAND_PENDING');
-    assert.deepEqual(pending.structuredContent.error.details,{commandId,statusUrl:`/v1/agent/commands/${commandId}`});
+    const unavailableDetails={...pointer,statusErrorCode:'MARKETPLACE_UNAVAILABLE'};
+    // A final GET may exhaust the remaining budget even when the mock responds immediately.
+    const expectedDetails=scenario.disconnectStatusRequests?[unavailableDetails]:[pointer,unavailableDetails];
+    assert.ok(expectedDetails.some(expected=>isDeepStrictEqual(pending.structuredContent.error.details,expected)),
+      `Unexpected command details: ${JSON.stringify(pending.structuredContent.error.details)}`);
+    const saved=store.getMutationByRequestId('agent',requestId);
+    assert.equal(saved.state,'PENDING');
+    assert.deepEqual(JSON.parse(saved.resultIdentity),{kind:'MARKETPLACE_MUTATION_RECOVERY',command:pointer});
     assert.equal(requests.filter(row=>row.method==='POST').length,1);
-    assert.ok(requests.some(row=>row.method==='GET'&&row.path===`/v1/agent/commands/${commandId}`));
+    assert.ok(requests.some(row=>row.method==='GET'&&row.path===pointer.statusUrl));
     assert.deepEqual(requests.find(row=>row.method==='POST').body,draft);
     assert.equal(requests.find(row=>row.method==='POST').idempotencyKey,requestId);
 
+    // Given the first process is closed and the original command settles.
     await client.close();
-    client=await connect(home,'agent',5_000);
+    client=undefined;
     commandStatus='SETTLED';
+    client=await connect(home,'agent',5_000);
+    const recoveryStart=requests.length;
+
+    // When the restarted process receives the identical request.
     const recovered=await client.callTool({name:'marketplace_task_draft_create',arguments:args});
+
+    // Then it reads the original command without posting a replacement.
     assert.notEqual(recovered.isError,true,text(recovered));
     assert.deepEqual(JSON.parse(text(recovered)).result,result);
+    assert.deepEqual(requests.slice(recoveryStart).map(({method,path})=>({method,path})),
+      [{method:'GET',path:pointer.statusUrl}]);
     assert.equal(requests.filter(row=>row.method==='POST').length,1,'recovery must poll the saved command, not resubmit');
-    assert.ok(requests.filter(row=>row.method==='GET').length>=2);
+    assert.equal(store.getMutationByRequestId('agent',requestId).state,'COMPLETE');
     assert.ok(requests.every(row=>row.authorization==='Bearer test-api-key'));
-  } finally {
-    await client.close();
-    http.close();
-    store.close();
-    await rm(home,{recursive:true,force:true});
-  }
-});
+  });
+}
 
 test('a rejected command preserves the backend error code and never retries its POST',async t=>{
   const requests=[];
@@ -103,8 +138,13 @@ async function connect(home,profile,waitMs){
   const environment=Object.fromEntries(Object.entries(process.env).filter(([key,value])=>typeof value==='string'
     &&key!=='NODE_TEST_CONTEXT'&&!key.startsWith('NODE_TEST_')));
   environment.MARKETPLACE_COMMAND_WAIT_MS=String(waitMs);
-  await client.connect(new StdioClientTransport({command:process.execPath,args:[serverMain,'--profile',profile,'--home',home],env:environment,stderr:'pipe'}));
-  return client;
+  try {
+    await client.connect(new StdioClientTransport({command:process.execPath,args:[serverMain,'--profile',profile,'--home',home],env:environment,stderr:'pipe'}));
+    return client;
+  } catch(error) {
+    await client.close();
+    throw error;
+  }
 }
 
 async function listen(handler){
