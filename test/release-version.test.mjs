@@ -49,7 +49,7 @@ test('Prepares matching package and lock versions', t => {
   assert.equal(cli.version, '12.34.56');
   assert.equal(mcp.version, '12.34.56');
   assert.equal(mcp.dependencies['@attocash/cli'], '12.34.56');
-  assert.equal(marketplace.version, '0.1.0');
+  assert.equal(marketplace.version, '12.34.56');
   assert.equal(marketplace.dependencies['@attocash/cli'], '12.34.56');
   assert.equal(marketplace.dependencies['@attocash/atto-marketplace-nano-adapter'], '0.1.0');
   assert.equal(marketplace.dependencies['@attocash/mcp'], undefined);
@@ -58,7 +58,7 @@ test('Prepares matching package and lock versions', t => {
   assert.equal(lock.packages['atto-cli'].version, '12.34.56');
   assert.equal(lock.packages['atto-mcp'].version, '12.34.56');
   assert.equal(lock.packages['atto-mcp'].dependencies['@attocash/cli'], '12.34.56');
-  assert.equal(lock.packages['atto-marketplace-mcp'].version, '0.1.0');
+  assert.equal(lock.packages['atto-marketplace-mcp'].version, '12.34.56');
   assert.equal(lock.packages['atto-marketplace-mcp'].dependencies['@attocash/cli'], '12.34.56');
   assert.equal(lock.packages['atto-marketplace-mcp'].dependencies['@attocash/atto-marketplace-nano-adapter'], '0.1.0');
   assert.equal(lock.packages['atto-marketplace-nano-adapter'].version, '0.1.0');
@@ -72,8 +72,8 @@ test('Prepares matching package and lock versions', t => {
   assert.deepEqual(cli.dependencies, JSON.parse(before[1]).dependencies);
 });
 
-test('Preserves independent private Marketplace and Nano package versions', t => {
-  // Given private packages with versions independent of the public CLI/MCP release.
+test('Synchronizes public Marketplace while preserving the independent private Nano version', t => {
+  // Given Marketplace and its private Nano adapter have different source versions.
   const directory = fixture(t);
   const marketplace = readJson(join(directory, 'atto-marketplace-mcp/package.json'));
   const nano = readJson(join(directory, 'atto-marketplace-nano-adapter/package.json'));
@@ -88,14 +88,21 @@ test('Preserves independent private Marketplace and Nano package versions', t =>
     writeFileSync(join(directory, file), JSON.stringify(value));
   }
 
-  // When public package versions and their exact private consumers are aligned.
+  // When all public package versions and exact CLI dependency pins are aligned.
   prepareRelease('3.2.1', directory);
 
-  // Then private package versions and their dependency relationship stay independent.
-  assert.equal(readJson(join(directory, 'atto-marketplace-mcp/package.json')).version, '8.7.6');
-  assert.equal(readJson(join(directory, 'atto-marketplace-nano-adapter/package.json')).version, '9.8.7');
+  // Then Marketplace shares the release version while Nano keeps its version and private status.
+  const preparedMarketplace = readJson(join(directory, 'atto-marketplace-mcp/package.json'));
+  const preparedNano = readJson(join(directory, 'atto-marketplace-nano-adapter/package.json'));
+  assert.equal(preparedMarketplace.version, '3.2.1');
+  assert.equal(preparedMarketplace.dependencies[nano.name], '9.8.7');
+  assert.equal(preparedMarketplace.dependencies['@attocash/cli'], '3.2.1');
+  assert.equal(preparedNano.version, '9.8.7');
+  assert.equal(preparedNano.private, true);
+  assert.equal(preparedNano.dependencies['@attocash/cli'], '3.2.1');
   const preparedLock = readJson(join(directory, 'package-lock.json'));
-  assert.equal(preparedLock.packages['atto-marketplace-mcp'].version, '8.7.6');
+  assert.equal(preparedLock.packages['atto-marketplace-mcp'].version, '3.2.1');
+  assert.equal(preparedLock.packages['atto-marketplace-mcp'].dependencies['@attocash/cli'], '3.2.1');
   assert.equal(preparedLock.packages['atto-marketplace-nano-adapter'].version, '9.8.7');
   assert.equal(preparedLock.packages['atto-marketplace-mcp'].dependencies[nano.name], '9.8.7');
   assert.equal(preparedLock.packages['atto-marketplace-nano-adapter'].dependencies['@attocash/cli'], '3.2.1');
@@ -198,8 +205,9 @@ test('Command targets its checkout through a symlink and rejects extra arguments
   const output = execFileSync(process.execPath, [join(linkedScripts, 'release-version.mjs'), '2.3.4'], { cwd: tmpdir(), encoding: 'utf8' });
 
   // Then
-  assert.match(output, /Prepared CLI and wallet MCP version 2\.3\.4/);
+  assert.match(output, /Prepared CLI, wallet MCP, and Marketplace MCP version 2\.3\.4/);
   assert.equal(readJson(join(directory, 'atto-cli/package.json')).version, '2.3.4');
+  assert.equal(readJson(join(directory, 'atto-marketplace-mcp/package.json')).version, '2.3.4');
   assert.equal(readJson(join(directory, 'atto-marketplace-mcp/package.json')).dependencies['@attocash/cli'], '2.3.4');
   assert.equal(readJson(join(directory, 'atto-marketplace-nano-adapter/package.json')).dependencies['@attocash/cli'], '2.3.4');
   assert.deepEqual(snapshot(repository), sourceBefore);

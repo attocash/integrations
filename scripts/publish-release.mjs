@@ -8,7 +8,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const execute = promisify(execFile);
 const REGISTRY = 'https://registry.npmjs.org';
-const PACKAGES = ['@attocash/cli', '@attocash/mcp'];
+const CLI_DEPENDENTS = ['@attocash/mcp', '@attocash/marketplace-mcp'];
+const PACKAGES = ['@attocash/cli', ...CLI_DEPENDENTS];
 
 function failure(code, message) {
   return Object.assign(new Error(message), { code });
@@ -22,8 +23,19 @@ function stableVersion(value) {
   return value.split('.').map(BigInt);
 }
 
+function registryVersionCore(value) {
+  const match = typeof value === 'string' && value.length <= 128 && value.trim() === value
+    && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?(?:\+([0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/.exec(value);
+  if (!match || match[4]?.split('.').some(identifier => /^0\d+$/.test(identifier))) {
+    throw failure('INVALID_VERSION', 'Registry versions must use valid SemVer format.');
+  }
+  return match.slice(1, 4).map(BigInt);
+}
+
 function newer(candidate, requested) {
-  const left = stableVersion(candidate);
+  // Requested releases are stable. A same-core prerelease is older; build
+  // metadata does not affect precedence, so only a greater core can be newer.
+  const left = registryVersionCore(candidate);
   const right = stableVersion(requested);
   for (let index = 0; index < 3; index++) {
     if (left[index] !== right[index]) return left[index] > right[index];
@@ -41,12 +53,12 @@ async function artifact(name, version, directory) {
     const { stdout } = await execute('tar', ['-xOf', path, 'package/package.json'], { timeout: 10_000, maxBuffer: 64 * 1024 });
     const manifest = JSON.parse(stdout);
     if (manifest.name !== name || manifest.version !== version) throw new Error();
-    if (name === '@attocash/mcp' && manifest.dependencies?.['@attocash/cli'] !== version) throw new Error();
+    if (CLI_DEPENDENTS.includes(name) && manifest.dependencies?.['@attocash/cli'] !== version) throw new Error();
     const hash = createHash('sha512');
     for await (const chunk of createReadStream(path)) hash.update(chunk);
     return { name, version, path, integrity: `sha512-${hash.digest('base64')}` };
   } catch {
-    throw failure('INVALID_ARTIFACT', `${name} must contain the expected name/version and, for MCP, the exact CLI dependency.`);
+    throw failure('INVALID_ARTIFACT', `${name} must contain the expected name/version and, for MCP packages, the exact CLI dependency.`);
   }
 }
 
@@ -83,7 +95,7 @@ async function registryMetadata(fetchImpl, name, version) {
 function matchingMetadata(metadata, expected) {
   if (metadata?.name !== expected.name || metadata.version !== expected.version
     || metadata.dist?.integrity !== expected.integrity
-    || (expected.name === '@attocash/mcp' && metadata.dependencies?.['@attocash/cli'] !== expected.version)) {
+    || (CLI_DEPENDENTS.includes(expected.name) && metadata.dependencies?.['@attocash/cli'] !== expected.version)) {
     throw failure('RELEASE_CONFLICT', `${expected.name}@${expected.version} already exists with different metadata or artifact bytes.`);
   }
 }
@@ -119,7 +131,7 @@ export async function publishRelease(version, artifactDirectory, options = {}) {
   const env = options.env ?? process.env;
   const fetchImpl = options.fetch ?? globalThis.fetch;
   const runNpm = options.runNpm ?? (args => execute('npm', args, { cwd: directory, env, timeout: 120_000, maxBuffer: 1024 * 1024 }));
-  const attempts = options.propagationAttempts ?? 12;
+  const attempts = options.propagationAttempts ?? 60;
   const delayMs = options.propagationDelayMs ?? 5000;
   if (!Number.isInteger(attempts) || attempts < 1 || attempts > 60 || !Number.isInteger(delayMs) || delayMs < 0 || delayMs > 30_000) {
     throw failure('INVALID_OPTIONS', 'Registry propagation attempts and delay must be bounded.');
@@ -137,7 +149,7 @@ export async function publishRelease(version, artifactDirectory, options = {}) {
       throw failure('LATEST_CONFLICT', `Publishing ${entry.name}@${version} could move npm latest backwards.`);
     }
   };
-  // Check the complete pair before the first mutation, including a newer MCP
+  // Check every missing package before the first mutation, including a newer MCP
   // release that would otherwise be noticed only after publishing the CLI.
   await Promise.all(missing.map(checkLatest));
   if (missing.length) { trustedPublishing(env); await supportedNpm(runNpm); }

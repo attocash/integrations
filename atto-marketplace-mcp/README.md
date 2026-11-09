@@ -4,8 +4,10 @@
 Its npm package includes the Nano adapter; no separate adapter installation or
 release is required.
 
-Marketplace MCP is currently unreleased. Build it from this checkout and use the
-staged package for local installation. Requires Node.js **24.15.0 or newer**.
+Marketplace MCP uses the same release version as the Atto CLI and wallet MCP.
+The GitHub release workflow publishes its tested tarball through npm trusted
+publishing. Requires Node.js **24.15.0 or newer**. For a source checkout, build
+and install the local artifacts as described below.
 
 Atto Marketplace MCP is a separate local stdio server for named buyer and worker
 operations. Human users keep using the Marketplace browser workspace. A private

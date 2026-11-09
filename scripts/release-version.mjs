@@ -47,11 +47,13 @@ export function prepareRelease(version, directory = repository) {
 
   cli.version = version;
   mcp.version = version;
+  marketplace.version = version;
   mcp.dependencies['@attocash/cli'] = version;
   marketplace.dependencies['@attocash/cli'] = version;
   nano.dependencies['@attocash/cli'] = version;
   cliLock.version = version;
   mcpLock.version = version;
+  marketplaceLock.version = version;
   mcpLock.dependencies['@attocash/cli'] = version;
   marketplaceLock.dependencies['@attocash/cli'] = version;
   nanoLock.dependencies['@attocash/cli'] = version;
@@ -76,7 +78,7 @@ if (import.meta.main) {
   try {
     if (process.argv.length !== 3) throw new Error('Usage: node scripts/release-version.mjs <MAJOR.MINOR.PATCH>');
     prepareRelease(process.argv[2]);
-    process.stdout.write(`Prepared CLI and wallet MCP version ${process.argv[2]} and aligned the private Marketplace MCP and Nano adapter dependency pins.\n`);
+    process.stdout.write(`Prepared CLI, wallet MCP, and Marketplace MCP version ${process.argv[2]} and aligned the private Nano adapter dependency pin.\n`);
   } catch (error) {
     process.stderr.write(`${error instanceof Error ? error.message : 'Version preparation failed.'}\n`);
     process.exitCode = 1;

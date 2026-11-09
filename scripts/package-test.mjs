@@ -267,8 +267,7 @@ try {
   process.stdout.write(process.platform === 'win32'
     ? 'Installed Atto pair passed; Marketplace portable contracts and Windows storage rejection passed.\n'
     : 'Installed Atto pair and Marketplace MCP passed: stdio tools, controller setup, signer failures, refresh recovery, signing, and payment journals.\n');
-  // npm exec is the npx runner. The private Marketplace artifact is tested beside
-  // the matching Atto artifacts but remains outside the trusted npm publisher.
+  // npm exec is the npx runner. Exercise all three tested release artifacts.
   const npxHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'setup', '--help'], temporary);
   assert.match(npxHelp.stdout, /Choose a wallet and approve MCP access/);
   const doctorHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'doctor', '--help'], temporary);

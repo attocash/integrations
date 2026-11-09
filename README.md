@@ -10,8 +10,9 @@ an MCP client access with spending limits you choose. Both packages are
 available as an initial beta.
 
 This workspace also contains a separate Marketplace MCP for Marketplace account
-workflows and its embedded Nano wallet adapter. Both are unreleased; the npm
-release publishes only the CLI and wallet MCP packages.
+workflows and its embedded Nano wallet adapter. The release workflow publishes
+the CLI, wallet MCP, and Marketplace MCP together; the Nano adapter is embedded
+in the Marketplace package.
 
 This guide and the package guides describe the current source checkout. npm
 releases can lag behind it; check your installed command's `--help` or your MCP
@@ -135,14 +136,13 @@ MCP tools; other programs running as your OS user retain their normal access.
 | --- | --- | --- | --- |
 | [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | Published beta | `atto`; `@attocash/cli/core` library | [Wallet setup, payments, labels, and recovery](atto-cli/README.md) |
 | [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | Published beta | `atto-mcp` | [Client setup, prompts, and 40 public tools in this checkout](atto-mcp/README.md) |
-| `@attocash/marketplace-mcp` | Unreleased source artifact | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
+| [`@attocash/marketplace-mcp`](https://www.npmjs.com/package/@attocash/marketplace-mcp) | Included in the shared release workflow | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
 | `@attocash/atto-marketplace-nano-adapter` | Private workspace, embedded in Marketplace MCP | Library; no standalone executable | [Nano wallet adapter and recovery](atto-marketplace-nano-adapter/README.md) |
 
-As checked on **2026-11-08**, npm's `latest` tag is **0.2.3** for both the CLI
-and wallet MCP. That MCP artifact exposes 36 tools. The four additional tools
-in this checkout are `message_sign`, `message_verify`, `marketplace_topup`, and
-`marketplace_topup_status`; build from source to use them with the matching CLI
-engine. Check the linked npm pages for subsequent releases.
+As checked on **2026-11-09**, npm's `latest` tag is **0.3.0** for both the CLI
+and wallet MCP. Marketplace MCP has a temporary `0.0.0-stage` registry
+placeholder; its first functional release will use the shared workflow above.
+Check the linked npm pages for subsequent releases.
 
 The wallet MCP includes bounded Marketplace account top-ups after terminal
 configuration. Task, hiring, and Shop workflows belong to the separate

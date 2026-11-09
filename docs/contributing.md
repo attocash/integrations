@@ -23,8 +23,8 @@ npm run test:package
 
 The Marketplace MCP is a separate workspace package. Its sources and tests live in
 `atto-marketplace-mcp/`; its accepted tarball is included in `npm run pack` and
-`npm run test:package`. The current trusted npm release remains limited to the
-CLI and wallet MCP pair.
+`npm run test:package`. The trusted npm release publishes the CLI, wallet MCP,
+and Marketplace MCP together.
 
 The CLI and its direct Commons dependencies now use the published 8.0.2
 JavaScript verifier API. A regular `npm ci` installs the supported package set;
@@ -86,7 +86,7 @@ a package.
 
 The CLI and wallet MCP are released contracts. Keep their exported interfaces,
 operation schemas, command behavior, and persisted wallet records compatible.
-Marketplace packages are unreleased; their internal interfaces can change. Preserve
+The private Nano adapter is embedded in the public Marketplace MCP package. Preserve
 financial recovery guarantees across all packages: retry the original request ID,
 retain uncertain reservations and exact signed candidates, and hold the existing
 account and wallet locks around the same state transitions. Moving a workflow
@@ -100,21 +100,31 @@ npm run pack -- --pack-destination /tmp/atto-artifacts
 ```
 
 The CLI and wallet MCP use `0.0.0` as a development placeholder; Marketplace MCP
-and the private Nano adapter currently use `0.1.0`. CI assigns the CLI and wallet
-MCP the shared version calculated by semantic-release before testing and
-publishing. It also aligns their CLI dependency pins in both Marketplace
-workspaces, without changing the Marketplace package versions.
+and the private Nano adapter currently use `0.1.0`. CI assigns all three public
+packages the shared version calculated by semantic-release before testing and
+publishing. It also aligns their exact CLI dependency pins. The private Nano
+adapter keeps its independent version.
 
 This produces CLI, wallet MCP, and Marketplace MCP tarballs. The Nano adapter
 is a private source workspace bundled inside the Marketplace MCP tarball; it
-does not need a separate npm release or installation. The Marketplace MCP tarball
-is an accepted workspace artifact and is not in the trusted npm publisher.
+does not need a separate npm release or installation. All three public tarballs
+are published in dependency order: CLI, wallet MCP, then Marketplace MCP.
 The root `package-lock.json` records the development dependency tree for
 `npm ci`.
 
 Repository guides follow the source checkout, so they can describe commands and
-tools absent from an older npm release. The release workflow publishes only
-the tested CLI and wallet MCP tarballs; Marketplace MCP remains a source artifact.
+tools absent from an older npm release. The release workflow publishes the exact
+tested CLI, wallet MCP, and Marketplace MCP tarballs and attaches all three to
+the GitHub release. Retries verify the registry integrity of packages already
+published before continuing with missing packages. Registry confirmation makes
+up to 60 checks per package with five seconds between checks, without repeating
+its publish command. HTTP request time counts toward the publish step's
+25-minute deadline.
+
+Each public package needs an npm trusted publisher for GitHub organization
+`attocash`, repository `integrations`, workflow `release.yml`, and environment
+`release`, with direct `npm publish` allowed. The publish job uses GitHub-hosted
+runners and `id-token: write`.
 
 Packaging uses a temporary staging directory and leaves source package files
 unchanged. Use the root script to produce release artifacts; plain `npm pack`

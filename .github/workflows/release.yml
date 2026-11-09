@@ -1,4 +1,4 @@
-name: Release CLI and MCP
+name: Release CLI and MCP packages
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 # Serialize version calculation as well as publication. Cancelling between the
-# two npm publishes would leave an incomplete release.
+# three npm publishes would leave an incomplete release.
 concurrency:
   group: atto-release
   cancel-in-progress: false
@@ -73,13 +73,13 @@ jobs:
           node-version: '24'
       - run: npm ci
         timeout-minutes: 5
-      - name: Prepare CLI and wallet MCP versions; align the private Marketplace MCP dependency pins
+      - name: Prepare the shared CLI, wallet MCP, and Marketplace MCP version
         timeout-minutes: 2
         run: node scripts/release-version.mjs "$RELEASE_VERSION"
       - name: Test the release version
         timeout-minutes: 10
         run: npm test
-      - name: Verify the release tarballs and private Marketplace MCP workspace artifact
+      - name: Verify all three release tarballs
         timeout-minutes: 20
         run: npm run test:package
         env:
@@ -93,8 +93,7 @@ jobs:
         run: |
           mv "./attocash-cli-$RELEASE_VERSION.tgz" artifacts/
           mv "./attocash-mcp-$RELEASE_VERSION.tgz" artifacts/
-          MARKETPLACE_VERSION="$(node -p "require('./atto-marketplace-mcp/package.json').version")"
-          mv "./attocash-marketplace-mcp-$MARKETPLACE_VERSION.tgz" artifacts/
+          mv "./attocash-marketplace-mcp-$RELEASE_VERSION.tgz" artifacts/
       - uses: actions/upload-artifact@v4
         with:
           name: atto-release-packages
@@ -103,7 +102,7 @@ jobs:
           retention-days: 14
 
   publish:
-    timeout-minutes: 15
+    timeout-minutes: 40
     needs: [version, build]
     runs-on: ubuntu-latest
     environment: release
@@ -124,13 +123,13 @@ jobs:
         with:
           name: atto-release-packages
           path: artifacts
-      - name: Publish CLI, then wallet MCP, using npm trusted publishing
-        timeout-minutes: 8
+      - name: Publish CLI, wallet MCP, and Marketplace MCP using npm trusted publishing
+        timeout-minutes: 25
         run: node scripts/publish-release.mjs "$RELEASE_VERSION" artifacts
         env:
           NODE_AUTH_TOKEN: ''
           NPM_TOKEN: ''
-      - name: Prepare the GitHub release after both npm packages are available
+      - name: Prepare the GitHub release after all three npm packages are available
         timeout-minutes: 3
         id: github_release
         uses: actions/github-script@v7
@@ -162,7 +161,7 @@ jobs:
                 const assets = await github.paginate(github.rest.repos.listReleaseAssets, {
                   ...repository, release_id: data.id,
                 });
-                for (const name of ['cli', 'mcp']) {
+                for (const name of ['cli', 'mcp', 'marketplace-mcp']) {
                   const filename = `attocash-${name}-${process.env.RELEASE_VERSION}.tgz`;
                   const bytes = require('node:fs').readFileSync(`artifacts/${filename}`);
                   const digest = `sha256:${require('node:crypto').createHash('sha256').update(bytes).digest('hex')}`;
@@ -176,7 +175,7 @@ jobs:
             } else {
               const { data } = await github.rest.repos.createRelease({
                 ...repository, tag_name: tag, target_commitish: context.sha,
-                name: `Atto CLI and MCP ${process.env.RELEASE_VERSION}`,
+                name: `Atto CLI, wallet MCP, and Marketplace MCP ${process.env.RELEASE_VERSION}`,
                 body: require('node:fs').readFileSync('artifacts/release-notes.md', 'utf8'),
                 draft: true,
               });
@@ -191,6 +190,7 @@ jobs:
           gh release upload "atto-v$RELEASE_VERSION" \
             "artifacts/attocash-cli-$RELEASE_VERSION.tgz" \
             "artifacts/attocash-mcp-$RELEASE_VERSION.tgz" \
+            "artifacts/attocash-marketplace-mcp-$RELEASE_VERSION.tgz" \
             --repo "$GITHUB_REPOSITORY" --clobber
       - name: Make the complete GitHub release public
         timeout-minutes: 3
