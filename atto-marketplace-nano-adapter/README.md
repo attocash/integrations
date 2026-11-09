@@ -1,14 +1,35 @@
 # Atto Marketplace Nano adapter
 
-`@attocash/atto-marketplace-nano-adapter` is the private Node wallet engine used by Marketplace MCP.
-It is bundled inside the Marketplace MCP npm package and is not released or
-installed separately. The source workspace remains separate for development and
-testing. It implements Nano Ed25519-Blake2b, state-block signing, confirmed chain checks,
-controller proofs and durable payment recovery without a Java runtime.
+**The local Nano wallet engine inside Atto Marketplace MCP.**
 
-Requires Node.js **24.15.0 or newer**. Marketplace MCP is currently unreleased;
-use the source checkout and locally staged artifacts described in the
-[repository README](../README.md).
+`@attocash/atto-marketplace-nano-adapter` signs Nano state blocks, verifies
+confirmed chain evidence, and preserves payment attempts for recovery. It runs
+in Node.js without a Java runtime and keeps signing keys local.
+
+This is a **private workspace bundled into
+[`@attocash/marketplace-mcp`](https://www.npmjs.com/package/@attocash/marketplace-mcp)**.
+Install and configure Marketplace MCP to use it. The adapter has no standalone
+executable or separate npm installation.
+
+[Use it](#use-through-marketplace-mcp) · [Keys and storage](#keys-and-storage) ·
+[Recovery](#payment-recovery) · [RPC requirements](#rpc-and-work-providers) ·
+[Development](#develop-and-package)
+
+## Use through Marketplace MCP
+
+Requires **Node.js 24.15.0 or newer** and **Linux or macOS** for private wallet
+storage. In your own interactive terminal:
+
+```sh
+npm install --global @attocash/marketplace-mcp
+atto-marketplace-mcp wallet setup --asset XNO --help
+```
+
+Follow the [Marketplace MCP setup guide](https://github.com/attocash/integrations/blob/main/atto-marketplace-mcp/README.md)
+to select a wallet and connect your client. Configure the Marketplace MCP server
+in your client; the adapter runs inside it.
+
+## Protocol and account binding
 
 Nano x402 v2 uses asset `XNO`, network `nano:mainnet` (or `nano:dev`), and
 `payload.block` containing the native signed state block and its matching
@@ -25,18 +46,21 @@ native Nano block. Local handoff deadlines follow the Marketplace intent expiry.
 Expired or uncertain signed candidates keep their original bytes and journal
 reservation until native evidence resolves them.
 
-Configure only Marketplace MCP in your client. Run `atto-marketplace-mcp wallet setup
---asset XNO --help` in your terminal for setup. Default grants deny spending and
-headless controller proofs. Exact typed Marketplace actions use the same one-off
-terminal consent as Atto; this does not widen headless signing permissions. Marketplace funding and external transfers have separate
-grants and share exact atomic limits and a durable journal. Setup and approval
-are terminal-only. Keys and signed funding payloads remain private.
+## Permissions
+
+Default grants deny spending and headless controller proofs. Exact typed
+Marketplace actions use the same one-off terminal consent as Atto; this does not
+widen headless signing permissions. Marketplace funding and external transfers
+have separate grants and share exact atomic limits and a durable journal. Setup
+and approval are terminal-only. Keys and signed funding payloads remain private.
 
 Identity, balance and receivable reads use the pinned public configuration without
 unlocking signing keys. Signing, provisioning and explicit key inspection still
 verify the original key. Configuration status does not prove RPC or key-store
 availability. Receiving requires an approved funding or external-transfer write
 grant and does not consume the outgoing amount budget.
+
+## Keys and storage
 
 New Marketplace Nano wallets derive from the selected Atto wallet's OS-protected
 24-word BIP39 recovery phrase using Ed25519 SLIP-0010 at `m/44'/165'/index'`.
@@ -61,6 +85,8 @@ seed file) and the entire journal together; restoring an old journal can lose kn
 already issued. Fence writes and reconcile against the native chain before
 resuming after a restore. Never use the same source key with independent journals.
 
+### Configuration and library boundary
+
 The single current `wallet.json` schema has `version: 1`, a chain `rpcUrl`, an
 optional separate `workUrl`, and an explicit
 `keySource`: `shared-recovery` pins its original recovery source and SLIP-0010
@@ -71,8 +97,12 @@ provisioning, policy approval and key callbacks consistently return Promises;
 public metadata loading and signature verification stay synchronous.
 
 The exported adapter API is for trusted local code. No raw signing operation is
-exposed through public MCP tools. See the [Marketplace MCP README](../atto-marketplace-mcp/README.md) for configuration,
-exact request-id retry rules and explicit Atto wallet-profile reuse.
+exposed through public MCP tools. See the
+[Marketplace MCP reference](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md)
+for configuration, exact request-id retry rules, and explicit Atto wallet-profile
+reuse.
+
+## Payment recovery
 
 Recovery keeps each native candidate's signed bytes and original operation
 identity in `nano-wallet.sqlite3`. `payment.status` reconciles an existing handoff
@@ -84,6 +114,8 @@ candidate. Uncertain candidates keep the account lane and outgoing reservation,
 including beyond 24 hours; only confirmed spending ages out of the rolling
 window. Native chain evidence must resolve a signed candidate before a new
 operation can use that lane.
+
+## RPC and work providers
 
 The configured chain RPC must expose pinned `version` evidence, `account_info`,
 `block_info`, `blocks_info` with its `pending` option, `receivable` and `process`.
@@ -116,3 +148,8 @@ checking the workspace types. To create installable artifacts, run `npm run pack
 at the repository root. Its staging script embeds this adapter and its README
 inside the Marketplace MCP artifact and places its external dependencies on the
 containing package. There is no separate Nano adapter tarball or executable.
+
+See the [contributor guide](https://github.com/attocash/integrations/blob/main/docs/contributing.md)
+for workspace builds and packaging. Report issues in
+[attocash/integrations](https://github.com/attocash/integrations/issues).
+Licensed under [BSD-3-Clause](https://github.com/attocash/integrations/blob/main/LICENSE).

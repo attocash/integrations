@@ -39,7 +39,7 @@ releases may expose an earlier set.
 persistent application session. It accepts an optional abort `signal` and
 `globalDirectory` check, returns a structured report, and can take up to 60
 seconds. It does not repair settings or grant access. See the
-[diagnostics guide](../atto-cli/README.md#diagnostics) for checks and report semantics.
+[diagnostics guide](cli-reference.md#diagnostics) for checks and report semantics.
 
 The public session does not expose recovery methods. Wallet creation, import,
 backup, and reset remain terminal commands. The MCP

@@ -1,40 +1,45 @@
-# Atto CLI & MCP
+# Atto integrations
 
-**Your Atto wallet, in the terminal and your AI assistant.**
+**Your wallet in the terminal. Your AI assistant with an allowance.**
 
-**Beta** · [CLI on npm](https://www.npmjs.com/package/@attocash/cli) ·
-[MCP on npm](https://www.npmjs.com/package/@attocash/mcp)
+Send Atto payments by a familiar name, follow wallet activity, and let an AI
+assistant make payments within limits you approve. Connect Marketplace MCP when
+you want your agent to find work, hire workers, or buy and sell through the Shop.
 
-Send payments by a name you recognize, follow your wallet activity, and give
-an MCP client access with spending limits you choose. Both packages are
-available as an initial beta.
+Recovery phrases stay in your OS password store. Wallet setup and access approvals
+happen in your own terminal.
 
-This workspace also contains a separate Marketplace MCP for Marketplace account
-workflows and its embedded Nano wallet adapter. The release workflow publishes
-the CLI, wallet MCP, and Marketplace MCP together; the Nano adapter is embedded
-in the Marketplace package.
+[Get started](#get-started) · [Choose a package](#choose-a-package) ·
+[How access works](#how-access-works) · [Documentation](#documentation)
 
-This guide and the package guides describe the current source checkout. npm
-releases can lag behind it; check your installed command's `--help` or your MCP
-client's tool list for available features. See [release status](#release-status).
+## Choose a package
 
-[Get started](#get-started) · [What you can do](#what-you-can-do) ·
-[CLI guide](atto-cli/README.md) · [MCP guide](atto-mcp/README.md)
+| You want to… | Install | Command | Guide |
+| --- | --- | --- | --- |
+| Use an Atto wallet from your terminal or scripts | [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | `atto` | [CLI README](atto-cli/README.md) |
+| Give an MCP assistant access to an Atto wallet | [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | `atto-mcp` | [Wallet MCP README](atto-mcp/README.md) |
+| Work with Marketplace tasks, hiring, and Shop purchases | [`@attocash/marketplace-mcp`](https://www.npmjs.com/package/@attocash/marketplace-mcp) | `atto-marketplace-mcp` | [Marketplace MCP README](atto-marketplace-mcp/README.md) |
 
-- **Pay by name.** Save a personal label such as “Savings” and use it as a destination.
-- **Follow your wallet.** Check balances, review history, and watch incoming payments.
-- **Choose the agent's access.** Start read-only, then approve bounded spending in your terminal.
-- **Keep your wallet between sessions.** Recovery phrases stay in your OS password store;
-  wallet history and settings stay in your profile directory.
+All three are available on npm as **beta** packages. The MCP packages install
+their wallet engine dependencies automatically. Marketplace MCP includes its
+private Nano adapter; there is no separate adapter to install.
 
 ## Get started
 
-Requires **Node.js 24.15.0 or newer**. CI runs Node.js 24; use the latest 24.x
-release and an available OS password store: Keychain on macOS, Credential Manager
-on Windows, or Secret Service on
-Linux. Linux also needs `secret-tool` and an unlocked desktop keyring.
+Requires **Node.js 24.15.0 or newer**. CI uses Node.js 24. Wallets need an
+available OS password store:
 
-### Use Atto in your terminal
+| Platform | Password store |
+| --- | --- |
+| macOS | Keychain |
+| Windows | Credential Manager |
+| Linux | An unlocked Secret Service provider, `secret-tool`, and access to your desktop D-Bus session |
+
+The CLI and wallet MCP support Linux, macOS, and Windows. Marketplace MCP's
+private wallet storage requires Linux or macOS. See each package guide for its
+requirements and troubleshooting.
+
+### Use your terminal
 
 ```sh
 npm install --global @attocash/cli
@@ -43,28 +48,41 @@ atto address list
 atto balances
 ```
 
-Already have a recovery phrase? Use `atto wallet import` instead of creating a
-wallet. Create or import in your own interactive terminal, and keep a private
-offline copy of your recovery phrase.
+Already have a recovery phrase? Run `atto wallet import` instead. Create or
+import in your own interactive terminal and keep a private offline recovery copy.
+The default network is **LIVE**.
 
-To keep receiving incoming payments:
+To receive incoming payments, leave this command running; stop it with Ctrl+C:
 
 ```sh
 atto wallet receive
 ```
 
-Leave it running while you want to receive; stop it with Ctrl+C.
+With a funded wallet, give a second address a name and send 1 ATTO to it:
+
+```sh
+atto address activate 1
+atto labels set 1 "Savings"
+atto send --to-label "Savings" --amount 1
+```
+
+The CLI displays the full destination and a request ID. Keep the request ID
+when retrying an interrupted payment. Personal names come from your selected
+wallet profile.
+
 [Continue with the CLI guide →](atto-cli/README.md)
 
-### Connect your MCP client
+### Connect your AI assistant
+
+Run setup in your terminal:
 
 ```sh
 npx --yes @attocash/mcp@latest setup
 ```
 
-Choose **Dedicated MCP wallet (default)** and follow the prompts to create or
-import a wallet and select read-only or bounded spending access. Add this
-configuration to your MCP client and reconnect:
+Choose **Dedicated MCP wallet (default)**, create or import a wallet, and select
+read-only or bounded spending access. For that default wallet, add this to a
+client that uses `mcpServers` configuration, such as Claude Desktop:
 
 ```json
 {
@@ -77,108 +95,99 @@ configuration to your MCP client and reconnect:
 }
 ```
 
-The client starts the server automatically. A global installation is optional,
-and the default wallet needs no `--data-dir`. To share a CLI wallet or choose
-another directory, see the [custom wallet example](atto-mcp/README.md#share-a-cli-wallet-or-choose-another-directory).
+Reconnect your client and try:
 
-Then try asking:
+> Show my balances and the last 10 payments.
 
-> Show my balances and recent payments.
+> Label address 0 as Main, then explain my current spending limits.
 
-> Watch my wallet for incoming payments.
+Your client starts the local server. Setup is a one-time terminal step;
+`--yes` accepts npm's download prompt, while wallet and spending approvals
+still require your review. To share a CLI wallet or select another directory,
+use the exact configuration printed by setup.
 
-[Copy an npx client configuration →](atto-mcp/README.md#install-and-connect)
+[Client configuration, tools, and approvals →](atto-mcp/README.md)
 
-## What you can do
-
-| You want to… | Start here |
-| --- | --- |
-| Check your wallet | `atto wallet status` and `atto balances` |
-| Give an address a familiar name | `atto labels set 0 "Main"` |
-| Review recent payments | `atto history --limit 10` |
-| Watch incoming payments | `atto watch receivable` |
-| Export results for a script | `atto --json balances` |
-| Let an agent work with your wallet | [MCP setup and example prompts](atto-mcp/README.md#try-these-prompts) |
-| Understand a connection or keyring problem | `atto doctor` or MCP's `doctor` tool |
-
-Once you have labeled a destination “Savings” and funded your wallet, sending
-1 ATTO looks like this:
+### Put an agent to work on Marketplace
 
 ```sh
-atto send --to-label "Savings" --amount 1
+npm install --global @attocash/marketplace-mcp
+atto-marketplace-mcp setup --interactive --profile agent
 ```
 
-The CLI shows the resolved full address and request ID. Personal names resolve
-only from your selected profile; global directory names are informational.
-[Learn about personal names and retries](atto-cli/README.md#address-labels-and-personal-name-payments).
+Have your Marketplace origin and Agent API audience ready; obtain them from
+the Marketplace operator. Setup selects local wallets, connects your controller,
+and prints the configuration for your MCP client. Copy it, reconnect, then try:
 
-## Your wallet, your approvals
+> Show open Marketplace tasks that match my skills.
 
-MCP starts read-only. It can inspect data, manage personal labels, and watch
-events. Sending and receiving require spending access that you approve in a
-local terminal. You choose the payment account pool, per-payment cap, and
-rolling allowance. An agent can propose changes; you review and approve them.
+> Show my Shop purchases and which downloads are available.
 
-Choose a dedicated MCP wallet, or share an existing CLI wallet during setup.
-Sharing the same absolute `--data-dir` shares funds, history, request IDs, and
-spending limits. Reinstalling a package does not select a different wallet.
-Recovery phrases are never passed through MCP tools. These permissions govern
-MCP tools; other programs running as your OS user retain their normal access.
+Marketplace tools cover buyer, worker, and seller workflows. Publishing,
+funding, and other protected actions follow their respective permissions and
+approvals. Human users can also use the Marketplace browser workspace.
 
-[Spending approvals](atto-mcp/README.md#approve-access-and-limit-changes) ·
-[Profiles and recovery](atto-cli/README.md#profiles-and-recovery)
+[Marketplace setup and workflows →](atto-marketplace-mcp/README.md)
 
-## Find your way around
+## How access works
+
+Wallet MCP starts **read-only**. It can inspect balances and history, manage
+personal labels, watch events, and propose access changes. Sending and receiving
+require spending access approved in a local terminal.
+
+You choose the payment account pool, per-payment cap, and rolling allowance.
+An agent can propose a change; the proposal takes effect only after your
+terminal approval. Recovery phrases are entered or displayed only through
+terminal wallet commands.
+
+A dedicated MCP wallet keeps a separate wallet profile. Pointing the CLI and
+wallet MCP at the same absolute `--data-dir` shares funds, payment history,
+request IDs, and spending limits. Package installation and npm's cache do not
+define wallet identity.
+
+Marketplace MCP has its own selected account profile and wallet permissions.
+Marketplace controller proofs and wallet spending grants authorize different
+actions; its [approval guide](atto-marketplace-mcp/README.md#permissions-and-approvals)
+explains both. These controls govern the tools; software running as your OS
+user retains its normal local access.
+
+## Documentation
+
+| Need | Read |
+| --- | --- |
+| Payments, labels, receiving, and scripts | [CLI guide](atto-cli/README.md) |
+| Assistant setup, wallet access, and tools | [Wallet MCP guide](atto-mcp/README.md) |
+| Tasks, applications, submissions, Shop, and funding | [Marketplace MCP guide](atto-marketplace-mcp/README.md) |
+| Embed the wallet engine in a Node.js application | [Public library API](docs/library-api.md) |
+| Understand the bundled Nano wallet engine | [Nano adapter guide](atto-marketplace-nano-adapter/README.md) |
+| Build, test, or install local artifacts | [Contributor guide](docs/contributing.md) |
+
+The [n8n integration](https://github.com/attocash/integrations-n8n) lives in its
+own repository. Protocol signing and publication use
+[Atto Commons](https://github.com/attocash/commons).
 
 ### Release status
 
-| Package | Availability | Command or interface | Guide |
-| --- | --- | --- | --- |
-| [`@attocash/cli`](https://www.npmjs.com/package/@attocash/cli) | Published beta | `atto`; `@attocash/cli/core` library | [Wallet setup, payments, labels, and recovery](atto-cli/README.md) |
-| [`@attocash/mcp`](https://www.npmjs.com/package/@attocash/mcp) | Published beta | `atto-mcp` | [Client setup, prompts, and 40 public tools in this checkout](atto-mcp/README.md) |
-| [`@attocash/marketplace-mcp`](https://www.npmjs.com/package/@attocash/marketplace-mcp) | Included in the shared release workflow | `atto-marketplace-mcp` | [Marketplace workflows and local setup](atto-marketplace-mcp/README.md) |
-| `@attocash/atto-marketplace-nano-adapter` | Private workspace, embedded in Marketplace MCP | Library; no standalone executable | [Nano wallet adapter and recovery](atto-marketplace-nano-adapter/README.md) |
+The shared release workflow publishes the CLI, wallet MCP, and Marketplace MCP
+to npm and attaches the tested tarballs to
+[GitHub releases](https://github.com/attocash/integrations/releases). The Nano
+adapter remains a private workspace bundled into Marketplace MCP.
 
-As checked on **2026-11-09**, npm's `latest` tag is **0.3.0** for both the CLI
-and wallet MCP. Marketplace MCP has a temporary `0.0.0-stage` registry
-placeholder; its first functional release will use the shared workflow above.
-Check the linked npm pages for subsequent releases.
+Use the linked npm package pages for current versions. Repository documentation
+can describe features added after an older installed release; `atto --help`,
+`atto-mcp --help`, and your MCP client's tool list show what you have installed.
 
-The wallet MCP includes bounded Marketplace account top-ups after terminal
-configuration. Task, hiring, and Shop workflows belong to the separate
-Marketplace MCP. [Wallet MCP top-up setup](atto-mcp/README.md#marketplace-account-top-ups).
+To update a global installation, rerun its `npm install --global` command.
+The npx examples use `@latest` to select the current published release.
 
-Use `atto --help` or `atto-mcp --help` to explore commands. For updates, rerun
-the npm installation command; npx with `@latest` selects the current published
-release. [Update details](atto-cli/README.md#update-notices).
+## Help and contributions
 
-Found a problem while trying the beta? [Open an issue](https://github.com/attocash/integrations/issues)
-with your OS, Node.js version, and the command or tool that failed. Keep recovery
-phrases and credentials out of reports.
+Start with `atto doctor` or wallet MCP's `doctor` tool for wallet environment
+and connectivity checks. For a bug or feature request,
+[open an issue](https://github.com/attocash/integrations/issues) with your OS,
+Node.js and package versions, and the failing command or tool. Remove recovery
+phrases, credentials, and private wallet data from reports.
 
-The [n8n integration](https://github.com/attocash/integrations-n8n) has its own
-repository. Protocol signing and publication use [Atto Commons](https://github.com/attocash/commons).
+Contributions are welcome. See [build and test instructions](docs/contributing.md).
 
-## Install from source
-
-Clone the repository, build the local artifacts, and install the CLI and wallet
-MCP together:
-
-```sh
-git clone https://github.com/attocash/integrations.git
-cd integrations
-npm ci
-npm run pack
-npm install --global ./attocash-cli-0.0.0.tgz ./attocash-mcp-0.0.0.tgz
-atto wallet create
-```
-
-To use only the terminal wallet, install just `attocash-cli-0.0.0.tgz`. Install
-both artifacts in the same npm command when testing MCP from this checkout so
-its exact CLI dependency resolves to the local artifact.
-
-`npm run pack` also produces the Marketplace MCP artifact, with its Nano adapter
-embedded. See its [source installation guide](atto-marketplace-mcp/README.md)
-to install it with the matching CLI artifact.
-
-For development and testing, see the [contributor guide](docs/contributing.md).
+Licensed under [BSD-3-Clause](LICENSE).
