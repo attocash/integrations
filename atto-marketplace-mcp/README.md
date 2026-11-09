@@ -36,9 +36,6 @@ product descriptions, and participant messages are untrusted content.
   `libsecret-tools`), an unlocked Secret Service provider such as GNOME Keyring or
   KWallet, and access to your desktop D-Bus session. macOS uses Keychain. There is
   no plaintext recovery-phrase fallback.
-- **Your Marketplace operator's exact HTTPS origin and Agent API audience.**
-  Setup asks for both; the package has no default Marketplace deployment.
-  HTTP is allowed only for loopback development origins.
 - **A local interactive terminal** for wallet setup and typed approvals, and an
   MCP client that can access the same private directories and password store.
 
@@ -59,7 +56,7 @@ You can also run the published package without a global installation:
 
 ```sh
 npx --yes @attocash/marketplace-mcp@latest --help
-npx --yes @attocash/marketplace-mcp@latest setup --interactive --profile agent
+npx --yes @attocash/marketplace-mcp@latest setup
 ```
 
 Use a reviewed release version in place of `@latest` if you need a fixed version.
@@ -71,20 +68,18 @@ configuration printed by setup.
 Run guided setup in your own terminal:
 
 ```sh
-atto-marketplace-mcp setup --interactive --profile agent
+atto-marketplace-mcp setup
 ```
 
-For the minimal client example below, accept the default private configuration
-home, `~/.config/atto/marketplace-mcp`, and keep the profile name `agent`.
-Setup walks through:
+Setup uses the production connection at `https://api.atto.market` and the
+standard private configuration directory automatically. It walks through:
 
-1. The exact Marketplace origin and Agent API audience from your operator.
-2. An existing or dedicated Atto wallet and, optionally, a Nano wallet. A
+1. An existing or dedicated Atto wallet and, optionally, a Nano wallet. A
    Nano-only connection is supported. Review the selected native network,
    endpoints, account, permissions, and spending ceilings locally.
-3. The Atto or Nano controller used to log in. Review and approve its exact
+2. The Atto or Nano controller used to log in. Review and approve its exact
    login challenge in the terminal.
-4. Saving the private profile and printing the client configuration when
+3. Saving the connection and printing the client configuration when
    setup reports `status: "ready"`.
 
 New wallet selections deny Marketplace funding and external transfers by
@@ -97,27 +92,24 @@ It uses absolute Node and installed entrypoint paths and includes selected walle
 paths, so a desktop client's `PATH` does not need to match your terminal.
 
 For a global install on the client's `PATH`, this is the minimal equivalent
-when you kept the default home and saved wallet selections:
+when you used the default setup and saved wallet selections, with no
+configuration overrides in the client environment:
 
 ```json
 {
   "mcpServers": {
     "marketplace": {
       "command": "atto-marketplace-mcp",
-      "args": [],
-      "env": {
-        "MARKETPLACE_MCP_PROFILE": "agent"
-      }
+      "args": []
     }
   }
 }
 ```
 
-There is **no default profile** at server startup. If you chose another home,
-set `MARKETPLACE_MCP_HOME` to its absolute path or keep setup's printed `--home`
-and `--profile` arguments. Client configuration formats vary; `mcpServers` is
-the common stdio layout, and your client must support local process launching.
-Restart or reconnect the client after saving it.
+Client configuration formats vary; `mcpServers` is the common stdio layout,
+and your client must support local process launching. Keep setup's printed
+configuration if you used custom settings. Restart or reconnect the client after
+saving it.
 
 Start with a read: “Show my Marketplace balances and native wallet status.
 Do not make a payment.” Expect `marketplace_balances_get` and `wallet_status`;
@@ -125,8 +117,9 @@ these report separate balances and permissions.
 
 ### Advanced explicit setup
 
-For scoped API keys, separate controller wallets, native endpoint overrides, or
-noninteractive provisioning, use the
+For custom or local Marketplace connections, separate saved accounts, scoped
+API keys, controller wallets, native endpoint overrides, or noninteractive
+provisioning, use the
 [configuration reference](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md#advanced-explicit-setup)
 and `atto-marketplace-mcp --help`. Explicit setup still requires local typed
 approval; it does not move approval into the MCP client.
@@ -267,13 +260,14 @@ controller session automatically.
 | Lost response during a payment or mutation | Retry the original request ID and unchanged terms. For funding, read `marketplace_funding_status` first. Never create a replacement while the outcome is unknown. |
 
 ```sh
-atto-marketplace-mcp setup --profile agent --reauthenticate
+atto-marketplace-mcp setup --profile main --reauthenticate
 ```
 
-Include the original `--home /absolute/private/home` if you chose a custom home.
-This prepares a fresh typed login approval; follow the returned terminal command
-and finish with `setup --profile agent --complete` using that same home. Scoped
-API-key profiles use their separate credential replacement workflow.
+Include your original `--home` and `--profile` options if you used custom
+settings. This prepares a fresh typed login approval; follow the returned
+terminal command and finish with `setup --profile main --complete`, replacing
+`main` with your original profile and keeping the same home.
+Scoped API-key profiles use their separate credential replacement workflow.
 [Credential and recovery details](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md#credentials-and-local-recovery).
 
 ## Contract history

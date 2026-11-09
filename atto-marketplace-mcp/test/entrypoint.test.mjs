@@ -9,12 +9,15 @@ import test from 'node:test';
 
 const execute = promisify(execFile);
 test('npm-style executable symlink runs the CLI instead of exiting silently', { skip: process.platform === 'win32' }, async () => {
+  // Given an installed executable symlink.
   const directory = await mkdtemp(join(tmpdir(), 'atto-marketplace-mcp-bin-'));
   try {
     const bin = join(directory, 'atto-marketplace-mcp');
     await symlink(fileURLToPath(new URL('../dist/main.js', import.meta.url)), bin);
+    // When help and bare setup run through the installed entrypoint.
     const result = await execute(process.execPath, [bin, '--help'], { timeout: 10_000 });
-    assert.match(result.stdout, /Usage: atto-marketplace-mcp --profile/);
+    // Then help describes optional profiles and setup requires a local terminal.
+    assert.match(result.stdout, /Usage: atto-marketplace-mcp \[--profile/);
     await assert.rejects(execute(process.execPath, [bin, 'setup'], { timeout: 10_000 }), error => {
       assert.equal(error.code, 1);
       assert.match(error.stderr, /requires an interactive local terminal/);

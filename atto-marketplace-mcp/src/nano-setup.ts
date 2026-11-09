@@ -12,6 +12,7 @@ import {
   type NanoWalletConfiguration,
 } from '@attocash/atto-marketplace-nano-adapter';
 import { ProfileError } from './profile-store.js';
+import { marketplaceConnection } from './defaults.js';
 import { readWalletSelection, saveWalletSelection } from './wallet-preferences.js';
 
 export interface NanoInteractiveSetupOptions {
@@ -39,6 +40,7 @@ export function defaultNanoRpcUrl(network: NanoNetwork): string {
 /** Terminal-only setup; every prompt and public review precedes wallet mutation. */
 export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOptions): Promise<NanoInteractiveSetupResult> {
   requireTerminal();
+  if (options.origin !== undefined || options.audience !== undefined) marketplaceConnection(options);
   const home = privatePath(options.home);
   const defaultDirectory = privatePath(options.env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR ?? join(home, 'wallets', 'nano'));
   const mode = await choice(options, 'Nano wallet: derive from your recovery phrase, reuse an adapter profile, or import a private seed file (create/reuse/import)', ['create', 'reuse', 'import'], hasProfile(defaultDirectory) ? 'reuse' : 'create');
@@ -50,8 +52,7 @@ export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOp
   const rpcUrl = validateNanoRpcUrl(await answer(options, 'Nano RPC URL', defaultNanoRpcUrl(network)));
   const selectedWorkUrl = await answer(options, 'Nano work URL (optional; Enter uses the Nano RPC)', '');
   const workUrl = selectedWorkUrl ? validateNanoRpcUrl(selectedWorkUrl) : undefined;
-  const origin = marketplaceOrigin(options.origin ?? await answer(options, 'Marketplace origin (for example https://marketplace.example)'));
-  const audience = audienceText(options.audience ?? await answer(options, 'Exact Marketplace Agent API audience'));
+  const { origin, audience } = marketplaceConnection(options);
   const index = derivationIndex(await answer(options, 'Nano derivation index', mode === 'create' ? '0' : '1'));
   const handoffDirectory = privatePath(options.env.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR ?? join(home, 'payment-handoffs'));
   let seedFile: string | undefined;

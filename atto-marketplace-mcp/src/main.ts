@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { isAbsolute, join, resolve } from 'node:path';
+import { isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { createMarketplaceMcpServer } from './server.js';
 import { MarketplaceProfileStore } from './profile-store.js';
 import { runSetup } from './setup.js';
 import { runWalletSetup } from './wallet-setup.js';
+import { defaultMarketplaceHome, defaultMarketplaceProfile } from './defaults.js';
 
 export async function run(argv = process.argv.slice(2), env = process.env): Promise<void> {
   if (argv.length===1 && argv[0]==='--internal-wallet-host') {
@@ -15,7 +15,7 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
     await runWalletHost(env);
     return;
   }
-  if(argv[0]==='setup'&&(argv.length===1||argv.includes('--interactive'))) {
+  if(argv[0]==='setup'&&(argv.includes('--interactive')||argv.slice(1).every(arg=>!arg.startsWith('--')||['--home','--profile','--origin','--audience'].includes(arg)))) {
     const {runGuidedSetup}=await import('./guided-setup.js');
     await runGuidedSetup(argv.slice(1),env);return;
   }
@@ -33,12 +33,11 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
   }
   const options = parseArgs(argv, env);
   if (options.help) {
-    process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup\nChoose an existing Atto CLI wallet or a dedicated wallet and optionally configure Nano.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp --profile <profile-id> [--home <private-directory>] [--payment-handoff-dir <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --apply-atto-limit/--apply-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits apply only to new reservation holds; products:publish without them can manage existing holds.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
+    process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup [--home <directory>] [--profile <name>] [--origin <origin> --audience <audience>]\nDefaults: production Marketplace, main profile, ~/.config/atto/marketplace-mcp.\nChoose an existing Atto CLI wallet or a dedicated wallet and optionally configure Nano.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp [--profile <profile-id>] [--home <private-directory>] [--payment-handoff-dir <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --apply-atto-limit/--apply-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits apply only to new reservation holds; products:publish without them can manage existing holds.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
     return;
   }
-  const home = options.home ?? env.MARKETPLACE_MCP_HOME ?? join(homedir(), '.config', 'atto', 'marketplace-mcp');
-  const profileId = options.profile ?? env.MARKETPLACE_MCP_PROFILE;
-  if (!profileId) throw new Error('Choose a configured private profile with --profile or MARKETPLACE_MCP_PROFILE.');
+  const home = options.home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome();
+  const profileId = options.profile ?? env.MARKETPLACE_MCP_PROFILE ?? defaultMarketplaceProfile;
   const profiles = await MarketplaceProfileStore.open(resolve(home));
   let server: ReturnType<typeof createMarketplaceMcpServer> | undefined;
   let closing: Promise<void> | undefined;
@@ -87,7 +86,6 @@ function parseArgs(argv: string[], env: NodeJS.ProcessEnv): { profile?: string; 
   if (result.filesDirectory && (!isAbsolute(result.filesDirectory) || result.filesDirectory.includes('\0') || result.filesDirectory.length > 4096)) {
     throw new Error('Private files directory must be an absolute path of at most 4096 characters.');
   }
-  if (!result.profile && !env.MARKETPLACE_MCP_PROFILE && !result.help) throw new Error('Choose a configured private profile with --profile or MARKETPLACE_MCP_PROFILE.');
   return result;
 }
 

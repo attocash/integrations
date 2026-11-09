@@ -1,5 +1,3 @@
-import {homedir} from 'node:os';
-import {join} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {inspectNanoWallet} from '@attocash/atto-marketplace-nano-adapter';
 import {MarketplaceProfileStore,ProfileError} from './profile-store.js';
@@ -9,16 +7,17 @@ import {managedWalletEnvironment} from './wallet-home.js';
 import {setupAttoWalletInteractive,type AttoSetupResult} from './atto-setup.js';
 import {setupNanoWalletInteractive} from './nano-setup.js';
 import {runSetup} from './setup.js';
+import {defaultMarketplaceHome,defaultMarketplaceProfile,marketplaceConnection} from './defaults.js';
 import {approveMarketplaceController} from './approval-terminal.js';
 import {approvalRequestPath} from './approval-files.js';
-import {absoluteDirectory,requiredText,requireSetupTerminal,terminalPrompt,yesNo,type Prompt} from './terminal-input.js';
+import {absoluteDirectory,requireSetupTerminal,terminalPrompt,yesNo,type Prompt} from './terminal-input.js';
 
 interface GuidedOptions {home?:string;profile?:string;origin?:string;audience?:string}
 function optionsFromArgs(argv:string[]):GuidedOptions {
   const result:GuidedOptions={};
   for(let i=0;i<argv.length;i++){
     const name=argv[i]!;if(name==='--interactive')continue;
-    if(!['--home','--profile','--origin','--audience'].includes(name)||!argv[i+1]||argv[i+1]!.startsWith('--'))throw new ProfileError('SETUP_USAGE','Use setup --interactive [--home <directory>] [--profile <name>] [--origin <origin>] [--audience <audience>].');
+    if(!['--home','--profile','--origin','--audience'].includes(name)||!argv[i+1]||argv[i+1]!.startsWith('--'))throw new ProfileError('SETUP_USAGE','Use setup [--interactive] [--home <directory>] [--profile <name>] [--origin <origin>] [--audience <audience>].');
     const key=name.slice(2) as keyof GuidedOptions;if(result[key]!==undefined)throw new ProfileError('SETUP_USAGE','Setup options must not be repeated.');result[key]=argv[++i]!;
   }
   return result;
@@ -47,16 +46,23 @@ export async function runGuidedSetup(argv:string[],env:NodeJS.ProcessEnv,prompt:
   requireSetupTerminal();
   const options=optionsFromArgs(argv);
   process.stderr.write('Atto Marketplace setup. Wallet keys stay local; Marketplace account and session configuration has its own directory.\n');
-  const defaultHome=options.home??env.MARKETPLACE_MCP_HOME??join(homedir(),'.config','atto','marketplace-mcp');
-  const home=absoluteDirectory(await requiredText(prompt,'Marketplace configuration directory',defaultHome));
-  const profile=await requiredText(prompt,'Marketplace profile name',options.profile??'main');
+  const home=absoluteDirectory(options.home??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome());
+  const profile=options.profile??env.MARKETPLACE_MCP_PROFILE??defaultMarketplaceProfile;
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(profile))throw new ProfileError('SETUP_USAGE','Choose a profile name of 1–48 letters, digits, underscores or hyphens.');
   // Read selected paths before opening any replacement wallet. Missing saved paths fail closed.
   managedWalletEnvironment(home,env);
   let effectiveEnv={...env};
   const store=await MarketplaceProfileStore.open(home);
   let existing=false,pending=false,reauthenticate=false;
-  try{existing=store.listProfileIds().includes(profile);pending=Boolean(store.getSetupState(profile));reauthenticate=existing&&store.needsReauthentication(profile);}finally{store.close();}
+  try{
+    existing=store.listProfileIds().includes(profile);
+    const savedSetup=store.getSetupState(profile);pending=Boolean(savedSetup);
+    const saved=existing?store.getProfile(profile):savedSetup?JSON.parse(savedSetup.privatePayload) as {origin:string;audience:string}:undefined;
+    if(saved&&((options.origin!==undefined&&options.origin!==saved.origin)||(options.audience!==undefined&&options.audience!==saved.audience))) {
+      throw new ProfileError('PROFILE_CONFLICT','This profile is pinned to its saved Marketplace origin and audience. Use its original connection settings or choose a new profile.');
+    }
+    reauthenticate=existing&&store.needsReauthentication(profile);
+  }finally{store.close();}
   if(existing&&reauthenticate){
     if(!await yesNo(prompt,'Reconnect this profile using its original account and controller?',true))throw new ProfileError('CANCELLED','The original profile and payment journals were preserved.');
     await connectWithTerminalApproval(['--profile',profile,'--home',home,'--reauthenticate'],{...env,...managedWalletEnvironment(home,{})},home,profile,prompt);
@@ -78,11 +84,8 @@ export async function runGuidedSetup(argv:string[],env:NodeJS.ProcessEnv,prompt:
     try{if(resumed.listProfileIds().includes(profile))process.stdout.write(`${JSON.stringify({status:'ready',home,profileId:profile,...publicHostConfiguration(home,profile)})}\n`);}finally{resumed.close();}
     return;
   }
-  const origin=await requiredText(prompt,'Marketplace origin',options.origin);
-  const originUrl=new URL(origin);
-  if(originUrl.origin!==origin||!['https:','http:'].includes(originUrl.protocol)||(originUrl.protocol==='http:'&&!['localhost','127.0.0.1','[::1]'].includes(originUrl.hostname)))throw new ProfileError('SETUP_USAGE','Use the exact HTTPS Marketplace origin or HTTP loopback development origin.');
-  const audience=await requiredText(prompt,'Agent API audience',options.audience);
-  if(audience.length>255||/[\r\n\0]/.test(audience)||audience.trim()!==audience)throw new ProfileError('SETUP_USAGE','Supply the exact Agent API audience.');
+  const {origin,audience}=marketplaceConnection(options);
+  process.stderr.write(`Marketplace: ${origin}\nProfile: ${profile}\nConfiguration: ${home}\n`);
   let atto:AttoSetupResult|undefined;
   let nano:Awaited<ReturnType<typeof setupNanoWalletInteractive>>|undefined;
   if(await yesNo(prompt,'Configure an Atto wallet?',true)){
@@ -144,13 +147,15 @@ async function setupApproval(home:string,profile:string):Promise<string|undefine
   }finally{store.close();}
 }
 
-/** Standalone wallet setup uses the same directory chooser and persists its result. */
+/** Standalone wallet setup persists the approved wallet selection. */
 export async function runWalletWizard(argv:string[],env:NodeJS.ProcessEnv,prompt:Prompt=terminalPrompt):Promise<void> {
   requireSetupTerminal();
   const args=argv.filter(value=>value!=='--interactive');
   const values=new Map<string,string>();
   for(let i=0;i<args.length;i+=2){const name=args[i],value=args[i+1];if(!name||!['--home','--asset','--origin','--audience'].includes(name)||!value||value.startsWith('--')||values.has(name))throw new ProfileError('SETUP_USAGE','Use wallet setup [--interactive] [--home <directory>] [--asset ATTO|XNO] [--origin <origin>] [--audience <audience>].');values.set(name,value);}
-  const home=absoluteDirectory(await requiredText(prompt,'Marketplace configuration directory',values.get('--home')??env.MARKETPLACE_MCP_HOME??join(homedir(),'.config','atto','marketplace-mcp')));
+  const home=absoluteDirectory(values.get('--home')??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome());
+  // Reject incomplete custom bindings before asking for or changing any wallet.
+  if(values.has('--origin')||values.has('--audience'))marketplaceConnection({...(values.has('--origin')?{origin:values.get('--origin')!}:{}),...(values.has('--audience')?{audience:values.get('--audience')!}:{})});
   const asset=values.get('--asset')??((await prompt('Wallet asset: [1] Atto (default), [2] Nano: ')||'1')==='2'?'XNO':'ATTO');
   if(asset==='XNO'){
     const wallet=await setupNanoWalletInteractive({home,env:managedWalletEnvironment(home,env),prompt,

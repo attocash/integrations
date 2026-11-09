@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {spawn} from 'node:child_process';
+import {execFile, spawn} from 'node:child_process';
 import {randomBytes, createHash} from 'node:crypto';
 import {createServer} from 'node:http';
 import {mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile} from 'node:fs/promises';
@@ -7,7 +7,7 @@ import {createRequire, findPackageJSON} from 'node:module';
 import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import {fileURLToPath, pathToFileURL} from 'node:url';
-import {stripVTControlCharacters} from 'node:util';
+import {promisify, stripVTControlCharacters} from 'node:util';
 import test from 'node:test';
 
 const packageDirectory = process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR ?? join(import.meta.dirname, '..');
@@ -81,6 +81,8 @@ function terminalRun(env, args, steps, timeoutMs = 15_000) {
     "Object.defineProperty(process.stderr,'isTTY',{configurable:true,value:true});",
     "process.stdin.on('resume',()=>process.stdin.ref?.()); process.stdin.on('pause',()=>process.stdin.unref?.());",
     "process.stdin.setRawMode=value=>{process.stdin.isRaw=value;return process.stdin;};",
+    // Redirect only the pinned production transport to the isolated HTTP fixture.
+    "if(process.env.ATTO_TEST_PRODUCTION_TRANSPORT){const original=globalThis.fetch;globalThis.fetch=async(input,options)=>{const url=new URL(input);if(url.origin!=='https://api.atto.market')throw new Error('Unexpected production origin');const response=await original(process.env.ATTO_TEST_PRODUCTION_TRANSPORT+url.pathname,options);Object.defineProperty(response,'url',{value:url.href});return response;};}",
     'const {run}=await import(process.env.ATTO_TEST_MAIN);',
     "try {await run(JSON.parse(process.env.ATTO_TEST_ARGS),process.env);} catch(error) {process.stdout.write(JSON.stringify({testError:error.code??'UNEXPECTED'})+'\\n');}",
   ].join('\n');
@@ -121,12 +123,12 @@ async function listen(t, handler) {
 }
 async function body(request) {let text = ''; for await (const chunk of request) text += chunk; return text ? JSON.parse(text) : null;}
 function json(response, status, value) {response.writeHead(status, {'content-type': 'application/json'}); response.end(JSON.stringify(value));}
-function challenge(address) {
+function challenge(address, audience = 'marketplace') {
   const challengeId = '44444444-4444-4444-8444-444444444444';
   const issuedAt = new Date(Date.now() - 1000).toISOString(), expiresAt = new Date(Date.now() + 120_000).toISOString();
   const binding = createHash('sha256').update(['signer-controller-enrollment-v1', accountId, identityId].join('\n')).digest('hex');
   return {challengeId, issuedAt, expiresAt, accountId, controllerId: identityId,
-    message: ['Marketplace Agent Controller Proof v1', 'Audience: marketplace', 'Network: live', `Address: ${address}`, 'Purpose: login',
+    message: ['Marketplace Agent Controller Proof v1', `Audience: ${audience}`, 'Network: live', `Address: ${address}`, 'Purpose: login',
       `Request ID: ${challengeId}`, `Binding Hash: ${binding}`, `Nonce: ${'a'.repeat(64)}`, `Issued At: ${issuedAt}`, `Expiration Time: ${expiresAt}`].join('\n')};
 }
 
@@ -155,12 +157,17 @@ async function nanoWallet(f, name, origin = 'http://localhost:8080') {
   return {...wallet, directory, handoffDirectory};
 }
 
-test('bare guided setup reuses the default CLI wallet, verifies a real private-host login proof, and survives MCP restart', {skip: process.platform !== 'linux'}, async t => {
+for (const production of [true, false]) {
+test(`${production ? 'bare production' : 'custom override'} guided setup verifies a real private-host login proof and survives MCP restart`, {skip: process.platform !== 'linux'}, async t => {
+  // Given an existing CLI wallet and an isolated transport serving the production binding.
   const f = await fixture(t), before = await existingAtto(f), requests = [];
+  if (production) f.home = join(f.env.ATTO_TEST_HOME, '.config', 'atto', 'marketplace-mcp');
+  const profileId = production ? 'main' : 'agent';
+  const audience = production ? 'urn:marketplace:agent-api:live' : 'marketplace';
   let issued, verified = false;
   const http = await listen(t, async (request, response) => {
     const value = await body(request); requests.push({path: request.url, body: value});
-    if (request.url === '/v1/agent/auth/challenges') {issued = challenge(value.address); return json(response, 200, issued);}
+    if (request.url === '/v1/agent/auth/challenges') {issued = challenge(value.address, audience); return json(response, 200, issued);}
     if (request.url === '/v1/agent/auth/sessions') {
       verified = value.message === issued.message && await validAttoProof(before.identity.address, value.message, value.signature);
       if (!verified) return json(response, 403, {error: 'invalid-proof'});
@@ -170,18 +177,21 @@ test('bare guided setup reuses the default CLI wallet, verifies a real private-h
     }
     return json(response, 404, {});
   });
-  const steps = [step('Marketplace configuration directory', f.home), step('Marketplace profile name', 'agent'),
-    step('Marketplace origin', http.origin), step('Agent API audience', 'marketplace'), step('Configure an Atto wallet?'),
+  const steps = [step('Configure an Atto wallet?'),
     step('Atto wallet:', '2'), step('Existing Atto CLI wallet directory'), step('Atto controller account index'),
     step('Type REUSE', 'REUSE'), ...reuseApproval(), ...marketplaceApproval(), step('Configure a Nano wallet?', 'no'), step('Connect this profile to Marketplace now?'),step('Type APPROVE to confirm:','APPROVE')];
-  const result = await terminalRun(f.env, ['setup'], steps);
+  // When bare setup accepts wallet choices and typed login approval with no environment questions.
+  const result = await terminalRun({...f.env, ...(production ? {ATTO_TEST_PRODUCTION_TRANSPORT: http.origin} : {})},
+    production ? ['setup'] : ['setup', '--home', f.home, '--profile', profileId, '--origin', http.origin, '--audience', audience], steps);
+  // Then the default private profile binds production and survives a runtime start without --profile.
+  assert.doesNotMatch(result.stderr, /Marketplace configuration directory|Marketplace profile name|Marketplace origin \[|Agent API audience/);
   assert.equal(result.code, 0); assert.equal(result.index, steps.length); assert.equal(result.output.some(value => value.testError), false, result.stderr);
   assert.equal(verified, true); assert.deepEqual(requests.map(value => value.path), ['/v1/agent/auth/challenges', '/v1/agent/auth/sessions']);
   assertPrivateOutput(result.stdout + result.stderr);
   const ready = result.output.find(value => value.mcpServers);
   assert.equal(ready.status, 'ready');
   const host = ready.mcpServers['atto-marketplace'];
-  assert.equal(host.command, process.execPath); assert.deepEqual(host.args, [join(packageDirectory, 'dist/main.js'), '--home', f.home, '--profile', 'agent']);
+  assert.equal(host.command, process.execPath); assert.deepEqual(host.args, [join(packageDirectory, 'dist/main.js'), '--home', f.home, '--profile', profileId]);
   assert.equal(host.env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, f.wallet);
   assert.ok(Object.keys(host.env).every(name => name.startsWith('MARKETPLACE_MCP_') && (name === 'MARKETPLACE_MCP_HOME' || name.endsWith('_DATA_DIR') || name.endsWith('_HANDOFF_DIR'))));
   const after = await attoSnapshot(f);
@@ -194,7 +204,9 @@ test('bare guided setup reuses the default CLI wallet, verifies a real private-h
   const lookups = (await readFile(f.keyLog, 'utf8')).trim().split('\n');
   assert.ok(lookups.length >= 1);
   assert.ok(lookups.every(value => value === `lookup service Atto CLI account ${createHash('sha256').update(f.wallet).digest('hex')} key_type mnemonic`));
-  const transport = new StdioClientTransport({command: host.command, args: host.args, env: {...f.env, ...host.env}, stderr: 'pipe'});
+  const profiles = await MarketplaceProfileStore.open(f.home);
+  try {assert.equal(profiles.getProfile(profileId).origin, production ? 'https://api.atto.market' : http.origin); assert.equal(profiles.getProfile(profileId).audience, audience);} finally {profiles.close();}
+  const transport = new StdioClientTransport({command: host.command, args: host.args.slice(0, -2), env: {...f.env, ...host.env, ...(production ? {} : {MARKETPLACE_MCP_PROFILE: profileId})}, stderr: 'pipe'});
   const client = new Client({name: 'guided-restart-test', version: '1.0.0'});
   try {
     await client.connect(transport);
@@ -207,14 +219,18 @@ test('bare guided setup reuses the default CLI wallet, verifies a real private-h
   assert.deepEqual(await attoSnapshot(f), after);
 });
 
+}
+
 test('interactive setup cancellation preserves shared ATTO authority and its existing wallet pointer', {skip: process.platform !== 'linux'}, async t => {
+  // Given the existing wallet and its saved authority.
   const f = await fixture(t), before = await existingAtto(f);
   await mkdir(f.home, {mode: 0o700}); await saveWalletSelection(f.home, {attoDirectory: f.wallet});
   const selection = readWalletSelection(f.home);
-  const steps = [step('Marketplace configuration directory'), step('Marketplace profile name', 'cancelled'),
-    step('Marketplace origin', 'http://localhost:8080'), step('Agent API audience', 'marketplace'), step('Configure an Atto wallet?'),
+  const steps = [step('Configure an Atto wallet?'),
     step('Atto wallet:'), step('Atto controller account index', '3'), step('Type REUSE', 'REUSE'), ...reuseApproval('no')];
-  const result = await terminalRun(f.env, ['setup', '--interactive', '--home', f.home], steps);
+  // When the person follows the revised wallet prompts.
+  const result = await terminalRun(f.env, ['setup', '--home', f.home, '--profile', 'cancelled', '--origin', 'http://localhost:8080', '--audience', 'marketplace'], steps);
+  // Then the selected wallet binding and existing authority are preserved.
   assert.equal(result.index, steps.length); assert.deepEqual(result.output, [{testError: 'CANCELLED'}]);
   assert.deepEqual(await attoSnapshot(f), before); assert.deepEqual(readWalletSelection(f.home), selection);
   const store = await MarketplaceProfileStore.open(f.home);
@@ -243,10 +259,13 @@ test('full-flag setup with matching settings retains old grants in a custom shar
 });
 
 test('standalone ATTO reuse saves its default CLI selection into a newly approved configuration home', {skip: process.platform !== 'linux'}, async t => {
+  // Given the existing wallet and its saved authority.
   const f = await fixture(t), before = await existingAtto(f);
-  const steps = [step('Marketplace configuration directory'), step('Atto wallet:', '2'), step('Existing Atto CLI wallet directory'),
+  const steps = [step('Atto wallet:', '2'), step('Existing Atto CLI wallet directory'),
     step('Atto controller account index', '3'), step('Type REUSE', 'REUSE'), ...reuseApproval(), ...marketplaceApproval()];
+  // When the person follows the revised wallet prompts.
   const result = await terminalRun(f.env, ['wallet', 'setup', '--interactive', '--home', f.home, '--asset', 'ATTO'], steps);
+  // Then the selected wallet binding and existing authority are preserved.
   assert.equal(result.index, steps.length); assert.equal(result.output.length, 1); assert.equal(result.output[0].status, 'wallet-configured');
   assert.equal(result.output[0].mcpServers, undefined);
   assert.deepEqual(await attoSnapshot(f),before);
@@ -254,11 +273,14 @@ test('standalone ATTO reuse saves its default CLI selection into a newly approve
 });
 
 test('standalone Nano reuse creates the approved private home and preserves the existing handoff after restart', async t => {
+  // Given the existing wallet and its saved authority.
   const f = await fixture(t), wallet = await nanoWallet(f, 'existing-nano');
   const configuration = await readFile(join(wallet.directory, 'wallet.json'));
   const pendingFile = join(wallet.handoffDirectory, 'retained.request.json'); await writeFile(pendingFile, 'retained private handoff', {mode: 0o600});
+  // When the person follows the revised wallet prompts.
   const result = await controlledTerminal(() => runWalletWizard(['--home', f.home, '--asset', 'XNO'], {},
-    answers(['', 'reuse', wallet.directory, 'keep', 'APPROVE'])));
+    answers(['reuse', wallet.directory, 'keep', 'APPROVE'])));
+  // Then the selected wallet binding and existing authority are preserved.
   assert.equal(JSON.parse(result.output).status, 'wallet-configured');
   assert.equal((await stat(f.home)).mode & 0o777, 0o700);
   const restart = managedWalletEnvironment(f.home, {});
@@ -270,21 +292,27 @@ test('standalone Nano reuse creates the approved private home and preserves the 
 });
 
 test('cancelled standalone Nano reuse leaves a new configuration home and selection absent', async t => {
+  // Given the existing wallet and its saved authority.
   const f = await fixture(t), wallet = await nanoWallet(f, 'existing-nano');
   const configuration = await readFile(join(wallet.directory, 'wallet.json'));
+  // When the person follows the revised wallet prompts.
   await assert.rejects(controlledTerminal(() => runWalletWizard(['--home', f.home, '--asset', 'XNO'], {},
-    answers(['', 'reuse', wallet.directory, 'keep', 'NO']))), {code: 'APPROVAL_DECLINED'});
+    answers(['reuse', wallet.directory, 'keep', 'NO']))), {code: 'APPROVAL_DECLINED'});
+  // Then the selected wallet binding and existing authority are preserved.
   assert.equal(readWalletSelection(f.home), undefined); await assert.rejects(readdir(f.home), {code: 'ENOENT'});
   assert.deepEqual(await readFile(join(wallet.directory, 'wallet.json')), configuration);
 });
 
 test('a stale Nano environment selection never connects the controller the user replaced in the wizard', async t => {
+  // Given the existing wallet and its saved authority.
   const f = await fixture(t), requested = [];
   const http = await listen(t, async (request, response) => {requested.push(await body(request)); json(response, 503, {error: 'fixture-stop-before-signing'});});
   const old = await nanoWallet(f, 'old-nano', http.origin), selected = await nanoWallet(f, 'chosen-nano', http.origin);
   const oldConfiguration = await readFile(join(old.directory, 'wallet.json'));
-  await assert.rejects(controlledTerminal(() => runGuidedSetup(['--home', f.home], {MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: old.directory},
-    answers(['', 'agent', http.origin, 'marketplace', 'no', 'yes', 'reuse', selected.directory, 'keep', 'APPROVE', 'yes']))));
+  // When the person follows the revised wallet prompts.
+  await assert.rejects(controlledTerminal(() => runGuidedSetup(['--home', f.home, '--profile', 'agent', '--origin', http.origin, '--audience', 'marketplace'], {MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: old.directory},
+    answers(['no', 'yes', 'reuse', selected.directory, 'keep', 'APPROVE', 'yes']))));
+  // Then the selected wallet binding and existing authority are preserved.
   assert.ok(requested.every(value => value.address === selected.address), 'Login requested a controller different from the explicitly selected wallet');
   const store = await MarketplaceProfileStore.open(f.home);
   try {assert.deepEqual(store.listProfileIds(), []);} finally {store.close();}
@@ -295,12 +323,98 @@ test('a stale Nano environment selection never connects the controller the user 
 });
 
 test('wallet-only guided setup never prints a ready Marketplace profile or usable MCP registration', async t => {
+  // Given the existing wallet and its saved authority.
   const f = await fixture(t), wallet = await nanoWallet(f, 'existing-nano');
-  const result = await controlledTerminal(() => runGuidedSetup(['--home', f.home], {},
-    answers(['', 'agent', 'http://localhost:8080', 'marketplace', 'no', 'yes', 'reuse', wallet.directory, 'keep', 'APPROVE', 'no'])));
+  // When the person follows the revised wallet prompts.
+  const result = await controlledTerminal(() => runGuidedSetup(['--home', f.home, '--profile', 'agent', '--origin', 'http://localhost:8080', '--audience', 'marketplace'], {},
+    answers(['no', 'yes', 'reuse', wallet.directory, 'keep', 'APPROVE', 'no'])));
   const output = JSON.parse(result.output);
+  // Then the selected wallet binding and existing authority are preserved.
   assert.equal(output.status, 'wallets-configured'); assert.equal(output.mcpServers, undefined);
   assert.equal(output.nano.address, wallet.address);
   const store = await MarketplaceProfileStore.open(f.home);
   try {assert.deepEqual(store.listProfileIds(), []); assert.equal(store.getSetupState('agent'), undefined);} finally {store.close();}
+});
+
+
+test('bare setup reaches wallet decisions on a real terminal using production defaults', {skip: process.platform === 'win32'}, async t => {
+  // Given a disposable home and the actual local-terminal input implementation.
+  const f = await fixture(t);
+  const source = ["import os from 'node:os'; import {syncBuiltinESMExports} from 'node:module';",
+    'os.homedir=()=>process.env.ATTO_TEST_HOME; syncBuiltinESMExports();',
+    'const {run}=await import(process.env.ATTO_TEST_MAIN);',
+    "try{await run(['setup'],process.env);}catch(error){process.stderr.write('Fixture result: '+error.code+'\\n');}"].join('\n');
+  const steps = [{prompt:'Configure an Atto wallet?',response:'no'},{prompt:'Configure a Nano wallet?',response:'no'}];
+  // When the person declines both wallets at the first two prompts.
+  const result = await promisify(execFile)('python3', [join(import.meta.dirname, 'support/run-terminal.py'), JSON.stringify({
+    command:[process.execPath,'--input-type=module','--eval',source], environment:f.env, steps, timeoutSeconds:10,
+  })], {env:f.env,timeout:15_000,maxBuffer:1_048_576});
+  const metadata = JSON.parse(result.stdout);
+  const transcript = stripVTControlCharacters(Buffer.from(metadata.transcriptBase64,'base64').toString('utf8'));
+  // Then no technical configuration questions or wallet mutation precede those decisions.
+  assert.equal(metadata.timedOut,false,transcript); assert.equal(metadata.stepsAnswered,2,transcript);
+  assert.match(transcript,/Marketplace: https:\/\/api\.atto\.market/); assert.match(transcript,/Profile: main/);
+  assert.ok(transcript.includes(join(f.env.ATTO_TEST_HOME,'.config','atto','marketplace-mcp')));
+  assert.doesNotMatch(transcript,/Marketplace configuration directory|Marketplace profile name|Agent API audience/);
+  assert.match(transcript,/Fixture result: SETUP_USAGE/);
+  await assert.rejects(readdir(join(f.env.ATTO_TEST_HOME,'.config','atto','marketplace-mcp','wallets')),{code:'ENOENT'});
+});
+
+for (const options of [
+  ['--origin','http://localhost:8080'],
+  ['--origin','https://api.other.example'],
+  ['--origin','https://user:password@api.atto.market','--audience','custom'],
+  ['--origin','https://api.atto.market/path','--audience','custom'],
+  ['--origin','https://'+'a'.repeat(2050)+'.example','--audience','custom'],
+  ['--audience','bad\naudience'],
+]) {
+  test(`invalid connection ${JSON.stringify(options).slice(0,100)} fails before wallet prompts or mutation`, async t => {
+    // Given a new private home and incomplete or invalid explicit connection settings.
+    const f = await fixture(t);
+    const prompt = async () => assert.fail('Invalid connection reached wallet prompts');
+    // When either guided setup owner validates those overrides.
+    await assert.rejects(controlledTerminal(()=>runGuidedSetup(['--home',f.home,...options],{},prompt)),{code:'SETUP_USAGE'});
+    await assert.rejects(controlledTerminal(()=>runWalletWizard(['--home',f.home,'--asset','XNO',...options],{},prompt)),{code:'SETUP_USAGE'});
+    // Then the wallet selection and private wallet state remain absent.
+    assert.equal(readWalletSelection(f.home),undefined);
+    await assert.rejects(readdir(join(f.home,'wallets')),{code:'ENOENT'});
+  });
+}
+
+test('saved non-production profiles and payment journals survive default setup and reject retargeting', async t => {
+  // Given an existing custom profile selected through the documented home and profile environment overrides.
+  const f = await fixture(t), origin = 'http://localhost:8080';
+  const initial = await MarketplaceProfileStore.open(f.home);
+  initial.createProfile({id:'custom',origin,audience:'custom-audience',accountId,agentId,identityId,
+    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,controllerIndex:7,
+    authMode:'scoped-api-key',apiKey:'retained-private-key',apiScopes:['tasks:read']});
+  const mutation={profileId:'custom',requestId:'55555555-5555-4555-8555-555555555555',operation:'marketplace-fund',target:accountId,requestHash:'retained-terms'};
+  initial.beginMutation(mutation,'retained-payment');
+  const before=initial.getProfile('custom'); initial.close();
+  const env={MARKETPLACE_MCP_HOME:f.home,MARKETPLACE_MCP_PROFILE:'custom'};
+  // When setup reopens it without overrides, or a caller tries a different binding.
+  const result=await controlledTerminal(()=>runGuidedSetup([],env,async()=>assert.fail('Existing profile prompted')));
+  for(const overrides of [['--origin','https://api.atto.market'],['--audience','urn:marketplace:agent-api:live']]) {
+    await assert.rejects(controlledTerminal(()=>runGuidedSetup(overrides,env,async()=>assert.fail('Conflicting profile prompted'))),{code:'PROFILE_CONFLICT'});
+  }
+  // Then its original account, controller, connection, credential, and journal remain exact.
+  assert.equal(JSON.parse(result.output).profileId,'custom');
+  const saved=await MarketplaceProfileStore.open(f.home);
+  try{assert.deepEqual(saved.getProfile('custom'),before);assert.deepEqual(saved.beginMutation(mutation),{state:'PENDING',resultIdentity:'retained-payment'});}finally{saved.close();}
+});
+
+test('pending custom setup keeps its saved binding and requires consent to resume', async t => {
+  // Given a pending login under a custom binding and the default main profile.
+  const f=await fixture(t), initial=await MarketplaceProfileStore.open(f.home);
+  initial.createSetupState('main','LOGIN_READY',JSON.stringify({profileId:'main',origin:'http://localhost:8080',audience:'custom',
+    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,controllerIndex:7,accountId,identityId}));
+  const before=initial.getSetupState('main');initial.close();
+  const prompts=[];
+  // When bare connection defaults encounter saved setup and the person declines resumption.
+  await assert.rejects(controlledTerminal(()=>runGuidedSetup(['--home',f.home],{},async question=>{prompts.push(question);return 'no';})),{code:'CANCELLED'});
+  await assert.rejects(controlledTerminal(()=>runGuidedSetup(['--home',f.home,'--origin','https://api.atto.market'],{},async()=>assert.fail('Conflicting pending setup prompted'))),{code:'PROFILE_CONFLICT'});
+  // Then only resume consent was requested and no production binding replaced the pending payload.
+  assert.equal(prompts.length,1);assert.match(prompts[0],/Resume this profile/);
+  const saved=await MarketplaceProfileStore.open(f.home);
+  try{assert.deepEqual(saved.getSetupState('main'),before);assert.deepEqual(saved.listProfileIds(),[]);}finally{saved.close();}
 });

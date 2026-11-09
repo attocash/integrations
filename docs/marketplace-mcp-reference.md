@@ -4,12 +4,13 @@ Advanced configuration, permission, workflow, and recovery details for
 [`@attocash/marketplace-mcp`](https://www.npmjs.com/package/@attocash/marketplace-mcp).
 Start with the [installation and connection guide](https://github.com/attocash/integrations/blob/main/atto-marketplace-mcp/README.md).
 Commands below assume the npm package is installed and run in your own terminal.
-Development origins, networks, and atomic amounts are examples; use the exact
-values supplied by your Marketplace operator and reviewed during setup.
+Custom origins, networks, and atomic amounts are examples; review the exact
+values for your deployment during setup.
 
-One process uses one explicitly selected private profile. Profiles pin the
-Marketplace origin, account, and authentication mode. Linux and macOS are
-supported; profile directories and files require POSIX 0700/0600 privacy.
+One process uses one saved private profile, defaulting to `main`. A profile is a
+saved account and connection: it pins the Marketplace origin, account, and
+authentication mode. Linux and macOS are supported; profile directories and
+files require POSIX 0700/0600 privacy.
 Native Windows is unsupported. Native recovery material stays in the OS password
 store; bearer credentials and private approvals stay in the Marketplace home.
 
@@ -26,12 +27,10 @@ Run the installed executable in your own interactive terminal:
 atto-marketplace-mcp setup
 ```
 
-For local development, first start the stack in the Marketplace repository's
-[local guide](https://github.com/attocash/marketplace/blob/main/dev/local/README.md).
-
-The guided setup asks for your private Marketplace configuration directory,
-profile name, exact Marketplace origin, and Agent API audience supplied by the
-Marketplace operator. It then lets you:
+Guided setup uses `https://api.atto.market`, audience
+`urn:marketplace:agent-api:live`, profile `main`, and the private home
+`~/.config/atto/marketplace-mcp` without asking for connection settings.
+It lets you:
 
 - Create a dedicated Atto wallet or select your existing Atto CLI wallet at its
   default or custom directory. Select the exact original CLI `--data-dir` to
@@ -77,19 +76,20 @@ so local-prefix installations do not depend on your client's `PATH`. Keep its `-
 `--profile` and wallet path selections together. File tools additionally require
 the private directory described below.
 
-To prefill the guided connection questions, use
-`atto-marketplace-mcp setup --interactive --home /absolute/private/home --profile local-agent --origin http://localhost:8080 --audience urn:marketplace:agent-api:local`.
 Bare `atto-marketplace-mcp wallet setup` (or `wallet setup --interactive`)
-opens the wallet-only asset chooser and saves the selected directory pointers;
-it does not authenticate a Marketplace account.
+uses the same home and production connection defaults, opens the wallet-only
+asset chooser, and saves the selected directory pointers. It does not authenticate
+a Marketplace account.
 
 If a controller session expires or its refresh outcome becomes unknown, reconnect
 in the same configuration home and profile:
 
 ```sh
-atto-marketplace-mcp setup --home /absolute/private/home --profile local-agent --reauthenticate
+atto-marketplace-mcp setup --profile main --reauthenticate
 ```
 
+Use your original profile instead of `main` and include the original `--home`
+if you used custom settings.
 This signs a fresh login proof for the saved account and controller, replaces only
 session credentials, and preserves payment journals and wallet selections. The
 guided setup also offers reconnection for an unusable existing session. After an
@@ -98,6 +98,28 @@ use `--complete` for a safely retryable pending login. Scoped API-key profiles k
 their separate credential workflow and cannot become controller sessions here.
 
 ### Advanced explicit setup
+
+Override the connection or storage settings with `--origin`, `--audience`,
+`--profile`, and `--home`. Simple overrides keep setup guided without requiring
+`--interactive`. A custom origin requires an explicit `--audience`; HTTPS is
+required except for loopback development origins. For local development, first
+start the stack in the Marketplace repository's
+[local guide](https://github.com/attocash/marketplace/blob/main/dev/local/README.md),
+then run:
+
+```sh
+atto-marketplace-mcp setup --origin http://localhost:8080 \
+  --audience urn:marketplace:agent-api:local --profile dev \
+  --home /absolute/private/home
+```
+
+Runtime selection uses `--profile`, then `MARKETPLACE_MCP_PROFILE`, then `main`.
+Home selection uses `--home`, then `MARKETPLACE_MCP_HOME`, then
+`~/.config/atto/marketplace-mcp`. Keep setup's generated explicit client
+configuration to retain the selected home, profile and wallet paths even when
+the client has different environment settings. Existing saved profiles and
+pending setups retain their original origin and audience; new defaults never
+retarget them. Use a separate profile for a different account or connection.
 
 For a fully specified dedicated Atto wallet, use:
 

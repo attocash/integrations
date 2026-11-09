@@ -113,9 +113,12 @@ test('cancelled Nano creation preserves all state and never displays recovery ma
 
 test('dedicated Nano creation asks usable defaults and keeps funding and transfers denied', async t => terminal(async () => {
   const home = await homeFor(t);
-  const responses = ['', '', 'nano:dev', '', origin, audience, '', '', '', '', 'APPROVE'];
+  // Given a recovery wallet with no explicit Marketplace connection override.
+  const responses = ['', '', 'nano:dev', '', '', '', '', '', 'APPROVE'];
   const script = interaction(responses);
+  // When the user approves the production binding shown in the review.
   const result = await setupNanoWalletInteractive({ home, env: {}, prompt: script.prompt });
+  // Then production is saved without prompting for origin or audience.
   assert.equal(result.directory, join(home, 'wallets', 'nano'));
   assert.equal(result.index, 0);
   assert.equal(result.network, 'nano:dev');
@@ -123,6 +126,9 @@ test('dedicated Nano creation asks usable defaults and keeps funding and transfe
   assert.equal(result.address, config.sourceAddress);
   assert.deepEqual(config.grants, { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] });
   assert.deepEqual(config.limits, { maxPaymentAtomic: '0', rolling24hAtomic: '0' });
+  assert.equal(config.origin, 'https://api.atto.market');
+  assert.equal(config.audience, 'urn:marketplace:agent-api:live');
+  assert.equal(script.questions.some(question => /^(Marketplace origin|Exact Marketplace Agent API audience)/.test(question)), false);
   assert.equal(config.version,1);
   assert.equal(config.keySource.recoverySource.directory,join(home,'wallets','atto'));
   assert.equal(config.keySource.derivationVersion,'bip39-ed25519-slip10-nano-v1');

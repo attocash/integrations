@@ -112,12 +112,12 @@ use the exact configuration printed by setup.
 
 ```sh
 npm install --global @attocash/marketplace-mcp
-atto-marketplace-mcp setup --interactive --profile agent
+atto-marketplace-mcp setup
 ```
 
-Have your Marketplace origin and Agent API audience ready; obtain them from
-the Marketplace operator. Setup selects local wallets, connects your controller,
-and prints the configuration for your MCP client. Copy it, reconnect, then try:
+Setup uses the production Marketplace connection and default profile, lets you
+select local wallets and approve login, and prints the configuration for your
+MCP client. Copy it, reconnect, then try:
 
 > Show open Marketplace tasks that match my skills.
 
