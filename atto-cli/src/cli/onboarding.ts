@@ -3,6 +3,7 @@ import { isAbsolute, join, resolve } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
 import { AttoApplication } from '../application/app.js';
 import { amountRaw } from '../domain/amount.js';
+import { formatSpendingPolicy as formatPolicy } from '../marketplace/wallet-setup.js';
 import { AttoError } from '../domain/errors.js';
 import { defaultCliDirectory, dedicatedMcpDirectory, resolveWalletProfile } from '../storage/profiles.js';
 import type { AccountPool, SpendingPolicy, WalletIdentity, WalletSettings } from '../wallet/types.js';
@@ -25,14 +26,6 @@ async function choose(prompt: string): Promise<'1' | '2'> {
   const answer = await terminalPrompt(prompt) || '1';
   if (answer !== '1' && answer !== '2') throw new AttoError('INVALID_INPUT', 'Choose 1 or 2.');
   return answer;
-}
-
-function formatPolicy(policy: SpendingPolicy): string {
-  const perPayment = policy.perRequest ? `${policy.perRequest.amount} ${policy.perRequest.unit}` : 'Unlimited';
-  const rolling = policy.rolling.length
-    ? policy.rolling.map(rule => `${rule.amount} ${rule.unit} / ${rule.days} day${rule.days === 1 ? '' : 's'}`).join(', ')
-    : 'Unlimited';
-  return `Per payment: ${perPayment}; rolling: ${rolling}`;
 }
 
 function showProposal(review: Awaited<ReturnType<AttoApplication['reviewLimitsProposal']>>): void {
@@ -229,6 +222,9 @@ export async function setupMarketplaceWallet({
     const messageSigningIndexes = typedControllerApprovals ? usage.messageSigningIndexes : reuseExisting
       ? [...new Set([...usage.messageSigningIndexes, controllerIndex])].sort((a, b) => a - b) : [controllerIndex];
     const proposal = reuseExisting ? await application.store.withWalletLock(async () => {
+      if (application.store.get('wallet.reset')) {
+        throw new AttoError('WALLET_RESET_REQUIRED', 'Finish wallet reset before configuring Marketplace.');
+      }
       // Fail rather than replacing authority changed by another CLI/MCP session
       // while the user was answering terminal prompts.
       if (!isDeepStrictEqual(usage, {
@@ -238,13 +234,14 @@ export async function setupMarketplaceWallet({
         || !isDeepStrictEqual(status.identity, application.store.get('identity'))) {
         throw new AttoError('PROPOSAL_STALE', 'The shared wallet settings or authority changed during setup. Review the current wallet and run setup again.');
       }
+      if (isDeepStrictEqual(usage, { policy, access: 'spend', pool, messageSigningIndexes })) return null;
       return application.ledger.proposePolicy(policy, 'spend', {
         directory: profile.directory, walletFingerprint: status.identity!.fingerprint, network: status.settings.network,
       }, pool, messageSigningIndexes);
     }) : (await application.call('limits_propose', {
       policy, access: 'spend', pool, messageSigningIndexes,
     }) as { proposal: { id: string } }).proposal;
-    await approve(application, proposal.id);
+    if (proposal) await approve(application, proposal.id);
     return { directory: profile.directory, address: controller.address, index: controller.index };
   } finally { await application.close(); }
 }

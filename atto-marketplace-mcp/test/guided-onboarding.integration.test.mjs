@@ -37,7 +37,7 @@ async function fixture(t, customWallet = false) {
   t.after(() => rm(root, {recursive: true, force: true}));
   const home = join(root, 'selected-configuration');
   const userHome = join(root, 'user-home');
-  const wallet = customWallet ? join(root, 'custom-cli-wallet') : process.platform === 'darwin' ? join(userHome, 'Library', 'Application Support', 'Atto CLI') : join(root, 'xdg', 'atto-cli');
+  const wallet = customWallet ? join(root, 'custom-cli-wallet') : process.platform === 'darwin' ? join(userHome, 'Library', 'Application Support', 'Atto CLI') : process.platform==='win32'?join(userHome,'AppData','Local','Atto CLI'):join(root, 'xdg', 'atto-cli');
   const bin = join(root, 'bin'), keyLog = join(root, 'keyring-access.log');
   await mkdir(bin, {recursive: true, mode: 0o700});
   // A disposable keyring adapter records only service/account lookups, never the phrase.
@@ -45,7 +45,7 @@ async function fixture(t, customWallet = false) {
     '#!/bin/sh', `printf '%s\\n' "$*" >> '${keyLog}'`, 'case "$1" in',
     ` lookup) printf '%s\\n' '${phrase}';;`, ' *) exit 77;;', 'esac', '',
   ].join('\n'), {mode: 0o700});
-  const env = {PATH: bin + ':' + (process.env.PATH ?? ''), HOME: userHome, XDG_DATA_HOME: join(root, 'xdg'),
+  const env = {ATTO_TEST_KEY_LOG:keyLog, LOCALAPPDATA:join(userHome,'AppData','Local'), PATH: bin + ':' + (process.env.PATH ?? ''), HOME: userHome, XDG_DATA_HOME: join(root, 'xdg'),
     XDG_CONFIG_HOME: join(root, 'config'), XDG_RUNTIME_DIR: '', DBUS_SESSION_BUS_ADDRESS: '',
     ATTO_TEST_HOME: userHome, ATTO_TEST_MAIN: moduleUrl('main.js')};
   const open = () => new AttoApplication({directory: wallet, secrets: {get: async () => phrase, set: async () => {}, remove: async () => {}}});
@@ -69,12 +69,23 @@ async function existingAtto(f) {
 async function attoSnapshot(f) {
   const app = f.open();
   try {return {identity: app.store.get('identity'), settings: app.store.get('settings'), policy: app.ledger.policy(),
-    access: app.ledger.mcpAccess(), pool: app.ledger.pool(), indexes: app.ledger.messageSigningIndexes(), journal: app.store.get('spending.records')};}
+    access: app.ledger.mcpAccess(), pool: app.ledger.pool(), indexes: app.ledger.messageSigningIndexes(), proposal:app.ledger.proposal(), journal: app.store.get('spending.records')};}
   finally {await app.close();}
 }
 
 function terminalRun(env, args, steps, timeoutMs = 15_000) {
+  const nativeFixture='data:text/javascript,'+encodeURIComponent(`
+    import {appendFileSync} from 'node:fs';
+    export class AsyncEntry {
+      constructor(service,account){this.service=service;this.account=account;}
+      async getPassword(){appendFileSync(process.env.ATTO_TEST_KEY_LOG,'lookup service '+this.service+' account '+this.account+' key_type mnemonic\\n');return ${JSON.stringify(phrase)};}
+      async setPassword(){throw new Error('Read-only credential fixture');}
+      async deleteCredential(){throw new Error('Read-only credential fixture');}
+    }
+  `);
   const harness = [
+    "import {registerHooks} from 'node:module';",
+    `registerHooks({resolve(specifier,context,next){return specifier==='@napi-rs/keyring'?{url:${JSON.stringify(nativeFixture)},shortCircuit:true}:next(specifier,context);}});`,
     "import os from 'node:os'; import {syncBuiltinESMExports} from 'node:module';",
     'os.homedir=()=>process.env.ATTO_TEST_HOME; syncBuiltinESMExports();',
     "Object.defineProperty(process.stdin,'isTTY',{configurable:true,value:true});",
@@ -110,7 +121,7 @@ function terminalRun(env, args, steps, timeoutMs = 15_000) {
 const step = (prompt, answer = '') => ({prompt, answer});
 const marketplaceApproval = () => [step('Allow Marketplace funding from this Atto wallet', 'yes'),
   step('Allow external Atto transfers from this wallet', 'no'), step('Type APPROVE to save this Marketplace wallet access:', 'APPROVE')];
-const reuseApproval = (answer = 'yes') => [step('Account pool:'), step('Spending policy:'), step('Type yes to approve this exact proposal:', answer)];
+const reuseChoices = () => [step('Account pool:'), step('Spending policy:')];
 function assertPrivateOutput(output) {
   for (const secret of [phrase, 'access-guided-fixture-secret', 'refresh-guided-fixture-secret']) assert.equal(output.includes(secret), false);
 }
@@ -158,7 +169,7 @@ async function nanoWallet(f, name, origin = 'http://localhost:8080') {
 }
 
 for (const production of [true, false]) {
-test(`${production ? 'bare production' : 'custom override'} guided setup verifies a real private-host login proof and survives MCP restart`, {skip: process.platform !== 'linux'}, async t => {
+test(`${production ? 'bare production' : 'custom override'} guided setup verifies a real private-host login proof and survives MCP restart`, async t => {
   // Given an existing CLI wallet and an isolated transport serving the production binding.
   const f = await fixture(t), before = await existingAtto(f), requests = [];
   if (production) f.home = join(f.env.ATTO_TEST_HOME, '.config', 'atto', 'marketplace-mcp');
@@ -177,15 +188,16 @@ test(`${production ? 'bare production' : 'custom override'} guided setup verifie
     }
     return json(response, 404, {});
   });
-  const steps = [step('Configure an Atto wallet?'),
-    step('Atto wallet:', '2'), step('Existing Atto CLI wallet directory'), step('Atto controller account index'),
-    step('Type REUSE', 'REUSE'), ...reuseApproval(), ...marketplaceApproval(), step('Configure a Nano wallet?', 'no'), step('Connect this profile to Marketplace now?'),step('Type APPROVE to confirm:','APPROVE')];
+  const steps = [step('Configure an Atto wallet?'), step('Atto access:', '2'),
+    step('Type APPROVE to save this Marketplace wallet access:', 'APPROVE'), step('Configure a Nano wallet?', 'no'),step('Type APPROVE to confirm:','APPROVE')];
   // When bare setup accepts wallet choices and typed login approval with no environment questions.
-  const result = await terminalRun({...f.env, ...(production ? {ATTO_TEST_PRODUCTION_TRANSPORT: http.origin} : {})},
+  const result = await terminalRun({...f.env, MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:f.wallet, ...(production ? {ATTO_TEST_PRODUCTION_TRANSPORT: http.origin} : {})},
     production ? ['setup'] : ['setup', '--home', f.home, '--profile', profileId, '--origin', http.origin, '--audience', audience], steps);
   // Then the default private profile binds production and survives a runtime start without --profile.
   assert.doesNotMatch(result.stderr, /Marketplace configuration directory|Marketplace profile name|Marketplace origin \[|Agent API audience/);
   assert.equal(result.code, 0); assert.equal(result.index, steps.length); assert.equal(result.output.some(value => value.testError), false, result.stderr);
+  assert.equal(steps.length-1,4,'Exactly four prompts precede the separate login proof approval');
+  assert.doesNotMatch(result.stderr,/Type REUSE|Account pool:|Spending policy:|Type yes to approve this exact proposal|Connect this profile|Atto controller account index|Existing Atto CLI wallet directory|walletFingerprint|nodeUrl|workerUrl/);
   assert.equal(verified, true); assert.deepEqual(requests.map(value => value.path), ['/v1/agent/auth/challenges', '/v1/agent/auth/sessions']);
   assertPrivateOutput(result.stdout + result.stderr);
   const ready = result.output.find(value => value.mcpServers);
@@ -221,24 +233,60 @@ test(`${production ? 'bare production' : 'custom override'} guided setup verifie
 
 }
 
-test('interactive setup cancellation preserves shared ATTO authority and its existing wallet pointer', {skip: process.platform !== 'linux'}, async t => {
+test('compact wallet approval never authorizes the later typed Marketplace login proof',async t=>{
+  // Given a selected existing Atto wallet and an isolated login challenge endpoint.
+  const f=await fixture(t),before=await existingAtto(f),requests=[];
+  const http=await listen(t,async(request,response)=>{
+    requests.push(request.url);const input=await body(request);
+    if(request.url==='/v1/agent/auth/challenges')return json(response,200,challenge(input.address));
+    return json(response,500,{error:'Unexpected signing or login session'});
+  });
+  const steps=[step('Configure an Atto wallet?'),step('Atto access:','1'),
+    step('Type APPROVE to save this Marketplace wallet access:','APPROVE'),step('Configure a Nano wallet?','no'),
+    step('Type APPROVE to confirm:','NO')];
+  // When wallet access is approved but the separate exact login proof is declined.
+  const result=await terminalRun({...f.env,MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:f.wallet},
+    ['setup','--home',f.home,'--origin',http.origin,'--audience','marketplace'],steps);
+  // Then the earlier wallet decision never signs or creates a session by itself.
+  assert.equal(result.index,5);assert.deepEqual(result.output.filter(value=>value.testError),[{testError:'APPROVAL_DECLINED'}]);
+  assert.deepEqual(requests,['/v1/agent/auth/challenges']);
+  assert.deepEqual(await attoSnapshot(f),before);
+  assert.equal(readWalletSelection(f.home).attoAccess.marketplaceFunding,false);
+  assert.equal(readWalletSelection(f.home).attoAccess.externalTransfers,false);
+  const profiles=await MarketplaceProfileStore.open(f.home);
+  try{assert.deepEqual(profiles.listProfileIds(),[]);assert.equal(profiles.getSetupState('main').state,'LOGIN_APPROVAL');}finally{profiles.close();}
+  await assert.rejects(readFile(f.keyLog),{code:'ENOENT'});
+});
+
+test('setup --advanced dispatches to the preserved wallet and account chooser',async t=>{
+  // Given an existing selected shared CLI wallet.
+  const f=await fixture(t),before=await existingAtto(f);
+  const steps=[step('Configure an Atto wallet?'),step('Atto wallet:'),step('Atto controller account index'),step('Type REUSE','NO')];
+  // When the explicit advanced path is chosen and cancelled before native configuration.
+  const result=await terminalRun({...f.env,MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:f.wallet},['setup','--home',f.home,'--advanced'],steps);
+  // Then the normal executable preserves access to account and native-authority configuration.
+  assert.equal(result.index,steps.length);assert.deepEqual(result.output,[{testError:'CANCELLED'}]);
+  assert.deepEqual(await attoSnapshot(f),before);assert.equal(readWalletSelection(f.home),undefined);
+});
+
+test('interactive setup cancellation preserves shared ATTO authority and its existing wallet pointer', async t => {
   // Given the existing wallet and its saved authority.
   const f = await fixture(t), before = await existingAtto(f);
   await mkdir(f.home, {mode: 0o700}); await saveWalletSelection(f.home, {attoDirectory: f.wallet});
   const selection = readWalletSelection(f.home);
-  const steps = [step('Configure an Atto wallet?'),
-    step('Atto wallet:'), step('Atto controller account index', '3'), step('Type REUSE', 'REUSE'), ...reuseApproval('no')];
+  const steps = [step('Configure an Atto wallet?'),step('Atto access:', '4'),
+    step('Type APPROVE to save this Marketplace wallet access:', 'DECLINE')];
   // When the person follows the revised wallet prompts.
   const result = await terminalRun(f.env, ['setup', '--home', f.home, '--profile', 'cancelled', '--origin', 'http://localhost:8080', '--audience', 'marketplace'], steps);
   // Then the selected wallet binding and existing authority are preserved.
-  assert.equal(result.index, steps.length); assert.deepEqual(result.output, [{testError: 'CANCELLED'}]);
+  assert.equal(result.index, steps.length); assert.deepEqual(result.output, [{testError: 'APPROVAL_DECLINED'}]);
   assert.deepEqual(await attoSnapshot(f), before); assert.deepEqual(readWalletSelection(f.home), selection);
   const store = await MarketplaceProfileStore.open(f.home);
   try {assert.deepEqual(store.listProfileIds(), []); assert.equal(store.getSetupState('cancelled'), undefined);} finally {store.close();}
   assertPrivateOutput(result.stdout + result.stderr);
 });
 
-test('full-flag wallet setup cannot overwrite the network or grants of a selected shared CLI wallet', {skip: process.platform !== 'linux'}, async t => {
+test('full-flag wallet setup cannot overwrite the network or grants of a selected shared CLI wallet', async t => {
   const f = await fixture(t, true), before = await existingAtto(f);
   await mkdir(f.home, {mode: 0o700}); await saveWalletSelection(f.home, {attoDirectory: f.wallet});
   const result = await terminalRun(f.env, ['wallet', 'setup', '--home', f.home, '--network', 'atto:beta',
@@ -247,27 +295,32 @@ test('full-flag wallet setup cannot overwrite the network or grants of a selecte
   assert.deepEqual(await attoSnapshot(f), before); assert.equal(readWalletSelection(f.home).attoDirectory, f.wallet);
 });
 
-test('full-flag setup with matching settings retains old grants in a custom shared ATTO wallet', {skip: process.platform !== 'linux'}, async t => {
+test('full-flag setup with matching settings retains old grants in a custom shared ATTO wallet', async t => {
+  // Given a selected shared wallet with its existing bounded native authority.
   const f = await fixture(t, true), before = await existingAtto(f);
   await mkdir(f.home, {mode: 0o700}); await saveWalletSelection(f.home, {attoDirectory: f.wallet});
-  const steps = [...reuseApproval(), ...marketplaceApproval()];
+  const steps = [...reuseChoices(), ...marketplaceApproval()];
+  // When the existing pool and limits are retained in explicit full-flag setup.
   const result = await terminalRun(f.env, ['wallet', 'setup', '--home', f.home, '--index', '3', '--network', 'atto:local',
     '--node-url', before.settings.nodeUrl, '--worker-url', before.settings.workerUrl], steps);
-  assert.equal(result.index, steps.length); assert.equal(result.output.length, 1); assert.equal(result.output[0].status, 'wallet-configured');
+  assert.equal(result.index, steps.length); assert.equal(result.output.length, 1); assert.equal(result.output[0].status, 'wallet-configured',JSON.stringify(result.output));
+  // Then no no-op native proposal replaces the original authority or proposal.
+  assert.doesNotMatch(result.stderr,/Type yes to approve this exact proposal/);
   assert.deepEqual(await attoSnapshot(f),before);
   assert.equal(readWalletSelection(f.home).attoDirectory, f.wallet);
 });
 
-test('standalone ATTO reuse saves its default CLI selection into a newly approved configuration home', {skip: process.platform !== 'linux'}, async t => {
+test('standalone ATTO reuse saves its default CLI selection into a newly approved configuration home', async t => {
   // Given the existing wallet and its saved authority.
   const f = await fixture(t), before = await existingAtto(f);
-  const steps = [step('Atto wallet:', '2'), step('Existing Atto CLI wallet directory'),
-    step('Atto controller account index', '3'), step('Type REUSE', 'REUSE'), ...reuseApproval(), ...marketplaceApproval()];
+  const steps = [step('Atto wallet:'),step('Atto access:', '2'),
+    step('Type APPROVE to save this Marketplace wallet access:', 'APPROVE')];
   // When the person follows the revised wallet prompts.
   const result = await terminalRun(f.env, ['wallet', 'setup', '--interactive', '--home', f.home, '--asset', 'ATTO'], steps);
   // Then the selected wallet binding and existing authority are preserved.
-  assert.equal(result.index, steps.length); assert.equal(result.output.length, 1); assert.equal(result.output[0].status, 'wallet-configured');
+  assert.equal(result.index, steps.length); assert.equal(result.output.length, 1); assert.equal(result.output[0].status, 'wallet-configured',JSON.stringify(result.output));
   assert.equal(result.output[0].mcpServers, undefined);
+  assert.equal((await stat(f.home)).mode&0o777,0o700);
   assert.deepEqual(await attoSnapshot(f),before);
   assert.equal(managedWalletEnvironment(f.home, {}).MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, f.wallet);
 });
@@ -311,7 +364,7 @@ test('a stale Nano environment selection never connects the controller the user 
   const oldConfiguration = await readFile(join(old.directory, 'wallet.json'));
   // When the person follows the revised wallet prompts.
   await assert.rejects(controlledTerminal(() => runGuidedSetup(['--home', f.home, '--profile', 'agent', '--origin', http.origin, '--audience', 'marketplace'], {MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: old.directory},
-    answers(['no', 'yes', 'reuse', selected.directory, 'keep', 'APPROVE', 'yes']))));
+    answers(['no', 'yes', 'reuse', selected.directory, 'keep', 'APPROVE']))));
   // Then the selected wallet binding and existing authority are preserved.
   assert.ok(requested.every(value => value.address === selected.address), 'Login requested a controller different from the explicitly selected wallet');
   const store = await MarketplaceProfileStore.open(f.home);
@@ -322,20 +375,19 @@ test('a stale Nano environment selection never connects the controller the user 
   assert.equal((await inspectNanoWallet(selected.directory)).sourceAddress, selected.address);
 });
 
-test('wallet-only guided setup never prints a ready Marketplace profile or usable MCP registration', async t => {
-  // Given the existing wallet and its saved authority.
+test('standalone Nano wallet setup preserves a wallet-only path without Marketplace connection', async t => {
+  // Given an existing Nano wallet and no Marketplace profile.
   const f = await fixture(t), wallet = await nanoWallet(f, 'existing-nano');
-  // When the person follows the revised wallet prompts.
-  const result = await controlledTerminal(() => runGuidedSetup(['--home', f.home, '--profile', 'agent', '--origin', 'http://localhost:8080', '--audience', 'marketplace'], {},
-    answers(['no', 'yes', 'reuse', wallet.directory, 'keep', 'APPROVE', 'no'])));
+  // When standalone wallet setup selects and approves that wallet.
+  const result = await controlledTerminal(() => runWalletWizard(['--home', f.home, '--asset', 'XNO'], {},
+    answers(['reuse', wallet.directory, 'keep', 'APPROVE'])));
   const output = JSON.parse(result.output);
-  // Then the selected wallet binding and existing authority are preserved.
-  assert.equal(output.status, 'wallets-configured'); assert.equal(output.mcpServers, undefined);
-  assert.equal(output.nano.address, wallet.address);
+  // Then wallet setup saves the wallet without advertising a connected agent.
+  assert.equal(output.status, 'wallet-configured'); assert.equal(output.mcpServers, undefined);
+  assert.equal(output.address, wallet.address);
   const store = await MarketplaceProfileStore.open(f.home);
-  try {assert.deepEqual(store.listProfileIds(), []); assert.equal(store.getSetupState('agent'), undefined);} finally {store.close();}
+  try {assert.deepEqual(store.listProfileIds(), []); assert.equal(store.getSetupState('main'), undefined);} finally {store.close();}
 });
-
 
 test('bare setup reaches wallet decisions on a real terminal using production defaults', {skip: process.platform === 'win32'}, async t => {
   // Given a disposable home and the actual local-terminal input implementation.

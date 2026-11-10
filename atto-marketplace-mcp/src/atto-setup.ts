@@ -8,11 +8,46 @@ import {readWalletSelection} from './wallet-preferences.js';
 import {ProfileError} from './profile-store.js';
 import {ensurePaymentHandoffDirectory} from './payment-handoff-files.js';
 import {absoluteDirectory,requiredText,requireSetupTerminal,type Prompt} from './terminal-input.js';
-import {approveAttoWalletAccess} from './wallet-access.js';
+import {approveAttoWalletAccess,approveCompactAttoWalletAccess} from './wallet-access.js';
+import {inspectMarketplaceWalletSetup} from '@attocash/cli/internal-marketplace';
 export interface AttoSetupResult {directory:string;address:string;index:number;network:string}
-export interface AttoSetupOptions {home:string;env:NodeJS.ProcessEnv;prompt:Prompt;directory?:string;reuseExisting?:boolean;controllerIndex?:number;network?:string;nodeUrl?:string;workerUrl?:string}
+export interface AttoSetupOptions {home:string;env:NodeJS.ProcessEnv;prompt:Prompt;directory?:string;reuseExisting?:boolean;controllerIndex?:number;network?:string;nodeUrl?:string;workerUrl?:string;advanced?:boolean}
 
 export async function setupAttoWalletInteractive(options:AttoSetupOptions):Promise<AttoSetupResult> {
+  if(options.advanced)return setupAttoWalletAdvanced(options);
+  requireSetupTerminal();
+  const {home,env,prompt}=options;
+  const previous=readWalletSelection(home);
+  let directory=options.directory??env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR??previous?.attoDirectory;
+  if(!directory){
+    const cli=defaultCliDirectory();
+    const detected=existsSync(join(cli,'state.sqlite'));
+    const choice=await prompt(detected
+      ?'Atto wallet: [1] Existing CLI wallet (default), [2] Dedicated Marketplace wallet, [3] Other existing wallet: '
+      :'Atto wallet: [1] Dedicated Marketplace wallet (default), [2] Existing CLI wallet: ')||'1';
+    if(detected&&choice==='1')directory=cli;
+    else if(detected&&choice==='3'||!detected&&choice==='2')directory=await requiredText(prompt,'Existing Atto CLI wallet directory',cli);
+    else if(detected&&choice==='2'||!detected&&choice==='1')return setupAttoWalletAdvanced({...options,
+      directory:join(home,'wallets','atto'),reuseExisting:false});
+    else throw new ProfileError('SETUP_USAGE',detected?'Choose 1, 2 or 3.':'Choose 1 or 2.');
+  }
+  directory=absoluteDirectory(directory);
+  // The read-only CLI boundary never creates accounts, reconciles proposals or opens keys.
+  let snapshot=await inspectMarketplaceWalletSetup({directory,index:options.controllerIndex??0});
+  const saved=previous?.attoDirectory===directory?previous.attoAccess:undefined;
+  if(options.controllerIndex===undefined&&saved&&saved.fingerprint===snapshot.fingerprint&&saved.network===snapshot.network
+    &&snapshot.addresses.some(account=>account.index===saved.index&&account.address===saved.address)) {
+    snapshot=await inspectMarketplaceWalletSetup({directory,index:saved.index});
+  }
+  if((options.network&&options.network!==snapshot.network)||(options.nodeUrl&&options.nodeUrl!==snapshot.settings.nodeUrl)
+    ||(options.workerUrl&&options.workerUrl!==snapshot.settings.workerUrl))throw new ProfileError('WALLET_CONFIGURATION_MISMATCH','The supplied network or endpoints differ from the selected existing wallet.');
+  const approval=await approveCompactAttoWalletAccess({home,snapshot,previous,prompt});
+  if(approval==='advanced')return setupAttoWalletAdvanced({...options,directory,reuseExisting:true,controllerIndex:snapshot.index});
+  return {directory,address:snapshot.address,index:snapshot.index,network:snapshot.network};
+}
+
+/** Explicit advanced setup retains native account-pool and spending-policy configuration. */
+async function setupAttoWalletAdvanced(options:AttoSetupOptions):Promise<AttoSetupResult> {
   requireSetupTerminal();
   const {home,env,prompt}=options;
   const selected=managedWalletEnvironment(home,env);

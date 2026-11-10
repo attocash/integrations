@@ -86,13 +86,14 @@ async function run(f, { terminal = true, controllerIndex = 3, reuseExisting = fa
   let stderr = '';
   let pending = '';
   let stepIndex = 0;
-  child.stderr.on('data', value => {
+  child.stderr.on('data', async value => {
     stderr += value;
     pending += stripVTControlCharacters(value.toString());
     const step = steps[stepIndex];
     if (!step || !pending.includes(step.prompt)) return;
     pending = '';
     stepIndex++;
+    await step.beforeAnswer?.();
     child.stdin.write(String(step.answer) + '\n');
   });
   const result = await new Promise((resolve, reject) => {
@@ -354,4 +355,80 @@ test('Given mismatched requested settings for a shared CLI wallet, then reuse re
   finally { await after.close(); }
   assert.equal(result.trace.reads + result.trace.writes + result.trace.removals, 0);
   assert.deepEqual(result.trace.operations, ['wallet_status']);
+});
+
+
+test('identical existing authority skips proposal creation and approval while preserving a different pending proposal', async t => {
+  // Given a shared wallet whose existing controller already has the requested grants.
+  const f = await fixture(t);
+  const before = await sharedWallet(f);
+  const application = f.open();
+  let pending;
+  try {
+    await application.call('address_derive', { index: 1 });
+    pending = application.ledger.proposePolicy({ perRequest: { amount: '1', unit: 'ATTO' }, rolling: [] }, 'read-only', {
+      directory: f.directory, walletFingerprint: before.identity.fingerprint, network: before.settings.network,
+    });
+  } finally { await application.close(); }
+
+  // When setup keeps the exact active access, policy, pool, and signing indexes.
+  const result = await run(f, { reuseExisting: true, controllerIndex: 1, steps: reuseSteps().slice(0, -1) });
+
+  // Then the separate pending proposal survives and no redundant approval is requested.
+  assert.equal(result.trace.error, undefined, result.stderr);
+  assert.deepEqual(await snapshot(f), before);
+  const after = f.open();
+  try { assert.deepEqual(after.ledger.proposal(), pending); }
+  finally { await after.close(); }
+  assert.doesNotMatch(result.stderr, /Type yes to approve this exact proposal/);
+  assert.equal(result.trace.operations.includes('limits_propose'), false);
+  assert.equal(result.trace.reads + result.trace.writes + result.trace.removals, 0);
+});
+
+
+test('a no-op authority selection still rejects a wallet change made during terminal questions', async t => {
+  // Given matching active grants that another session changes during review.
+  const f = await fixture(t);
+  await sharedWallet(f);
+  const application = f.open();
+  try { await application.call('address_derive', { index: 1 }); }
+  finally { await application.close(); }
+  const steps = reuseSteps().slice(0, -1);
+  steps.at(-1).beforeAnswer = async () => {
+    const concurrent = f.open();
+    try { await concurrent.store.withWalletLock(async () => concurrent.store.set('spending.mcpAccess', 'read-only')); }
+    finally { await concurrent.close(); }
+  };
+
+  // When setup would otherwise skip a redundant proposal.
+  const result = await run(f, { reuseExisting: true, controllerIndex: 1, steps });
+
+  // Then the current snapshot is checked first and the new authority remains intact.
+  assert.equal(result.trace.error?.code, 'PROPOSAL_STALE', result.stderr);
+  assert.equal((await snapshot(f)).access, 'read-only');
+  assert.doesNotMatch(result.stderr, /Type yes to approve this exact proposal/);
+});
+
+
+test('a no-op authority selection preserves the reset fence after terminal questions', async t => {
+  // Given matching grants and a reset interrupted during terminal review.
+  const f = await fixture(t);
+  await sharedWallet(f);
+  const application = f.open();
+  try { await application.call('address_derive', { index: 1 }); }
+  finally { await application.close(); }
+  const steps = reuseSteps().slice(0, -1);
+  steps.at(-1).beforeAnswer = async () => {
+    const concurrent = f.open();
+    try { await concurrent.store.withWalletLock(async () => concurrent.store.set('wallet.reset', { interrupted: true })); }
+    finally { await concurrent.close(); }
+  };
+
+  // When unchanged authority would otherwise skip proposal approval.
+  const result = await run(f, { reuseExisting: true, controllerIndex: 1, steps });
+
+  // Then setup still requires reset recovery and never reports success.
+  assert.equal(result.trace.error?.code, 'WALLET_RESET_REQUIRED', result.stderr);
+  assert.equal(result.trace.result, undefined);
+  assert.doesNotMatch(result.stderr, /Type yes to approve this exact proposal/);
 });

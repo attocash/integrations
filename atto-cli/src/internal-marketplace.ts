@@ -59,3 +59,5 @@ export async function signMarketplaceAttoController(options: { directory: string
   try { return await application.approveMarketplaceOwnedProof(options.request); }
   finally { await application.close(); }
 }
+
+export { inspectMarketplaceWalletSetup, withUnchangedMarketplaceWalletSetup, type MarketplaceWalletSetupSnapshot } from './marketplace/wallet-setup.js';

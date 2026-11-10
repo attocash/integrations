@@ -82,6 +82,17 @@ standard private configuration directory automatically. It walks through:
 3. Saving the connection and printing the client configuration when
    setup reports `status: "ready"`.
 
+For an existing wallet selected during earlier setup or through
+`MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR`, setup keeps the wallet's current account,
+limits, account pool and signing permissions. Choose **login only**, **funding**,
+**external transfers**, or **both**, then review one concise wallet approval.
+Marketplace login has its own approval for the exact request.
+
+To change the wallet, account or native spending settings, or inspect the full
+configuration, run `atto-marketplace-mcp setup --advanced`. Unchanged native
+authority does not create another limits proposal. Wallet-only configuration is
+available through `atto-marketplace-mcp wallet setup`.
+
 New wallet selections deny Marketplace funding and external transfers by
 default. Enable only the grants you need. Setup keeps native recovery material
 in the OS password store and Marketplace sessions in its private configuration

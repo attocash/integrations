@@ -11,6 +11,7 @@ test('Windows retains Atto CLI/MCP and portable Marketplace contracts while excl
     'atto-marketplace-mcp/test/marketplace-api-signer.test.mjs', 'atto-marketplace-mcp/test/future-contract.test.mjs'];
   const privateStorage = ['atto-marketplace-mcp/test/stdio-profile.test.mjs',
     'atto-marketplace-mcp/test/stdio-application-messages.test.mjs',
+    'atto-marketplace-mcp/test/compact-atto-setup.test.mjs',
     'atto-marketplace-nano-adapter/test/engine.test.mjs'];
   // When selecting suites for Windows.
   const selected = selectPlatformTests([...portable, ...privateStorage], 'win32');

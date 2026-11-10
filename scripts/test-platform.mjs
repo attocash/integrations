@@ -4,6 +4,7 @@ const posixTests = new Set([
   'atto-marketplace-mcp/test/approval-files.test.mjs',
   'atto-marketplace-mcp/test/approval-terminal-recovery.test.mjs',
   'atto-marketplace-mcp/test/atto-private-recovery.test.mjs',
+  'atto-marketplace-mcp/test/compact-atto-setup.test.mjs',
   'atto-marketplace-mcp/test/guided-onboarding.integration.test.mjs',
   'atto-marketplace-mcp/test/marketplace-api-refresh.test.mjs',
   'atto-marketplace-mcp/test/nano-guided-setup.test.mjs',

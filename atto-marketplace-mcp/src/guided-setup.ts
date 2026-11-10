@@ -12,13 +12,14 @@ import {approveMarketplaceController} from './approval-terminal.js';
 import {approvalRequestPath} from './approval-files.js';
 import {absoluteDirectory,requireSetupTerminal,terminalPrompt,yesNo,type Prompt} from './terminal-input.js';
 
-interface GuidedOptions {home?:string;profile?:string;origin?:string;audience?:string}
+interface GuidedOptions {home?:string;profile?:string;origin?:string;audience?:string;advanced?:boolean}
 function optionsFromArgs(argv:string[]):GuidedOptions {
   const result:GuidedOptions={};
   for(let i=0;i<argv.length;i++){
     const name=argv[i]!;if(name==='--interactive')continue;
-    if(!['--home','--profile','--origin','--audience'].includes(name)||!argv[i+1]||argv[i+1]!.startsWith('--'))throw new ProfileError('SETUP_USAGE','Use setup [--interactive] [--home <directory>] [--profile <name>] [--origin <origin>] [--audience <audience>].');
-    const key=name.slice(2) as keyof GuidedOptions;if(result[key]!==undefined)throw new ProfileError('SETUP_USAGE','Setup options must not be repeated.');result[key]=argv[++i]!;
+    if(name==='--advanced'){if(result.advanced)throw new ProfileError('SETUP_USAGE','Setup options must not be repeated.');result.advanced=true;continue;}
+    if(!['--home','--profile','--origin','--audience'].includes(name)||!argv[i+1]||argv[i+1]!.startsWith('--'))throw new ProfileError('SETUP_USAGE','Use setup [--interactive] [--advanced] [--home <directory>] [--profile <name>] [--origin <origin>] [--audience <audience>].');
+    const key=name.slice(2) as Exclude<keyof GuidedOptions,'advanced'>;if(result[key]!==undefined)throw new ProfileError('SETUP_USAGE','Setup options must not be repeated.');result[key]=argv[++i]!;
   }
   return result;
 }
@@ -89,7 +90,7 @@ export async function runGuidedSetup(argv:string[],env:NodeJS.ProcessEnv,prompt:
   let atto:AttoSetupResult|undefined;
   let nano:Awaited<ReturnType<typeof setupNanoWalletInteractive>>|undefined;
   if(await yesNo(prompt,'Configure an Atto wallet?',true)){
-    atto=await setupAttoWalletInteractive({home,env:effectiveEnv,prompt});
+    atto=await setupAttoWalletInteractive({home,env:effectiveEnv,prompt,advanced:options.advanced??false});
     effectiveEnv.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR=atto.directory;
   }
   if(await yesNo(prompt,'Configure a Nano wallet?',false)){
@@ -97,10 +98,6 @@ export async function runGuidedSetup(argv:string[],env:NodeJS.ProcessEnv,prompt:
     effectiveEnv=await saveNanoSelection(home,nano.directory,effectiveEnv,prompt);
   }
   if(!atto&&!nano)throw new ProfileError('SETUP_USAGE','Configure at least one wallet before connecting an agent.');
-  if(!await yesNo(prompt,'Connect this profile to Marketplace now?',true)){
-    process.stdout.write(`${JSON.stringify({status:'wallets-configured',home,profileId:profile,atto:atto??null,nano:nano??null,
-      next:'Run atto-marketplace-mcp setup again with this configuration directory to connect your account.'})}\n`);return;
-  }
   const current=managedWalletEnvironment(home,effectiveEnv);
   let network:'ATTO'|'NANO',address:string,index:number;
   if(atto&&nano){
@@ -150,9 +147,11 @@ async function setupApproval(home:string,profile:string):Promise<string|undefine
 /** Standalone wallet setup persists the approved wallet selection. */
 export async function runWalletWizard(argv:string[],env:NodeJS.ProcessEnv,prompt:Prompt=terminalPrompt):Promise<void> {
   requireSetupTerminal();
-  const args=argv.filter(value=>value!=='--interactive');
+  const advanced=argv.includes('--advanced');
+  if(argv.filter(value=>value==='--advanced').length>1)throw new ProfileError('SETUP_USAGE','Setup options must not be repeated.');
+  const args=argv.filter(value=>value!=='--interactive'&&value!=='--advanced');
   const values=new Map<string,string>();
-  for(let i=0;i<args.length;i+=2){const name=args[i],value=args[i+1];if(!name||!['--home','--asset','--origin','--audience'].includes(name)||!value||value.startsWith('--')||values.has(name))throw new ProfileError('SETUP_USAGE','Use wallet setup [--interactive] [--home <directory>] [--asset ATTO|XNO] [--origin <origin>] [--audience <audience>].');values.set(name,value);}
+  for(let i=0;i<args.length;i+=2){const name=args[i],value=args[i+1];if(!name||!['--home','--asset','--origin','--audience'].includes(name)||!value||value.startsWith('--')||values.has(name))throw new ProfileError('SETUP_USAGE','Use wallet setup [--interactive] [--advanced] [--home <directory>] [--asset ATTO|XNO] [--origin <origin>] [--audience <audience>].');values.set(name,value);}
   const home=absoluteDirectory(values.get('--home')??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome());
   // Reject incomplete custom bindings before asking for or changing any wallet.
   if(values.has('--origin')||values.has('--audience'))marketplaceConnection({...(values.has('--origin')?{origin:values.get('--origin')!}:{}),...(values.has('--audience')?{audience:values.get('--audience')!}:{})});
@@ -163,7 +162,7 @@ export async function runWalletWizard(argv:string[],env:NodeJS.ProcessEnv,prompt
     await saveNanoSelection(home,wallet.directory,env,prompt);
     process.stdout.write(`${JSON.stringify({status:'wallet-configured',asset:'XNO',...wallet})}\n`);
   }else if(asset==='ATTO'){
-    const wallet=await setupAttoWalletInteractive({home,env,prompt});
+    const wallet=await setupAttoWalletInteractive({home,env,prompt,advanced});
     process.stdout.write(`${JSON.stringify({status:'wallet-configured',asset:'ATTO',...wallet})}\n`);
   }else throw new ProfileError('SETUP_USAGE','Choose ATTO or XNO.');
 }

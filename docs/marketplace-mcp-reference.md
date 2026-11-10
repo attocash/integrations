@@ -47,8 +47,30 @@ It lets you:
   either controller, then setup saves the private controller session. Log in with the chosen address or explicitly link it to
   your existing Marketplace account; wallet selection does not link accounts.
 
+### Compact wallet reuse
+
+A selected existing Atto wallet is reused in place. Its current controller account
+(default index 0 for a new selection), shared limits, account pool and generic
+signing permissions remain unchanged. The normal flow offers one purpose menu
+(login only, funding, external transfers, or both) and one wallet-access approval,
+then an optional Nano choice and the exact Marketplace login approval. Funding
+and external transfers remain independent grants; receiving requires the existing
+native write and account-pool eligibility described below.
+
+A wallet without approved bounded native spending can still be used for login
+only. Enable additional native authority through `setup --advanced`; setup never
+silently upgrades it. The advanced path exposes wallet/directory/account choices,
+full settings, pool and spending customization. An identical authority request
+leaves existing limits proposals and payment journals untouched. If wallet identity
+or authority changes during review, repeat approval against the current settings.
+No wallet lock is held while you answer questions.
+
+Use `atto-marketplace-mcp wallet setup --advanced` for the corresponding
+wallet-only flow. Ordinary setup connects to Marketplace automatically; use the
+wallet-only command when you intend to configure wallets without logging in.
+
 New Marketplace wallet selections deny funding and external transfers by default;
-approve each grant separately if needed. Login, payout changes, withdrawals and
+choose each purpose explicitly and review both grants before approving. Login, payout changes, withdrawals and
 credential changes use one-off typed terminal approvals for either controller.
 These approvals do not grant generic message signing or native spending.
 The optional Nano wallet has its own public native address for receiving Nano
