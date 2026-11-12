@@ -675,10 +675,12 @@ for (const asset of ['ATTO','XNO']) {
     try {
       const args={asset,amountAtomic,requestId,network,expectedMarketplaceOrigin:http.origin,expectedAccountId:accountId};
       const result=await client.callTool({name:'marketplace_fund',arguments:args});
-      assert.equal(calls.create,1); assert.equal(calls.signatures.length,1);
+      const diagnostic=JSON.stringify({errorCode:result.structuredContent?.error?.code??null,
+        walletCalls:wallet?await wallet.calls():null});
+      assert.equal(calls.create,1,diagnostic); assert.equal(calls.signatures.length,1,diagnostic);
       if(scenario.name!=='exact pending') {
         assert.equal(result.isError,true,JSON.stringify(result.structuredContent));
-        assert.ok(['PAYMENT_BINDING','FUNDING_BINDING'].includes(result.structuredContent.error.code));
+        assert.ok(['PAYMENT_BINDING','FUNDING_BINDING'].includes(result.structuredContent.error.code),diagnostic);
         const store=await MarketplaceProfileStore.open(home);
         try {
           const mutation=store.getMutationByRequestId('agent',requestId);
