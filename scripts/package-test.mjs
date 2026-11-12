@@ -1,14 +1,20 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat } from 'node:fs/promises';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { tmpdir } from '../test/support/temporary-directory.mjs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
 import { reportPlatformExclusions, selectPlatformTests } from './test-platform.mjs';
 
 const execute = promisify(execFile);
+// Test files own separate profiles, servers and credential fixtures. Cases within
+// each file remain sequential, including same-wallet recovery assertions.
+const testFileOptions = process.platform === 'win32'
+  ? ['--test-concurrency=3', '--test-reporter=tap']
+  : ['--test-concurrency=1'];
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const npm = process.env.npm_execpath;
 if (!npm) throw new Error('Run package verification through npm run test:package.');
@@ -132,6 +138,8 @@ async function verifyCli(directory, prefix, noMcp) {
   assert.deepEqual(published.bin, { atto: 'dist/cli/main.js' });
   assert.equal(published.scripts, undefined);
   assert.equal(published.devDependencies, undefined);
+  await assert.rejects(stat(join(directory, 'dist/storage/windows-private-filesystem')), { code: 'ENOENT' },
+    'Windows support must not require a permission executable.');
   const require = createRequire(join(directory, 'package.json'));
   const expectedCommonsVersion = process.env.ATTO_COMMONS_LOCAL_VERSION ?? cliManifest.dependencies['@attocash/commons-core'];
   assert.equal(published.dependencies['@attocash/commons-core'], expectedCommonsVersion,
@@ -220,12 +228,13 @@ try {
   assert.equal(Object.keys(mcp.dependencies).some(name => name.startsWith('@attocash/commons-')), false);
   assert.equal(Object.values(mcp.dependencies).some(value => /^(?:file:|workspace:|link:)/.test(value)), false);
   await assert.rejects(stat(join(mcpDirectory, 'dist', 'application')), { code: 'ENOENT' });
-  const tests = await execute(process.execPath, ['--test', '--test-concurrency=1',
+  const tests = await execute(process.execPath, ['--test', ...testFileOptions,
     join(root, 'atto-cli/test/cli.test.mjs'), join(root, 'atto-cli/test/core.test.mjs'), join(root, 'atto-cli/test/send-failure.test.mjs'),
     join(root, 'atto-cli/test/cli-help.test.mjs'), join(root, 'atto-cli/test/cli-output.test.mjs'), join(root, 'atto-cli/test/wallet-lifecycle.test.mjs'), join(root, 'atto-cli/test/wallet-reset.test.mjs'),
     join(root, 'atto-cli/test/usability.test.mjs'), join(root, 'atto-cli/test/labels.test.mjs'), join(root, 'atto-cli/test/approvals.test.mjs'),
     join(root, 'atto-cli/test/doctor.test.mjs'), join(root, 'atto-mcp/test/doctor.test.mjs'),
     join(root, 'atto-cli/test/message-signing.test.mjs'),
+    join(root, 'atto-cli/test/private-permissions.test.mjs'),
     join(root, 'atto-cli/test/marketplace-wallet-setup.test.mjs'),
     join(root, 'atto-cli/test/marketplace-wallet-inspection.test.mjs'),
     join(root, 'atto-cli/test/marketplace-private-recovery.test.mjs'),
@@ -245,6 +254,11 @@ try {
   process.stdout.write(tests.stdout);
   const marketplaceSelection = selectPlatformTests([
     join(root, 'atto-marketplace-mcp/test/platform-support.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/approval-files.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/approval-terminal-recovery.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/payment-handoff-files.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/wallet-preferences.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/stdio-submission-files.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/marketplace-api-signer.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/node-wallet-host.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/wallet-results.test.mjs'),
@@ -260,14 +274,14 @@ try {
     join(root, 'atto-marketplace-mcp/test/shared-recovery-onboarding.integration.test.mjs'),
   ]);
   reportPlatformExclusions(marketplaceSelection.excluded);
-  const marketplaceTests = await execute(process.execPath, ['--test', '--test-concurrency=1', ...marketplaceSelection.included], {
+  const marketplaceTests = await execute(process.execPath, ['--test', ...testFileOptions, ...marketplaceSelection.included], {
     cwd: temporary, timeout: 180_000, maxBuffer: 8 * 1024 * 1024,
     env: { ...process.env, ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR: marketplaceDirectory, ATTO_TEST_CLI_PACKAGE_DIR: cliDirectory,
       ...(process.platform !== 'win32' ? { ATTO_TEST_MARKETPLACE_MCP_BIN: join(pairModules, '.bin', 'atto-marketplace-mcp') } : {}) },
   });
   process.stdout.write(marketplaceTests.stdout);
   process.stdout.write(process.platform === 'win32'
-    ? 'Installed Atto pair passed; Marketplace portable contracts and Windows storage rejection passed.\n'
+    ? 'Installed Atto pair and native Windows Marketplace workflows passed: private storage, credentials, recovery and stdio.\n'
     : 'Installed Atto pair and Marketplace MCP passed: stdio tools, controller setup, signer failures, refresh recovery, signing, and payment journals.\n');
   // npm exec is the npx runner. Exercise all three tested release artifacts.
   const npxHelp = await runNpm(['exec', '--yes', '--prefer-offline', '--package', cliArtifact, '--package', mcpArtifact, '--', 'atto-mcp', 'setup', '--help'], temporary);
@@ -310,7 +324,7 @@ try {
   assert.equal(mcpVersion.stdout.trim(), mcpManifest.version);
   const marketplaceHelpGlobal = await execute(process.execPath, [join(globalModules, '@attocash/marketplace-mcp/dist/main.js'), '--help'], { cwd: temporary, timeout: 15_000 });
   assert.match(marketplaceHelpGlobal.stdout, /Usage: atto-marketplace-mcp/);
-  const detached = await execute(process.execPath, ['--test', '--test-concurrency=1', '--test-name-pattern=detached|background|stop retains|unavailable credentials|dead owner|real CLI send|lost receive|startup acknowledges',
+  const detached = await execute(process.execPath, ['--test', ...testFileOptions, '--test-name-pattern=detached|background|stop retains|unavailable credentials|dead owner|real CLI send|lost receive|startup acknowledges',
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'), join(root, 'atto-cli/test/payments.test.mjs'),
   ], { cwd: temporary, timeout: 120_000, maxBuffer: 4 * 1024 * 1024,
     env: { ...process.env, ATTO_TEST_CLI_PACKAGE_DIR: join(globalModules, '@attocash/cli') } });

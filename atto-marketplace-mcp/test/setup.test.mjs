@@ -577,6 +577,20 @@ async function listen(handler) {
 async function readBody(request){let value='';for await(const chunk of request)value+=chunk;return value?JSON.parse(value):null;}
 function json(res,status,body){res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(body));}
 
+test('Unix configured JavaScript host paths preserve their executable interpreter options', {skip:process.platform==='win32'}, async t=>{
+  // Given an executable .js host whose shebang supplies a required Node condition.
+  const home=await mkdtemp(join(tmpdir(),'marketplace-executable-host-'));
+  t.after(()=>rm(home,{recursive:true,force:true}));
+  const env=await fakeAttoSigner(home);
+  const {callWallet}=await import(pathToFileURL(join(packageDirectory,'dist/wallet-process.js')).href);
+  const message='Synthetic exact controller proof';
+  // When the configured host is launched through the real private stdio boundary.
+  const result=await callWallet(env,{asset:'ATTO',operation:'controller.sign',input:{index:7,message}});
+  // Then its interpreter option is retained and the expected fixture key signs the exact request.
+  assert.equal(result.address,controllerAddress);
+  assert.equal(result.signature,await signAttoMessage(message));
+});
+
 async function fakeAttoSigner(home, requireKeyringSession=false) {
   const walletDir=join(home,'atto-wallet');
   await mkdir(walletDir,{mode:0o700});
@@ -594,6 +608,7 @@ async function fakeAttoSigner(home, requireKeyringSession=false) {
     const signer=await AttoPrivateKey.Companion.parse(${JSON.stringify(testAttoPrivateKey)}).toSigner();
     const server=new McpServer({name:'test-atto-wallet',version:'1.0.0'});
     if(process.argv.slice(2).length!==0)process.exit(8);
+    if(process.platform!=='win32'&&!process.execArgv.includes('--conditions=marketplace-fixture'))process.exit(7);
     server.registerTool('wallet_call',{inputSchema:{asset:z.literal('ATTO'),operation:z.literal('controller.sign'),
       input:z.strictObject({index:z.number().int(),message:z.string()})}},async ({input:{index,message}})=>{
       const messageToSign=process.env.COMMONS_TEST_BAD_SIGNATURE==='1'?message+String.fromCharCode(10):message;
@@ -603,8 +618,11 @@ async function fakeAttoSigner(home, requireKeyringSession=false) {
     });
     await server.connect(new StdioServerTransport());
   `,{mode:0o600});
-  const command=join(home,'fake-atto-wallet');
-  await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${serverFile}'\n`,{mode:0o700});
+  let command=serverFile;
+  if(process.platform!=='win32') {
+    command=join(home,'fake-atto-wallet-command.js');
+    await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' --conditions=marketplace-fixture '${serverFile}'\n`,{mode:0o700});
+  }
   return {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:walletDir,MARKETPLACE_MCP_WALLET_HOST_COMMAND:command};
 }
 
@@ -629,8 +647,11 @@ async function fakeNanoSigner(home,expected) {
       });
     await server.connect(new StdioServerTransport());
   `,{mode:0o600});
-  const command=join(home,'fake-nano-signer');
-  await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`,{mode:0o700});
+  let command=script;
+  if(process.platform!=='win32') {
+    command=join(home,'fake-nano-signer');
+    await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`,{mode:0o700});
+  }
   return {MARKETPLACE_MCP_WALLET_HOST_COMMAND:command};
 }
 
@@ -779,10 +800,11 @@ test('reauthentication rejects authority-changing flags and scoped-key profiles 
   }finally{store.close();await rm(home,{recursive:true,force:true});}
 });
 
-test('a late failed login cannot replace a newer reauthentication challenge',async()=>{
-  // Given two reauthentication attempts whose session acknowledgements are controlled independently.
-  let challenges=0,sessions=0,releaseFirst,releaseSecond;
+test('a late completed login failure cannot replace a newer submitting reauthentication challenge',async()=>{
+  // Given a real first HTTP failure whose completed response is delivered after a newer login starts.
+  let challenges=0,sessions=0,releaseFirst,releaseSecond,firstBodyCompletedAt,firstCallbackReleasedAt;
   let firstEntered,secondEntered;const firstWaiting=new Promise(resolve=>firstEntered=resolve),secondWaiting=new Promise(resolve=>secondEntered=resolve);
+  const firstCallbackWaiting=new Promise(resolve=>{releaseFirst=()=>{firstCallbackReleasedAt=performance.now();resolve();};});
   const http=await listen(async(req,res)=>{
     await readBody(req);
     if(req.url.endsWith('challenges')){
@@ -790,25 +812,45 @@ test('a late failed login cannot replace a newer reauthentication challenge',asy
       challenge.challengeId=`55555555-5555-4555-8555-${String(++challenges).padStart(12,'0')}`;
       challenge.message=challenge.message.replace(old,challenge.challengeId);return json(res,200,challenge);
     }
-    if(++sessions===1){releaseFirst=()=>{if(!res.writableEnded&&!res.destroyed)json(res,503,{error:'signer_unavailable'});};firstEntered();}
-    else{releaseSecond=()=>{if(!res.writableEnded&&!res.destroyed)json(res,200,sessionResponse());};secondEntered();}
+    if(++sessions===1)return json(res,503,{error:'signer_unavailable'});
+    releaseSecond=()=>{if(!res.writableEnded&&!res.destroyed)json(res,200,sessionResponse());};secondEntered();
   });
   const home=await mkdtemp(join(tmpdir(),'marketplace-reauth-concurrent-'));const env=await fakeAttoSigner(home);let store=await MarketplaceProfileStore.open(home);
+  const originalFetch=globalThis.fetch;let firstResponse=true,first,second;
+  globalThis.fetch=async(input,options)=>{
+    const hold=firstResponse&&String(input)===`${http.origin}/v1/agent/auth/sessions`&&options?.method==='POST';
+    if(hold)firstResponse=false;
+    const response=await originalFetch(input,options);
+    if(!hold)return response;
+    // Finish the real network body within its normal deadline; hold only callback delivery.
+    // Keeping the socket pending would make local approval work consume the first request's HTTP budget.
+    const body=await response.arrayBuffer();
+    assert.equal(response.status,503);assert.deepEqual(JSON.parse(Buffer.from(body).toString('utf8')),{error:'signer_unavailable'});
+    firstBodyCompletedAt=performance.now();firstEntered();await firstCallbackWaiting;
+    const completed=new Response(body,{status:response.status,statusText:response.statusText,headers:new Headers(response.headers)});
+    Object.defineProperty(completed,'url',{value:response.url});return completed;
+  };
   try{
     store.createProfile(reauthProfile(http.origin));store.close();store=undefined;
     const args=['--profile','original','--home',home,'--reauthenticate'];
     await withoutSetupOutput(async()=>{
-      const first=runApprovedSetup(args,env).then(()=>null,error=>error);await firstWaiting;
-      const second=runApprovedSetup(args,env);await secondWaiting;
+      first=runApprovedSetup(args,env).then(()=>null,error=>error);await firstWaiting;
+      assert.equal(Number.isFinite(firstBodyCompletedAt),true);assert.equal(firstCallbackReleasedAt,undefined);
+      second=runApprovedSetup(args,env);await secondWaiting;
       store=await MarketplaceProfileStore.open(home);const newer=store.getSetupState('original');store.close();store=undefined;
-      // When the superseded request fails while the newer request is still submitting.
+      assert.equal(newer.state,'LOGIN_SUBMITTING');
+      // When the superseded definitive failure is delivered while the newer login is still submitting.
       releaseFirst();assert.equal((await first).code,'SIGNER_UNAVAILABLE');
+      assert.ok(firstBodyCompletedAt<=firstCallbackReleasedAt);
       store=await MarketplaceProfileStore.open(home);assert.deepEqual(store.getSetupState('original'),newer);store.close();store=undefined;
       releaseSecond();await second;
     });
     // Then the newer login completes without its challenge or session being overwritten.
     store=await MarketplaceProfileStore.open(home);assert.equal(store.getProfile('original').accessToken,'access-session-token-secret');assert.equal(store.getSetupState('original'),undefined);
-  }finally{releaseFirst?.();releaseSecond?.();store?.close();await stopSetupServer(http);await rm(home,{recursive:true,force:true});}
+  }finally{
+    globalThis.fetch=originalFetch;releaseFirst?.();releaseSecond?.();
+    await Promise.allSettled([first,second]);store?.close();await stopSetupServer(http);await rm(home,{recursive:true,force:true});
+  }
 });
 
 test('guided reauthentication keeps the desktop keyring environment and original saved wallet',

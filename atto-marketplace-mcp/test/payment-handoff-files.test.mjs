@@ -1,10 +1,11 @@
+import { assertPrivate, setPermissions } from './support/private-permissions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile, chmod } from 'node:fs/promises';
+import { link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import {
-  ensurePaymentHandoffDirectory, readXnoPaymentRequest, readXnoPaymentResponse,
+  ensurePaymentHandoffDirectory, readXnoPaymentRequest, readXnoPaymentResponse, readXnoPaymentResponseForRecovery,
   writeXnoPaymentRequest, writeXnoPaymentResponse,
 } from '../dist/payment-handoff-files.js';
 import { createXnoPaymentRequest } from '../dist/payment-handoff.js';
@@ -23,10 +24,10 @@ test('typed XNO files are atomically private and immutable for the configured ha
     const response = makeResponse(request);
     assert.deepEqual(writeXnoPaymentResponse(directory, request.handoffId, response), response);
 
-    // Then only complete 0600 files are visible in the 0700 directory and retries preserve exact bytes.
-    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    // Then only complete private files are visible in the private directory and retries preserve exact bytes.
+    assertPrivate(directory, 'directory');
     for (const suffix of ['request', 'response']) {
-      assert.equal((await stat(join(directory, `${request.handoffId}.${suffix}.json`))).mode & 0o777, 0o600);
+      assertPrivate(join(directory, `${request.handoffId}.${suffix}.json`), 'file');
     }
     assert.deepEqual(await readdir(directory), [`${request.handoffId}.request.json`, `${request.handoffId}.response.json`]);
     assert.deepEqual(readXnoPaymentResponse(directory, request.handoffId), response);
@@ -39,25 +40,29 @@ test('payment handoff reads reject symlinked directories, files, and permissive 
   // Given a private directory, an immutable request, and separate attacker-controlled paths.
   const parent = await mkdtemp(join(tmpdir(), 'atto-marketplace-mcp-payment-links-'));
   const target = join(parent, 'target');
-  const link = join(parent, 'link');
+  const directoryAlias = join(parent, 'link');
   const outside = join(parent, 'outside.json');
   await mkdir(target, { mode: 0o700 });
   await writeFile(outside, '{}\n', { mode: 0o600 });
-  await symlink(target, link);
+  await symlink(target, directoryAlias, process.platform === 'win32' ? 'junction' : 'dir');
   const request = makeRequest();
   try {
     // When callers choose a symlinked handoff directory, or replace a fixed file with a symlink, reads fail closed.
-    assert.throws(() => ensurePaymentHandoffDirectory(link));
+    assert.throws(() => ensurePaymentHandoffDirectory(directoryAlias));
     writeXnoPaymentRequest(target, request);
     const responsePath = join(target, `${request.handoffId}.response.json`);
-    await symlink(outside, responsePath);
+    // Standard Windows users exercise the same unsafe file-alias refusal with an unknown hardlink.
+    if (process.platform === 'win32') await link(outside,responsePath);
+    else await symlink(outside, responsePath);
     assert.throws(() => readXnoPaymentResponse(target, request.handoffId));
 
     // Then a handoff file with group or world permissions is rejected before its contents are read.
     await rm(responsePath);
     await writeFile(responsePath, '{}\n', { mode: 0o600 });
-    await chmod(responsePath, 0o644);
-    assert.throws(() => readXnoPaymentResponse(target, request.handoffId));
+    if (process.platform !== 'win32') {
+      await setPermissions(responsePath, 0o644);
+      assert.throws(() => readXnoPaymentResponse(target, request.handoffId));
+    }
   } finally { await rm(parent, { recursive: true, force: true }); }
 });
 
@@ -100,3 +105,78 @@ function makeResponse(request, overrides = {}) {
     paymentSignature: Buffer.from(JSON.stringify(payload)).toString('base64'), ...overrides,
   };
 }
+
+
+test('payment handoff reads reject hardlinked evidence and recover the same immutable request after alias removal', async () => {
+  // Given one saved request and an extra hardlink to the same native file identity.
+  const directory = await mkdtemp(join(tmpdir(), "marketplace payment O'Brien-"));
+  const request = makeRequest();
+  try {
+    writeXnoPaymentRequest(directory, request);
+    const path = join(directory, `${request.handoffId}.request.json`);
+    const alias = join(directory, 'unexpected-alias.json');
+    await link(path, alias);
+    // When the request has more than its single intended directory entry, recovery fails closed.
+    assert.throws(() => readXnoPaymentRequest(directory, request.handoffId), {code:'PAYMENT_FILE'});
+    await rm(alias);
+    // Then recovery and an identical retry still use the original opaque handle and exact content.
+    assert.deepEqual(readXnoPaymentRequest(directory, request.handoffId), request);
+    assert.deepEqual(writeXnoPaymentRequest(directory, request), request);
+  } finally { await rm(directory, {recursive:true,force:true}); }
+});
+
+
+for (const publisher of ['request','response','nano-response']) {
+  test(`payment ${publisher} recovers only its exact interrupted publication and preserves immutable retries`, async () => {
+    // Given the exact file identity and known temp name left after link() but before unlink().
+    const directory = await mkdtemp(join(tmpdir(), 'marketplace-payment-publication-'));
+    const request = makeRequest(), response = makeResponse(request);
+    try {
+      writeXnoPaymentRequest(directory,request);
+      const kind = publisher === 'request' ? 'request' : 'response';
+      if (kind === 'response') writeXnoPaymentResponse(directory,request.handoffId,response);
+      const path = join(directory, `${request.handoffId}.${kind}.json`), bytes = await readFile(path), original = await lstat(path);
+      const temporary = join(directory, publisher === 'nano-response' ? `.nano-${'c'.repeat(32)}.tmp`
+        : `.${request.handoffId}.${kind}.${'d'.repeat(24)}.tmp`);
+      await link(path,temporary);
+      // When immutable retry or historical recovery consumes that committed request/response.
+      const recovered = kind === 'request' ? writeXnoPaymentRequest(directory,request)
+        : readXnoPaymentResponseForRecovery(directory,request.handoffId,request);
+      // Then recovery removes only the verified link and retains the original payment content and inode.
+      assert.deepEqual(recovered,kind === 'request' ? request : response);
+      await assert.rejects(lstat(temporary),{code:'ENOENT'});
+      assert.equal((await lstat(path)).ino,original.ino);
+      assert.equal((await lstat(path)).nlink,1);
+      assert.deepEqual(await readFile(path),bytes);
+      if (kind === 'response') assert.deepEqual(writeXnoPaymentResponse(directory,request.handoffId,response),response);
+    } finally { await rm(directory,{recursive:true,force:true}); }
+  });
+}
+
+test('payment handoffs normalize existing POSIX directories and accept owner-readonly input', {skip:process.platform === 'win32'}, async () => {
+  // Given an existing handoff directory with the original mutable setup permissions.
+  const parent = await mkdtemp(join(tmpdir(), 'atto-payment-mode-compatibility-'));
+  const directory = join(parent, 'handoffs');
+  await mkdir(directory,{mode:0o755});
+  await setPermissions(directory,0o755,'directory');
+  const request = makeRequest();
+  try {
+    // When setup and an external payer leave a valid owner-readonly request.
+    ensurePaymentHandoffDirectory(directory);
+    assertPrivate(directory,'directory');
+    writeXnoPaymentRequest(directory,request);
+    const path = join(directory, `${request.handoffId}.request.json`);
+    const before = await readFile(path);
+    const temporary = join(directory, `.${request.handoffId}.request.${'b'.repeat(24)}.tmp`);
+    await link(path,temporary);
+    await setPermissions(path,0o400);
+    await setPermissions(directory,0o500,'directory');
+    // Then the original read normalizes its directory without rejecting or changing the private input bytes.
+    assert.deepEqual(readXnoPaymentRequest(directory,request.handoffId),request);
+    assertPrivate(directory,'directory');
+    assert.equal((await lstat(path)).mode & 0o777,0o400);
+    assert.deepEqual(await readFile(path),before);
+    assert.equal((await lstat(path)).nlink,1);
+    await assert.rejects(lstat(temporary),{code:'ENOENT'});
+  } finally { await rm(parent,{recursive:true,force:true}); }
+});

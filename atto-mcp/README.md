@@ -28,7 +28,10 @@ You need **Node.js 24.15.0 or newer**, npm, and an accessible OS password store:
 | --- | --- |
 | Linux | `secret-tool` (usually `libsecret-tools`), an unlocked Secret Service provider such as GNOME Keyring or KWallet, and your desktop D-Bus session |
 | macOS | Keychain access for the OS user running the server |
-| Windows | Credential Manager access for the OS user running the server |
+| Windows | Credential Manager access for the OS user running the server and the [Microsoft Visual C++ v14 runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) matching Node.js architecture |
+
+Windows uses the CLI engine's ordinary Node.js filesystem support and per-user
+profile permissions. Recovery material stays in Credential Manager.
 
 There is no plaintext recovery-phrase fallback. Run setup and your MCP client
 in the local OS user session that can access this store. A hosted client needs

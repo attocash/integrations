@@ -1,3 +1,5 @@
+import { syncPublishedPrivateFile } from './private-file-sync.js';
+import { securePrivatePermissions, syncPrivateDirectory } from '@attocash/cli/internal-marketplace';
 import { closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, openSync, readSync, realpathSync, statSync, unlinkSync, writeSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
@@ -68,7 +70,10 @@ export function readLocalSource(configuredRoot: string | undefined, rawPath: str
 }
 
 export function resolveDownloadDestination(configuredRoot: string | undefined, rawPath: string): string {
-  const root = requireFilesDirectory(configuredRoot);
+  return downloadDestination(requireFilesDirectory(configuredRoot), rawPath);
+}
+
+function downloadDestination(root: string, rawPath: string): string {
   const target = resolveBoundedPath(root, rawPath, false);
   try {
     const info = lstatSync(target);
@@ -82,7 +87,7 @@ export function resolveDownloadDestination(configuredRoot: string | undefined, r
 
 export async function publishVerifiedResponse(configuredRoot: string | undefined, rawPath: string,
   response: Response, manifest: Pick<ImmutableFileManifestEntry, 'byteLength' | 'sha256'>): Promise<string> {
-  const target = resolveDownloadDestination(configuredRoot, rawPath);
+  const target = checkedDownloadDestination(configuredRoot, rawPath);
   if (!Number.isSafeInteger(manifest.byteLength) || manifest.byteLength < 1 || manifest.byteLength > MAX_PRIVATE_FILE_BYTES
     || !/^[0-9a-f]{64}$/.test(manifest.sha256)) throw protocolError('The submission file manifest is invalid.');
   const declared = response.headers.get('Content-Length');
@@ -93,7 +98,6 @@ export async function publishVerifiedResponse(configuredRoot: string | undefined
   if (!response.body) throw integrityError('Marketplace returned no bytes for the private file.');
 
   const parent = dirname(target);
-  assertDirectoryInside(requireFilesDirectory(configuredRoot), parent);
   const temporary = join(parent, `.${basename(target)}.${randomBytes(12).toString('hex')}.tmp`);
   let descriptor: number | undefined;
   const reader = response.body.getReader();
@@ -102,8 +106,8 @@ export async function publishVerifiedResponse(configuredRoot: string | undefined
   const deadline = Date.now() + MAX_TRANSFER_MS;
   try {
     descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    const mode = fstatSync(descriptor).mode;
-    if ((mode & 0o077) !== 0) throw pathError();
+    // The destination parent was checked before exclusive file creation.
+    if (process.platform !== 'win32') securePrivatePermissions(temporary, 'file');
     for (;;) {
       if (Date.now() >= deadline) throw integrityError('The private download exceeded its 15-minute time limit.');
       const { done, value } = await reader.read();
@@ -124,11 +128,12 @@ export async function publishVerifiedResponse(configuredRoot: string | undefined
 
     // Re-check the configured root and destination immediately before the
     // atomic hard-link publication; linkSync fails if another file appeared.
-    const rechecked = resolveDownloadDestination(configuredRoot, rawPath);
+    const rechecked = checkedDownloadDestination(configuredRoot, rawPath);
     if (rechecked !== target) throw pathError();
     linkSync(temporary, target);
     unlinkSync(temporary);
-    syncDirectory(parent);
+    syncPublishedPrivateFile(target);
+    syncPrivateDirectory(parent);
     return target;
   } catch (error) {
     if (error instanceof MarketplaceApiError) throw error;
@@ -160,7 +165,8 @@ function resolveBoundedPath(root: string, rawPath: string, mustExist: boolean): 
   let current = root;
   for (let index = 0; index < parts.length; index += 1) {
     const part = parts[index];
-    if (!part || part === '.' || part === '..') throw pathError();
+    if (!part || part === '.' || part === '..' || (process.platform === 'win32'
+      && (/[<>:"|?*]/.test(part) || /[. ]$/.test(part) || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part)))) throw pathError();
     current = join(current, part);
     try {
       const info = lstatSync(current);
@@ -185,11 +191,20 @@ function assertDirectoryInside(root: string, directory: string): void {
   if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) throw pathError();
 }
 
+/** Recheck download paths at both sides of the asynchronous transfer. */
+function checkedDownloadDestination(configuredRoot: string | undefined, rawPath: string): string {
+  const root = requireFilesDirectory(configuredRoot);
+  const target = downloadDestination(root, rawPath);
+  const parent = dirname(target);
+  assertDirectoryInside(root, parent);
+  return target;
+}
+
 function realDirectory(path: string): string {
   const canonical = realpathSync(path);
   const info = statSync(canonical);
-  if (!info.isDirectory() || (info.mode & 0o077) !== 0
-    || (process.getuid !== undefined && info.uid !== process.getuid())) throw pathError();
+  if (!info.isDirectory() || (process.platform !== 'win32' && ((info.mode & 0o077) !== 0
+    || (process.getuid !== undefined && info.uid !== process.getuid())))) throw pathError();
   return canonical;
 }
 
@@ -207,12 +222,6 @@ function writeAll(descriptor: number, bytes: Uint8Array): void {
     if (written < 1) throw pathError();
     offset += written;
   }
-}
-
-function syncDirectory(path: string): void {
-  let descriptor: number | undefined;
-  try { descriptor = openSync(path, constants.O_RDONLY); fsyncSync(descriptor); }
-  finally { if (descriptor !== undefined) closeSync(descriptor); }
 }
 
 function pathError(): MarketplaceApiError { return new MarketplaceApiError('FILES_PATH', 'The explicit local file path is unavailable or escapes the configured private files directory.'); }

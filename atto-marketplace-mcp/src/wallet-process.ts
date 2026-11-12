@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { offchainVerify } from '@attocash/atto-marketplace-nano-adapter/protocol';
 import type { WalletRequest } from './wallet-host.js';
@@ -95,12 +96,13 @@ async function callAttoTool(env: NodeJS.ProcessEnv, name: string, args: Record<s
 /** Both networks cross the same private Node stdio boundary. */
 export async function callWallet(env: NodeJS.ProcessEnv, request: WalletRequest): Promise<Record<string, unknown>> {
   const configured = env.MARKETPLACE_MCP_WALLET_HOST_COMMAND;
-  if (configured && (!configured.startsWith('/') || configured.length>4096 || /[\0\r\n]/.test(configured))) {
+  if (configured && (!isAbsolute(configured) || configured.length>4096 || /[\0\r\n]/.test(configured))) {
     throw new ProfileError('WALLET_SETUP_REQUIRED','Use an absolute path for the private wallet host.');
   }
   const client = new Client({name:'marketplace-managed-wallet',version:'0.1.0'});
-  const transport = new StdioClientTransport({command:configured??process.execPath,
-    args:configured?[]:[fileURLToPath(new URL('./main.js',import.meta.url)),'--internal-wallet-host'],
+  const nodeScript = process.platform === 'win32' && configured !== undefined && /\.[cm]?js$/i.test(configured);
+  const transport = new StdioClientTransport({command:nodeScript?process.execPath:configured??process.execPath,
+    args:configured?(nodeScript?[configured]:[]):[fileURLToPath(new URL('./main.js',import.meta.url)),'--internal-wallet-host'],
     env:childEnvironment(env),stderr:'pipe'});
   try {
     await client.connect(transport);
@@ -195,7 +197,7 @@ function onlyKeys(value:Record<string,unknown>,keys:string[]):boolean {
 function childEnvironment(env: NodeJS.ProcessEnv): Record<string,string> {
   const result:Record<string,string>={};
   for(const [key,value] of Object.entries(env)) {
-    if(value!==undefined && (['PATH','HOME','USER','LOGNAME','TMPDIR','XDG_CONFIG_HOME','XDG_DATA_HOME',
+    if(value!==undefined && (['PATH','Path','PATHEXT','SystemRoot','SYSTEMROOT','WINDIR','USERPROFILE','APPDATA','LOCALAPPDATA','TEMP','TMP','COMSPEC','HOME','USER','LOGNAME','TMPDIR','XDG_CONFIG_HOME','XDG_DATA_HOME',
       'XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS','MARKETPLACE_MCP_HOME','MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR',
       'MARKETPLACE_MCP_NANO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR','MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR'].includes(key)
       || key.startsWith('ATTO_') || key.startsWith('COMMONS_'))) result[key]=value;

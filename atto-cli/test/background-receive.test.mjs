@@ -82,7 +82,7 @@ test('stop retains singleton ownership until the current publication finishes an
   assert.equal(receiveCount(f), 1);
 });
 
-test('unavailable credentials are reported and background start grants no MCP spending access', { timeout: 20_000 }, async t => {
+test('unavailable credentials are reported and background start grants no MCP spending access', { timeout: process.platform === 'win32' ? 60_000 : 20_000 }, async t => {
   // Given pending funds and no accessible password store in the detached child.
   const f = await fixture(t, [10, 0]);
   await f.app.call('send', f.request('unavailable-credentials', '1', { destination: f.addresses[1].address }));
@@ -162,7 +162,7 @@ test('a dead owner is stopped, restored intent does not launch, and stale tokens
   await until(() => controller(f).status().state === 'stopped');
 });
 
-test('a lost receive publication response recovers without another publication', { timeout: 20_000 }, async t => {
+test('a lost receive publication response recovers without another publication', { timeout: process.platform === 'win32' ? 60_000 : 20_000 }, async t => {
   // Given a pending send and a node that commits the receive but loses its response.
   const f = await fixture(t, [10, 0]);
   const env = await credentialEnvironment(t, f.mnemonic());
@@ -171,7 +171,11 @@ test('a lost receive publication response recovers without another publication',
   await enable(f);
   // When the background receiver retries the unresolved receive journal entry.
   await cli(f.directory, ['wallet', 'receive', '--background'], env);
-  await until(() => controller(f).status().lastError !== null);
+  // Begin the reconciliation deadline only after the intended committed-but-lost
+  // publication, rather than an unrelated startup lookup failure. Short-circuit
+  // status probing until the candidate and confirmed fixture RECEIVE exist.
+  await until(() => Boolean(f.app.store.get(`receive.LOCAL.${sent.hash}`)?.blockHash)
+    && receiveCount(f) === 1 && controller(f).status().lastError !== null);
   await until(() => Boolean(f.app.store.get(`receive.LOCAL.${sent.hash}`)?.result), 15_000);
   await until(() => controller(f).status().lastError === null);
   // Then canonical publication evidence settles the original receive exactly once.

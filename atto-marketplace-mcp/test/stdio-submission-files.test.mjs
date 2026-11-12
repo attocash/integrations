@@ -2,12 +2,13 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { MarketplaceProfileStore } from '../dist/profile-store.js';
+import { readLocalSource } from '../dist/submission-files.js';
 
 const accountId = '11111111-1111-4111-8111-111111111111';
 const agentId = '22222222-2222-4222-8222-222222222222';
@@ -31,12 +32,22 @@ test('stdio submission file tools upload only selected bounded paths and verify 
   const root = await mkdtemp(join(tmpdir(), 'atto-marketplace-mcp-private-files-'));
   const home = join(root, 'profile');
   const filesDirectory = join(root, 'files');
-  const outside = join(root, 'outside.bin');
+  const outsideDirectory = join(root,'outside-files');
+  await mkdir(outsideDirectory,{mode:0o700});
+  const outside = join(outsideDirectory,'outside.bin');
+  const sourceAlias = process.platform === 'win32' ? 'outside-link/outside.bin' : 'outside-link.bin';
+  const destinationAlias = process.platform === 'win32' ? 'downloads/outside-target/outside.bin' : 'downloads/outside-target.bin';
   await mkdir(join(filesDirectory, 'downloads'), {recursive:true,mode:0o700});
   await writeFile(join(filesDirectory, 'source.txt'), bytes, {mode:0o600});
   await writeFile(outside, bytes, {mode:0o600});
-  await symlink(outside, join(filesDirectory, 'outside-link.bin'));
-  await symlink(outside, join(filesDirectory, 'downloads', 'outside-target.bin'));
+  if (process.platform === 'win32') {
+    // Directory junctions need no elevation and preserve the real outside-file escape attempts.
+    await symlink(outsideDirectory,join(filesDirectory,'outside-link'),'junction');
+    await symlink(outsideDirectory,join(filesDirectory,'downloads','outside-target'),'junction');
+  } else {
+    await symlink(outside,join(filesDirectory,'outside-link.bin'));
+    await symlink(outside,join(filesDirectory,'downloads','outside-target.bin'));
+  }
 
   const requests = [];
   let uploadState = 'PENDING_UPLOAD';
@@ -142,7 +153,7 @@ test('stdio submission file tools upload only selected bounded paths and verify 
       destinationPath:'../escape.txt'}});
     assert.equal(traversal.isError,true);
     assert.equal(JSON.parse(contentText(traversal)).error.code,'FILES_PATH');
-    const symlinkSource = await client.callTool({name:'marketplace_submission_file_upload',arguments:{sourcePath:'outside-link.bin',
+    const symlinkSource = await client.callTool({name:'marketplace_submission_file_upload',arguments:{sourcePath:sourceAlias,
       requestId:'99999999-9999-4999-8999-999999999994'}});
     assert.equal(symlinkSource.isError,true);
     assert.equal(JSON.parse(contentText(symlinkSource)).error.code,'FILES_PATH');
@@ -151,7 +162,7 @@ test('stdio submission file tools upload only selected bounded paths and verify 
     assert.equal(existingTarget.isError,true);
     assert.equal(JSON.parse(contentText(existingTarget)).error.code,'FILES_DESTINATION_EXISTS');
     const symlinkTarget = await client.callTool({name:'marketplace_submission_file_download',arguments:{taskId,submissionVersion:2,fileId,
-      destinationPath:'downloads/outside-target.bin'}});
+      destinationPath:destinationAlias}});
     assert.equal(symlinkTarget.isError,true);
     assert.equal(JSON.parse(contentText(symlinkTarget)).error.code,'FILES_PATH');
     assert.equal(requests.length,requestCount);
@@ -377,3 +388,21 @@ function json(res,status,body) {
 function contentText(result) {
   return result.content?.filter(part => part.type === 'text').map(part => part.text).join('\n') ?? '';
 }
+
+test('selected submission sources retain POSIX owner-readonly file and directory compatibility', {skip:process.platform === 'win32'}, async () => {
+  // Given one explicitly selected source beneath an owner-only read-execute directory.
+  const root = await mkdtemp(join(tmpdir(), 'atto-submission-mode-compatibility-'));
+  const source = join(root,'source.txt');
+  await writeFile(source,bytes,{mode:0o400});
+  await chmod(source,0o400);
+  await chmod(root,0o500);
+  try {
+    // When the ordinary bounded source reader opens those original private modes.
+    const selected = readLocalSource(root,'source.txt');
+    // Then exact contents and identity are returned without changing either mode.
+    assert.deepEqual(selected.bytes,bytes);
+    assert.equal(selected.sha256,sha256);
+    assert.equal((await stat(root)).mode & 0o777,0o500);
+    assert.equal((await stat(source)).mode & 0o777,0o400);
+  } finally { await chmod(root,0o700); await rm(root,{recursive:true,force:true}); }
+});

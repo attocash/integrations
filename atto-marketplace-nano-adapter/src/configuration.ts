@@ -298,10 +298,12 @@ export async function approveNanoWalletPolicy(options: {
     if (options.terminalConfirmed !== true)
         fail('TERMINAL_REQUIRED');
     const old = loadConfiguration(options.dataDir), config = validateConfiguration({ ...old, grants: options.grants, limits: options.limits });
-    return withPrivateKey(config, () => {
-        if(canonical(loadConfiguration(options.dataDir))!==canonical(old))fail('WALLET_CONFIGURATION_CHANGED');
+    return withPrivateKey(config, async () => {
         const configurationPath = join(options.dataDir, 'wallet.json');
-        replacePrivate(configurationPath, Buffer.from(`${canonical(config)}\n`));
+        const content = Buffer.from(`${canonical(config)}\n`);
+        await replacePrivate(configurationPath, content, () => {
+            if(canonical(loadConfiguration(options.dataDir))!==canonical(old))fail('WALLET_CONFIGURATION_CHANGED');
+        });
         return { address: config.sourceAddress, configurationPath };
     });
 }

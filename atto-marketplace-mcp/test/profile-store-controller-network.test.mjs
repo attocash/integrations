@@ -1,3 +1,4 @@
+import { setPermissions } from './support/private-permissions.mjs';
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {mkdir, mkdtemp, readFile, rm, writeFile} from 'node:fs/promises';
@@ -61,6 +62,7 @@ test('an old Marketplace profile schema is rejected without migrating rows or to
   const db=new DatabaseSync(path);
   db.exec("CREATE TABLE profiles(id TEXT PRIMARY KEY,controller_network TEXT NOT NULL CHECK(controller_network='ATTO')); INSERT INTO profiles VALUES('existing','ATTO');");
   db.close();
+  await setPermissions(path,0o600);
   const before=await readFile(path);
   try {
     // When current Marketplace MCP opens the old schema.

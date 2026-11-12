@@ -79,7 +79,7 @@ test('canonical fixture roots do not allow symlinked wallet ancestors', async t 
  // Given a private seed reachable through a symlinked ancestor.
  const root=await mkdtemp(join(tmpdir(),'nano-symlink-parent-'));t.after(()=>rm(root,{recursive:true,force:true}));
  const seedFile=join(root,'seed.hex');writeFileSync(seedFile,'04'.repeat(32)+'\n',{mode:0o600});
- const alias=join(root,'alias');await symlink(root,alias);
+ const alias=join(root,'alias');await symlink(root,alias,process.platform==='win32'?'junction':'dir');
  const options={dataDir:join(root,'wallet'),seedFile:join(alias,'seed.hex'),derivationIndex:0,network:'nano:dev',rpcUrl:'http://localhost:17076',origin:'http://localhost:8080',audience:'symlink-parent',handoffDirectory:join(root,'handoffs'),terminalConfirmed:true};
  // When wallet provisioning uses that alias.
  await assert.rejects(provisionNanoWallet(options),{code:'PRIVATE_FILE'});

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import {execFile} from 'node:child_process';
-import {mkdtemp, mkdir, readdir, rename, rm, symlink, writeFile} from 'node:fs/promises';
+import {copyFile, mkdtemp, mkdir, readdir, rename, rm, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -14,7 +14,8 @@ const {callWallet}=await import(pathToFileURL(join(directory,'dist/wallet-proces
 test('the installed private Node host works with Java absent and rejects unapproved or over-limit transfers',async t=>{
   const home=await mkdtemp(join(tmpdir(),'marketplace-node-only-host-'));t.after(()=>rm(home,{recursive:true,force:true}));
   const dataDir=join(home,'nano'),handoffDirectory=join(home,'handoffs'),bin=join(home,'bin');await mkdir(bin,{mode:0o700});
-  await symlink(process.execPath,join(bin,'node'));
+  if (process.platform === 'win32') await copyFile(process.execPath,join(bin,'node.exe'));
+  else await symlink(process.execPath,join(bin,'node'));
   const env={PATH:bin,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir,MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:handoffDirectory};
   await assert.rejects(execute('java',['-version'],{env}),{code:'ENOENT'});
   const seedFile=join(home,'seed.hex');await writeFile(seedFile,'42'.repeat(32)+'\n',{mode:0o600});

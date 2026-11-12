@@ -1,3 +1,4 @@
+import { setPermissions } from './support/private-permissions.mjs';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
@@ -506,21 +507,24 @@ test('credential metadata requires an explicit nullable applyXnoLimit field', as
   }
 });
 
-test('pre-existing profile paths are secured before SQLite opens the database', async () => {
+test('primary profile startup normalizes POSIX modes before SQLite rejects invalid contents', {skip:process.platform === 'win32'}, async () => {
   // Given permissive existing paths and invalid database contents that force SQLite initialization to fail.
   const parent=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-permissions-'));
   const home=join(parent,'profile');
   await mkdir(home,{mode:0o755});
   const database=join(home,'profiles.sqlite');
   await writeFile(database,'not a SQLite database',{mode:0o644});
-  await chmod(home,0o755);
-  await chmod(database,0o644);
+  await setPermissions(home,0o755,'directory');
+  await setPermissions(database,0o644);
   try {
-    // When SQLite rejects the contents, startup has already secured both paths before attempting that open.
+    // When startup opens the selected home, it restores its original POSIX modes before SQLite validation.
     await assert.rejects(MarketplaceProfileStore.open(home));
-    // Then the directory and database remain private even though SQLite initialization failed.
-    assert.equal((await stat(home)).mode&0o777,0o700);
-    assert.equal((await stat(database)).mode&0o777,0o600);
+    // Then the database failure preserves the original bytes after normalizing the directory and file modes.
+    if (process.platform !== 'win32') {
+      assert.equal((await stat(home)).mode&0o777,0o700);
+      assert.equal((await stat(database)).mode&0o777,0o600);
+    }
+    assert.equal(await (await import('node:fs/promises')).readFile(database, 'utf8'), 'not a SQLite database');
   } finally { await rm(parent,{recursive:true,force:true}); }
 });
 

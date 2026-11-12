@@ -1,18 +1,21 @@
+import { assertPrivate, setPermissions } from './support/private-permissions.mjs';
 import assert from 'node:assert/strict';
 import {execFile, spawn} from 'node:child_process';
-import {chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile} from 'node:fs/promises';
+import {copyFile, link, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile} from 'node:fs/promises';
 import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
+import {pathToFileURL} from 'node:url';
 import {DatabaseSync} from 'node:sqlite';
 import {promisify} from 'node:util';
 import {once} from 'node:events';
 import test from 'node:test';
-import {MarketplaceProfileStore} from '../dist/profile-store.js';
-import {readWalletSelection, saveWalletSelection} from '../dist/wallet-preferences.js';
-import {managedWalletEnvironment} from '../dist/wallet-home.js';
+const packageDirectory = process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR ?? join(import.meta.dirname,'..');
+const moduleUrl = name => pathToFileURL(join(packageDirectory,'dist',name)).href;
+const {MarketplaceProfileStore} = await import(moduleUrl('profile-store.js'));
+const {readWalletSelection, saveWalletSelection} = await import(moduleUrl('wallet-preferences.js'));
+const {managedWalletEnvironment} = await import(moduleUrl('wallet-home.js'));
 
 const execute = promisify(execFile);
-const moduleUrl = new URL('../dist/wallet-preferences.js', import.meta.url).href;
 const setupError = error => error.code === 'WALLET_SETUP_REQUIRED';
 
 async function fixture(t) {
@@ -48,12 +51,12 @@ test('saved role selections survive process restart and a profiles.sqlite restor
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   const expected = {attoDirectory: f.atto, nanoDirectory: f.nano, nanoControllerDirectory: f.controller, paymentHandoffDirectory: f.handoffs};
   const restarted = await execute(process.execPath, ['--input-type=module', '-e',
-    `import {readWalletSelection} from ${JSON.stringify(moduleUrl)}; process.stdout.write(JSON.stringify(readWalletSelection(process.argv[1])));`, f.home]);
+    `import {readWalletSelection} from ${JSON.stringify(moduleUrl('wallet-preferences.js'))}; process.stdout.write(JSON.stringify(readWalletSelection(process.argv[1])));`, f.home]);
   assert.deepEqual(JSON.parse(restarted.stdout), expected);
   const restored = join(f.parent, 'restored');
   await mkdir(restored, {mode: 0o700});
   await copyFile(f.database, join(restored, 'profiles.sqlite'));
-  await chmod(join(restored, 'profiles.sqlite'), 0o600);
+  await setPermissions(join(restored, 'profiles.sqlite'), 0o600);
   assert.deepEqual(readWalletSelection(restored), expected);
   const env = managedWalletEnvironment(restored, {});
   assert.equal(env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, f.atto);
@@ -85,7 +88,7 @@ test('simultaneous independent processes merge role updates even on the first da
   const patches = [{attoDirectory: f.atto}, {nanoDirectory: f.nano}, {nanoControllerDirectory: f.controller},
     {paymentHandoffDirectory: f.handoffs}];
   await Promise.all(patches.map(patch => execute(process.execPath, ['--input-type=module', '-e',
-    `import {saveWalletSelection} from ${JSON.stringify(moduleUrl)}; await saveWalletSelection(process.argv[1], JSON.parse(process.argv[2]));`, f.home, JSON.stringify(patch)])));
+    `import {saveWalletSelection} from ${JSON.stringify(moduleUrl('wallet-preferences.js'))}; await saveWalletSelection(process.argv[1], JSON.parse(process.argv[2]));`, f.home, JSON.stringify(patch)])));
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto, nanoDirectory: f.nano,
     nanoControllerDirectory: f.controller, paymentHandoffDirectory: f.handoffs});
 });
@@ -121,56 +124,68 @@ test('selection updates wait for a concurrent writer and retain its committed ot
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto, nanoDirectory: f.nano, nanoControllerDirectory: f.controller});
 });
 
-test('missing or unsafe saved wallets fail closed without creating a default wallet', async t => {
+test('missing selected wallets fail closed and selected paths are validated on every read', async t => {
+  // Given a saved path whose wallet has disappeared.
   const f = await fixture(t);
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   await rm(f.atto, {recursive: true});
   assert.throws(() => readWalletSelection(f.home), setupError);
   assert.throws(() => managedWalletEnvironment(f.home, {}), setupError);
   await assert.rejects(readdir(join(f.home, 'wallets')), {code: 'ENOENT'});
+  // When the same public path returns with broader permissions.
   await mkdir(f.atto, {mode: 0o755});
-  assert.throws(() => readWalletSelection(f.home), setupError);
-  await chmod(f.atto, 0o700);
+  await setPermissions(f.atto, 0o755, 'directory');
+  // Then normal Windows permissions are accepted and Unix retains its owner-only mode check.
+  if (process.platform === 'win32') assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto});
+  else assert.throws(() => readWalletSelection(f.home), setupError);
+  if (process.platform !== 'win32') await assert.rejects(saveWalletSelection(f.home, {attoDirectory: f.atto}), setupError);
+  await setPermissions(f.atto, 0o700, 'directory');
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto});
 });
 
 test('preferences reject symbolic links in every path component and directory/file substitution', async t => {
   const f = await fixture(t);
   const alias = join(f.parent, 'alias');
-  await symlink(f.atto, alias);
+  await symlink(f.atto, alias, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(saveWalletSelection(f.home, {attoDirectory: alias}), setupError);
   const parentAlias = join(f.parent, 'parent-alias');
-  await symlink(f.parent, parentAlias);
+  await symlink(f.parent, parentAlias, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(saveWalletSelection(f.home, {attoDirectory: join(parentAlias, 'existing-atto')}), setupError);
   const walletFile = join(f.parent, 'wallet.json');
   await writeFile(walletFile, '{}', {mode: 0o600});
   await assert.rejects(saveWalletSelection(f.home, {nanoDirectory: walletFile}), setupError);
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   const aliasHome = join(f.parent, 'alias-home');
-  await symlink(f.home, aliasHome);
+  await symlink(f.home, aliasHome, process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => readWalletSelection(aliasHome), setupError);
   await rm(f.database);
-  await symlink(walletFile, f.database);
+  // Windows standard users can create hardlinks; the private database rejects this unknown alias too.
+  if (process.platform === 'win32') await link(walletFile, f.database);
+  else await symlink(walletFile, f.database);
   assert.throws(() => readWalletSelection(f.home), setupError);
 });
 
-test('preferences reject foreign owners and permissive storage without changing permissions', async t => {
+test('preferences reject foreign owners and permissive POSIX storage without changing permissions', {skip:process.platform === 'win32'}, async t => {
   const f = await fixture(t);
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   const getuid = process.getuid;
   try {
-    process.getuid = () => getuid() + 1;
-    assert.throws(() => readWalletSelection(f.home), setupError);
-    await assert.rejects(saveWalletSelection(f.home, {attoDirectory: f.atto}), setupError);
+    if (getuid) {
+      process.getuid = () => getuid() + 1;
+      assert.throws(() => readWalletSelection(f.home), setupError);
+      await assert.rejects(saveWalletSelection(f.home, {attoDirectory: f.atto}), setupError);
+    }
   } finally { process.getuid = getuid; }
-  await chmod(f.database, 0o644);
+  await setPermissions(f.database, 0o644);
   assert.throws(() => readWalletSelection(f.home), setupError);
   await assert.rejects(saveWalletSelection(f.home, {attoDirectory: f.atto}), setupError);
-  assert.equal((await stat(f.database)).mode & 0o777, 0o644);
-  await chmod(f.database, 0o600);
-  await chmod(f.home, 0o755);
+  if (process.platform !== 'win32') assert.equal((await stat(f.database)).mode & 0o777, 0o644);
+  assert.throws(() => assertPrivate(f.database, 'file'));
+  await setPermissions(f.database, 0o600);
+  await setPermissions(f.home, 0o755, 'directory');
   assert.throws(() => readWalletSelection(f.home), setupError);
-  assert.equal((await stat(f.home)).mode & 0o777, 0o755);
+  if (process.platform !== 'win32') assert.equal((await stat(f.home)).mode & 0o777, 0o755);
+  assert.throws(() => assertPrivate(f.home, 'directory'));
 });
 
 test('malformed patches, path traversal, and control characters cannot change a selection', async t => {
@@ -193,7 +208,7 @@ test('wallet preferences do not migrate or change existing profile, journal, or 
     INSERT INTO profiles VALUES('existing', 'retained-api-key', 'retained-refresh-token');
     INSERT INTO mutations VALUES('journal-entry', 'COMPLETE');`);
   db.close();
-  await chmod(f.database, 0o600);
+  await setPermissions(f.database, 0o600);
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   const verify = new DatabaseSync(f.database);
   try {
@@ -254,14 +269,23 @@ test('a corrupt profile database fails with a sanitized wallet-selection error',
 test('existing explicit environment selections reject unsafe directories while absent setup targets stay usable', async t => {
   const f = await fixture(t);
   const alias = join(f.parent, 'explicit-alias');
-  await symlink(f.atto, alias);
+  await symlink(f.atto, alias, process.platform === 'win32' ? 'junction' : 'dir');
   assert.throws(() => managedWalletEnvironment(f.home, {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: alias}), setupError);
-  await chmod(f.atto, 0o755);
-  assert.throws(() => managedWalletEnvironment(f.home, {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: f.atto}), setupError);
+  const missingThroughAlias = join(alias,'missing-wallet');
+  assert.throws(() => managedWalletEnvironment(f.home, {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: missingThroughAlias}),
+    setupError, JSON.stringify(missingThroughAlias));
+  await setPermissions(f.atto, 0o755, 'directory');
+  if (process.platform !== 'win32') assert.throws(() => managedWalletEnvironment(f.home, {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: f.atto}), setupError);
   const missing = join(f.parent, 'new-setup-target');
   assert.equal(managedWalletEnvironment(f.home, {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: missing})
     .MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, missing);
   await assert.rejects(readdir(missing), {code: 'ENOENT'});
+  if (process.platform === 'win32') {
+    for (const path of [missing + ':stream', '\\\\localhost\\share\\missing-wallet']) {
+      assert.throws(() => managedWalletEnvironment(f.home, {MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:path}),
+        setupError, JSON.stringify(path));
+    }
+  }
 });
 
 test('saved Nano handoff selections survive ATTO-only changes and follow argument/environment precedence', async t => {
@@ -270,10 +294,10 @@ test('saved Nano handoff selections survive ATTO-only changes and follow argumen
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto, nanoDirectory: f.nano, paymentHandoffDirectory: f.handoffs});
   assert.equal(managedWalletEnvironment(f.home, {}).MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, f.handoffs);
-  const env = {MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR: '/tmp/explicit-environment-handoffs'};
+  const env = {MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR: join(f.parent, 'explicit-environment-handoffs')};
   assert.equal(managedWalletEnvironment(f.home, env).MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, env.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR);
-  assert.equal(managedWalletEnvironment(f.home, env, '/tmp/explicit-argument-handoffs')
-    .MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, '/tmp/explicit-argument-handoffs');
+  assert.equal(managedWalletEnvironment(f.home, env, join(f.parent, 'explicit-argument-handoffs'))
+    .MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, join(f.parent, 'explicit-argument-handoffs'));
   const otherHome = join(f.parent, 'new-default-home');
   assert.equal(managedWalletEnvironment(otherHome, {}).MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, join(otherHome, 'payment-handoffs'));
 });
@@ -281,14 +305,49 @@ test('saved Nano handoff selections survive ATTO-only changes and follow argumen
 test('saved Nano handoff paths must be private real directories and never fall back when missing', async t => {
   const f = await fixture(t);
   const alias = join(f.parent, 'handoff-alias');
-  await symlink(f.handoffs, alias);
+  await symlink(f.handoffs, alias, process.platform === 'win32' ? 'junction' : 'dir');
   await assert.rejects(saveWalletSelection(f.home, {paymentHandoffDirectory: alias}), setupError);
-  await chmod(f.handoffs, 0o755);
-  await assert.rejects(saveWalletSelection(f.home, {paymentHandoffDirectory: f.handoffs}), setupError);
-  await chmod(f.handoffs, 0o700);
+  await setPermissions(f.handoffs, 0o755, 'directory');
+  if (process.platform !== 'win32') await assert.rejects(saveWalletSelection(f.home, {paymentHandoffDirectory: f.handoffs}), setupError);
+  await setPermissions(f.handoffs, 0o700, 'directory');
   await saveWalletSelection(f.home, {paymentHandoffDirectory: f.handoffs});
   await rm(f.handoffs, {recursive: true});
   assert.throws(() => readWalletSelection(f.home), setupError);
   assert.throws(() => managedWalletEnvironment(f.home, {}), setupError);
   await assert.rejects(readdir(join(f.home, 'payment-handoffs')), {code: 'ENOENT'});
+});
+
+
+test('saved path metadata rejects substituted symlinks and malformed persisted paths on every read', async t => {
+  // Given a valid saved wallet selection.
+  const f = await fixture(t);
+  await saveWalletSelection(f.home, {attoDirectory:f.atto});
+  const alias = join(f.parent, 'saved-wallet-alias');
+  await symlink(f.atto, alias, process.platform === 'win32' ? 'junction' : 'dir');
+  const db = new DatabaseSync(f.database);
+  try {
+    // When persisted public paths are replaced outside the supported save API.
+    for (const path of [alias, 'relative/wallet', f.atto + '/..', f.atto + '/bad\npath',
+      ...(process.platform === 'win32' ? ['\\\\localhost\\share', f.atto + ':stream'] : [])]) {
+      db.prepare('UPDATE wallet_selection SET atto_directory=?').run(path);
+      // Then each new read rejects the unsafe path without opening the selected wallet.
+      assert.throws(() => readWalletSelection(f.home), setupError, JSON.stringify(path));
+    }
+  } finally { db.close(); }
+  assert.deepEqual(await readdir(f.atto), []);
+});
+
+test('saving one role revalidates every selected POSIX directory before committing the patch', {skip:process.platform === 'win32'}, async t => {
+  // Given a complete selection whose separate controller later loses privacy.
+  const f = await fixture(t);
+  await saveWalletSelection(f.home, {attoDirectory:f.atto, nanoDirectory:f.nano,
+    nanoControllerDirectory:f.controller, paymentHandoffDirectory:f.handoffs});
+  await setPermissions(f.controller, 0o755, 'directory');
+  // When an unrelated role update would otherwise retain that unsafe selected directory.
+  await assert.rejects(saveWalletSelection(f.home, {attoDirectory:f.atto}), setupError);
+  // Then the original row survives unchanged and the unsafe directory is not repaired.
+  const db = new DatabaseSync(f.database);
+  try { assert.equal(db.prepare('SELECT nano_controller_directory FROM wallet_selection').get().nano_controller_directory, f.controller); }
+  finally { db.close(); }
+  assert.throws(() => assertPrivate(f.controller, 'directory'));
 });

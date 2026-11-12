@@ -47,7 +47,7 @@ export async function runGuidedSetup(argv:string[],env:NodeJS.ProcessEnv,prompt:
   requireSetupTerminal();
   const options=optionsFromArgs(argv);
   process.stderr.write('Atto Marketplace setup. Wallet keys stay local; Marketplace account and session configuration has its own directory.\n');
-  const home=absoluteDirectory(options.home??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome());
+  const home=absoluteDirectory(options.home??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome(env));
   const profile=options.profile??env.MARKETPLACE_MCP_PROFILE??defaultMarketplaceProfile;
   if(!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(profile))throw new ProfileError('SETUP_USAGE','Choose a profile name of 1–48 letters, digits, underscores or hyphens.');
   // Read selected paths before opening any replacement wallet. Missing saved paths fail closed.
@@ -152,7 +152,7 @@ export async function runWalletWizard(argv:string[],env:NodeJS.ProcessEnv,prompt
   const args=argv.filter(value=>value!=='--interactive'&&value!=='--advanced');
   const values=new Map<string,string>();
   for(let i=0;i<args.length;i+=2){const name=args[i],value=args[i+1];if(!name||!['--home','--asset','--origin','--audience'].includes(name)||!value||value.startsWith('--')||values.has(name))throw new ProfileError('SETUP_USAGE','Use wallet setup [--interactive] [--advanced] [--home <directory>] [--asset ATTO|XNO] [--origin <origin>] [--audience <audience>].');values.set(name,value);}
-  const home=absoluteDirectory(values.get('--home')??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome());
+  const home=absoluteDirectory(values.get('--home')??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome(env));
   // Reject incomplete custom bindings before asking for or changing any wallet.
   if(values.has('--origin')||values.has('--audience'))marketplaceConnection({...(values.has('--origin')?{origin:values.get('--origin')!}:{}),...(values.has('--audience')?{audience:values.get('--audience')!}:{})});
   const asset=values.get('--asset')??((await prompt('Wallet asset: [1] Atto (default), [2] Nano: ')||'1')==='2'?'XNO':'ATTO');

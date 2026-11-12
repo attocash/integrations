@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { once } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,16 +10,34 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 const packageDirectory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? fileURLToPath(new URL('../', import.meta.url));
 const stateUrl = pathToFileURL(join(packageDirectory, 'dist/storage/state.js')).href;
 const { StateStore } = await import(stateUrl);
+const processTestTimeout = 15_000;
 
 function fixture(t) {
   const directory = mkdtempSync(join(tmpdir(), 'atto-account-lock-test-'));
   const stores = [];
+  const children = [];
+  const releases = [];
+  t.after(async () => {
+    // Windows cannot remove SQLite files while a child still holds them open.
+    for (const { process } of children) {
+      if (process.exitCode === null && process.signalCode === null) process.kill('SIGKILL');
+    }
+    await Promise.allSettled(children.map(({ exit }) => exit));
+    for (const release of releases) release();
+    for (const store of stores) store.close();
+    rmSync(directory, { recursive: true, force: true });
+  });
+  const spawnChild = (source, args) => {
+    const running = child(source, args);
+    children.push(running);
+    return running;
+  };
   const open = () => { const store = new StateStore(directory); stores.push(store); return store; };
-  t.after(() => { for (const store of stores) store.close(); rmSync(directory, { recursive: true, force: true }); });
-  return { directory, open, store: open() };
+  const trackRelease = release => { releases.push(release); return release; };
+  return { directory, open, store: open(), spawnChild, trackRelease };
 }
 
-function child(t, source, args) {
+function child(source, args) {
   const process = spawn(globalThis.process.execPath, ['--input-type=module', '-e', source, ...args], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
   let stderr = '';
   process.stderr.on('data', chunk => { stderr += chunk; });
@@ -28,17 +45,29 @@ function child(t, source, args) {
     process.on('error', reject);
     process.on('exit', (code, signal) => resolve({ code, signal, stderr }));
   });
-  t.after(() => process.kill());
-  return { process, exit };
+  const closed = new Promise(resolve => process.once('close', () => resolve(stderr)));
+  const message = () => new Promise((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); process.off('message', receive); };
+    const receive = value => { cleanup(); resolve(value); };
+    const fail = error => { cleanup(); reject(error); };
+    const timer = setTimeout(() => fail(new Error('Child did not send a message before its deadline.')), processTestTimeout);
+    timer.unref();
+    process.once('message', receive);
+    exit.then(async ({ code, signal }) => {
+      const diagnostic = await closed;
+      fail(new Error(`Child exited before sending a message (code ${code}, signal ${signal}).\n${diagnostic}`));
+    }, fail);
+  });
+  return { process, exit, message };
 }
 
 test('busy accounts do not block disjoint accounts or short wallet reservations', async t => {
   // Given
-  const { store, open } = fixture(t);
+  const { store, open, trackRelease } = fixture(t);
   const other = open();
   const release = store.tryAccountLocks([0]);
   assert.equal(typeof release, 'function');
-  t.after(() => release());
+  trackRelease(release);
 
   // When
   const same = other.tryAccountLocks([0]);
@@ -60,7 +89,7 @@ test('busy accounts do not block disjoint accounts or short wallet reservations'
 
 test('same-process lock probes cannot drop account, work, process or lifecycle locks seen by another process', async t => {
   // Given live locks and a second session probing the same files in this process.
-  const { store, open, directory } = fixture(t);
+  const { store, open, directory, spawnChild } = fixture(t);
   const releases = [store.tryAccountLocks([0]), store.tryWorkLock('head'), store.tryProcessLock('receive-daemon')];
   const other = open();
   for (const value of releases) assert.ok(value);
@@ -68,7 +97,7 @@ test('same-process lock probes cannot drop account, work, process or lifecycle l
   assert.equal(other.tryWorkLock('head'), undefined);
   assert.equal(other.tryProcessLock('receive-daemon'), undefined);
   // When an independent process tries to acquire those same locks and reset.
-  const running = child(t, `
+  const running = spawnChild(`
     import { StateStore } from ${JSON.stringify(stateUrl)};
     const store = new StateStore(process.argv[1]);
     const results = [store.tryAccountLocks([0]), store.tryWorkLock('head'), store.tryProcessLock('receive-daemon')];
@@ -79,7 +108,7 @@ test('same-process lock probes cannot drop account, work, process or lifecycle l
     process.send({ acquired, reset }); process.disconnect();
   `, [directory]);
   let result;
-  try { [result] = await once(running.process, 'message'); await running.exit; }
+  try { result = await running.message(); await running.exit; }
   finally { for (const release of releases) release(); }
   // Then every original lock and the lifecycle lease still excludes that process.
   assert.deepEqual(result, { acquired: [false, false, false], reset: false });
@@ -87,10 +116,10 @@ test('same-process lock probes cannot drop account, work, process or lifecycle l
 
 test('a failed multi-account attempt releases partial acquisitions immediately', t => {
   // Given
-  const { store, open } = fixture(t);
+  const { store, open, trackRelease } = fixture(t);
   const other = open();
   const releaseBusy = other.tryAccountLocks([2]);
-  t.after(() => releaseBusy());
+  trackRelease(releaseBusy);
 
   // When
   const attempted = store.tryAccountLocks([2, 0, 1]);
@@ -143,20 +172,20 @@ test('account locks reject invalid indexes and refuse new work after close', t =
   assert.throws(() => store.tryAccountLocks([0]), { code: 'STATE_CLOSED' });
 });
 
-test('a process holding one account leaves others usable and death releases its lock', { timeout: 15_000 }, async t => {
+test('a process holding one account leaves others usable and death releases its lock', { timeout: processTestTimeout }, async t => {
   // Given
-  const { store, directory } = fixture(t);
-  const running = child(t, `
+  const { store, directory, spawnChild } = fixture(t);
+  const running = spawnChild(`
     import { StateStore } from ${JSON.stringify(stateUrl)};
     const store = new StateStore(process.argv[1]);
     process.on('message', () => {});
     await store.withAccountLocks([1], async () => {
       await store.withWalletLock(async () => store.set('durable', true));
       process.send('locked');
-      await new Promise(() => {});
+      await new Promise(resolve => process.once('message', resolve));
     });
   `, [directory]);
-  await once(running.process, 'message');
+  await running.message();
 
   // When
   const busy = store.tryAccountLocks([1]);
@@ -174,9 +203,9 @@ test('a process holding one account leaves others usable and death releases its 
   assert.equal(store.get('recovered'), true);
 });
 
-test('processes requesting the same account set in opposite orders serialize without deadlock', { timeout: 15_000 }, async t => {
+test('processes requesting the same account set in opposite orders serialize without deadlock', { timeout: processTestTimeout }, async t => {
   // Given
-  const { store, directory } = fixture(t);
+  const { store, directory, spawnChild } = fixture(t);
   store.set('counter', 0);
   const source = `
     import { StateStore } from ${JSON.stringify(stateUrl)};
@@ -193,11 +222,11 @@ test('processes requesting the same account set in opposite orders serialize wit
     });
     process.send('ready');
   `;
-  const children = [[0, 1], [1, 0]].map(indexes => child(t, source, [directory, JSON.stringify(indexes)]));
-  await Promise.all(children.map(({ process }) => once(process, 'message')));
+  const children = [[0, 1], [1, 0]].map(indexes => spawnChild(source, [directory, JSON.stringify(indexes)]));
+  await Promise.all(children.map(running => running.message()));
 
   // When
-  const done = children.map(({ process }) => once(process, 'message'));
+  const done = children.map(running => running.message());
   children.forEach(({ process }) => process.send('start'));
   await Promise.all(done);
   const exits = await Promise.all(children.map(({ exit }) => exit));

@@ -205,5 +205,6 @@ server.registerTool('wallet_call',{inputSchema:{asset:z.literal('XNO'),operation
   writeFileSync(path,JSON.stringify(state),{mode:0o600});return {content:[{type:'text',text:'fixture status'}],structuredContent:{result:payment&&existsSync(join(directory,'tamper-digest'))?{...payment,requestSha256:'0'.repeat(64)}:payment}};
 });await server.connect(new StdioServerTransport());
 `,{mode:0o600});
+  if(process.platform==='win32') return script;
   const command=join(home,'wallet-host');await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${script}'\n`,{mode:0o700});return command;
 }

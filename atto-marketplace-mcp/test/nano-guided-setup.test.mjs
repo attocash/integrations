@@ -1,3 +1,4 @@
+import { setPermissions } from './support/private-permissions.mjs';
 import assert from 'node:assert/strict';
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
@@ -307,10 +308,14 @@ test('managed, missing, permissive and symlink seed imports fail without new wal
   const home = await homeFor(t), { config } = await existing(home);
   const outside = join(home, 'standalone');
   await mkdir(outside, { mode: 0o700 });
-  const permissive = join(outside, 'public.hex'), link = join(outside, 'link.hex');
-  await writeFile(permissive, `${'cd'.repeat(32)}\n`, { mode: 0o644 });
-  await symlink(permissive, link);
-  for (const seedFile of [config.keySource.seedFile, join(outside, 'missing.hex'), permissive, link]) {
+  const permissive = join(outside,'public.hex');
+  await writeFile(permissive, `${'cd'.repeat(32)}\n`, {mode:0o600});
+  await setPermissions(permissive,0o644);
+  const aliasDirectory = join(home,'seed-alias');
+  const link = process.platform === 'win32' ? join(aliasDirectory,'public.hex') : join(outside,'link.hex');
+  if (process.platform === 'win32') await symlink(outside,aliasDirectory,'junction');
+  else await symlink(permissive,link);
+  for (const seedFile of [config.keySource.seedFile, join(outside, 'missing.hex'), ...(process.platform === 'win32' ? [] : [permissive]), link]) {
     const before = await snapshot(home);
     const script = interaction(['import', '', 'nano:dev', '', '', seedFile]);
     await assert.rejects(setupNanoWalletInteractive({ home, env: {}, origin, audience, prompt: script.prompt }));

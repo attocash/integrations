@@ -4,13 +4,22 @@ import { createHash, randomUUID } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
-import { AttoApplication } from '../../atto-cli/dist/application/app.js';
-import { mnemonicSeed } from '../../atto-cli/dist/wallet/signing.js';
-import { OsSecretStore } from '../../atto-cli/dist/storage/secrets.js';
-import { provisionNanoWallet, derivePrivateKey, deriveNanoRecoveryPrivateKey, offchainSign, upperHex } from '@attocash/atto-marketplace-nano-adapter';
-import { MarketplaceProfileStore } from '../dist/profile-store.js';
-import { approveMarketplaceController } from '../dist/approval-terminal.js';
-import { approvalRequestDigest, approvalResponsePath, writeApprovalRequest, writeApprovalResponse } from '../dist/approval-files.js';
+import { findPackageJSON } from 'node:module';
+import { pathToFileURL } from 'node:url';
+
+const directory = process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR ?? join(import.meta.dirname, '..');
+const cliDirectory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? join(import.meta.dirname, '../../atto-cli');
+const { AttoApplication } = await import(pathToFileURL(join(cliDirectory, 'dist/application/app.js')).href);
+const { mnemonicSeed } = await import(pathToFileURL(join(cliDirectory, 'dist/wallet/signing.js')).href);
+const { OsSecretStore } = await import(pathToFileURL(join(cliDirectory, 'dist/storage/secrets.js')).href);
+const { MarketplaceProfileStore } = await import(pathToFileURL(join(directory, 'dist/profile-store.js')).href);
+const { approveMarketplaceController, runApproval } = await import(pathToFileURL(join(directory, 'dist/approval-terminal.js')).href);
+const { approvalRequestDigest, approvalResponsePath, writeApprovalRequest, writeApprovalResponse } =
+  await import(pathToFileURL(join(directory, 'dist/approval-files.js')).href);
+const adapterManifestPath = findPackageJSON('@attocash/atto-marketplace-nano-adapter', pathToFileURL(join(directory, 'package.json')));
+const adapterManifest = JSON.parse(await readFile(adapterManifestPath, 'utf8'));
+const { provisionNanoWallet, derivePrivateKey, deriveNanoRecoveryPrivateKey, offchainSign, upperHex } =
+  await import(new URL(adapterManifest.exports['.'].import, pathToFileURL(adapterManifestPath)).href);
 
 const phrase = `${'abandon '.repeat(23)}art`;
 const accountId = '11111111-1111-4111-8111-111111111111';
@@ -19,7 +28,7 @@ const identityId = '33333333-3333-4333-8333-333333333333';
 const targetId = '44444444-4444-4444-8444-444444444444';
 
 for (const source of ['native-seed', 'os-keystore']) {
-  test(`cached Nano approval recovers without its unavailable ${source}`, async () => {
+  test(`cached Nano approval recovers without its unavailable ${source}`, async t => {
     // Given one exact historical signed response and its original pinned profile and native configuration.
     const root = await mkdtemp(join(tmpdir(), 'marketplace-approval-recovery-'));
     const home = join(root, 'marketplace'), native = join(root, 'nano'), recovery = join(root, 'atto'), handoffs = join(root, 'handoffs');
@@ -69,6 +78,12 @@ for (const source of ['native-seed', 'os-keystore']) {
 
       // When the identical request is recovered after expiration with no signing material available.
       assert.deepEqual(await approveMarketplaceController(path, options), {responsePath, recovered: true});
+      // The terminal command also infers this same private home from its native request path.
+      const output = [];
+      const write = t.mock.method(process.stdout, 'write', chunk => { output.push(String(chunk)); return true; });
+      try { await runApproval([path], options.env); }
+      finally { write.mock.restore(); }
+      assert.deepEqual(JSON.parse(output.join('')), {responsePath, recovered: true});
 
       // Then its exact response is retained without a key read or another consent prompt.
       assert.deepEqual(await readFile(responsePath), originalResponse);

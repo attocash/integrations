@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, readdirSync } from 'node:fs';
 import { dirname, isAbsolute, join, normalize, parse } from 'node:path';
-import { initializeMarketplaceRecoveryWallet } from '@attocash/cli/internal-marketplace';
+import { assertPrivatePermissions, initializeMarketplaceRecoveryWallet } from '@attocash/cli/internal-marketplace';
 import {
   approveNanoWalletPolicy,
   inspectNanoSeed,
@@ -262,7 +262,8 @@ function requireEmptyTarget(directory: string): void {
   try {
     const st = lstatSync(directory);
     if (!st.isDirectory() || st.isSymbolicLink() || readdirSync(directory).length) throw failure('WALLET_CONFIGURATION_EXISTS', 'The target Nano directory already contains state. Reuse its existing private adapter profile.');
-    if ((st.mode & 0o777) !== 0o700 || (process.getuid && st.uid !== process.getuid())) throw failure('PRIVATE_FILE', 'Use a private owner-only Nano wallet directory.');
+    try { assertPrivatePermissions(directory, 'directory'); }
+    catch { throw failure('PRIVATE_FILE', 'Use a private owner-only Nano wallet directory.'); }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
   }

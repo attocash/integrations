@@ -1,3 +1,4 @@
+import { isAbsolute } from 'node:path';
 import { McpServer } from '@modelcontextprotocol/server';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
@@ -46,7 +47,7 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
     return normalizeWalletResult(identity, request.operation, result, request.input);
   }
   const directory = env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR;
-  if (!directory || !directory.startsWith('/') || /[\0\r\n]/.test(directory)) throw walletError('WALLET_SETUP_REQUIRED');
+  if (!directory || !isAbsolute(directory) || /[\0\r\n]/.test(directory)) throw walletError('WALLET_SETUP_REQUIRED');
   if (request.operation === 'controller.sign') {
     const app = createApplication({directory,access:'mcp'});
     try {

@@ -30,8 +30,19 @@ export async function credentialEnvironment(t, phrase, mode = 'available') {
 }
 
 export async function cli(directory, args, env = process.env) {
-  const result = await execute(process.execPath, [join(cliDirectory, 'dist/cli/main.js'), '--data-dir', directory, '--json', ...args], {
-    env, timeout: 15_000, maxBuffer: 1024 * 1024,
-  });
+  let result;
+  try {
+    result = await execute(process.execPath, [join(cliDirectory, 'dist/cli/main.js'), '--data-dir', directory, '--json', ...args], {
+      env, timeout: process.platform === 'win32' ? 30_000 : 15_000, maxBuffer: 1024 * 1024,
+    });
+  } catch (error) {
+    let code;
+    try { code = JSON.parse(error.stdout)?.error?.code; } catch { /* A process failure may have no complete JSON response. */ }
+    if (error instanceof Error && typeof code === 'string' && /^[A-Z][A-Z0-9_]{0,95}$/.test(code)) {
+      // Keep the original process error/cause; expose no response text or details.
+      error.message += `\nPublic CLI error code: ${code}`;
+    }
+    throw error;
+  }
   return JSON.parse(result.stdout).result;
 }

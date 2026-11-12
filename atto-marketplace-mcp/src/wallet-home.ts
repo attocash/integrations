@@ -1,9 +1,8 @@
 import { isAbsolute, join, resolve } from 'node:path';
-import { homedir } from 'node:os';
 import { assertWalletDirectory, ProfileError } from './profile-store.js';
 import { readWalletSelection } from './wallet-preferences.js';
 
-export function defaultMarketplaceHome(): string { return join(homedir(), '.config', 'atto', 'marketplace-mcp'); }
+export { defaultMarketplaceHome } from './defaults.js';
 
 /** One dedicated native wallet tree per Marketplace MCP home. Explicit paths opt into sharing. */
 export function managedWalletEnvironment(home: string, env: NodeJS.ProcessEnv,

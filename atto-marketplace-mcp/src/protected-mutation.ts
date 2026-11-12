@@ -1,3 +1,4 @@
+import { shellQuote } from './shell-quote.js';
 import { asRecord, redact } from './marketplace-results.js';
 import { commandPointerFromError } from './marketplace-api.js';
 import { requireSession } from './profile-store.js';
@@ -335,5 +336,3 @@ function safeMutationResult(value:unknown):Record<string,unknown> {
   const safe=Object.fromEntries(Object.entries(record).filter(([key])=>/^(?:apiKeyId|result|replayed|destinationId|selectionVersion|withdrawalId|asset|network|atomicAmount|destinationVersion|destinationAddress|state|createdAt|updatedAt)$/.test(key)));
   return redact(safe,true) as Record<string,unknown>;
 }
-
-function shellQuote(value:string):string { return `'${value.replace(/'/g,"'\\''")}'`; }

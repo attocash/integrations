@@ -899,8 +899,11 @@ async function fakeAttoWallet(home) {
     });
     await server.connect(new StdioServerTransport());
   `,{mode:0o600});
-  const command=join(home,'fake-atto-wallet');
-  await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${source}' "$@"\n`,{mode:0o700});
+  let command=source;
+  if(process.platform!=='win32') {
+    command=join(home,'fake-atto-wallet');
+    await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${source}' "$@"\n`,{mode:0o700});
+  }
   return {command,dataDirectory,
     setStatus:async(id,status)=>writeFile(join(dataDirectory,id+'.status.json'),JSON.stringify(status),{mode:0o600}),
     clearStatus:async(id)=>rm(join(dataDirectory,id+'.status.json'),{force:true}),
@@ -939,8 +942,11 @@ async function fakeNanoPayer(home) {
     });
     await server.connect(new StdioServerTransport());
   `,{mode:0o600});
-  const command=join(home,'fake-nano-payer');
-  await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`,{mode:0o700});
+  let command=script;
+  if(process.platform!=='win32') {
+    command=join(home,'fake-nano-payer');
+    await writeFile(command,`#!/bin/sh\nexec '${process.execPath}' '${script}' "$@"\n`,{mode:0o700});
+  }
   return command;
 }
 

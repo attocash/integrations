@@ -76,9 +76,13 @@ fails before journal creation or native RPC. Provisioning retries may finish the
 same original directory after interruption, without reclaiming another wallet's
 binding. Back up this source-side metadata together with the Nano journal.
 
-Wallet storage currently requires POSIX owner-only directory and file permissions
-and supports Linux and macOS. Native Windows storage is unsupported and fails
-closed; the portable cryptographic and RPC APIs remain covered on Windows.
+Wallet storage supports Linux, macOS, and Windows. Unix files use owner-only
+permissions. Windows uses Node.js filesystem support and normal per-user directory
+permissions. File identity, kind, link and symbolic-link checks protect publication
+and recovery on every platform. New mnemonic custody uses Windows Credential
+Manager through the shared Atto wallet engine. Use the same OS user for setup and
+the MCP client; an explicitly imported existing seed file retains its existing
+file-based import semantics.
 
 Profile directories must be owner-only. Protect the recovery source (or imported
 seed file) and the entire journal together; restoring an old journal can lose knowledge of signatures

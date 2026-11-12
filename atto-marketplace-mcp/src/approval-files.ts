@@ -1,6 +1,8 @@
-import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { recoverPrivatePublication, syncPublishedPrivateFile } from './private-file-sync.js';
+import { securePrivatePermissions, syncPrivateDirectory } from '@attocash/cli/internal-marketplace';
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve, sep } from 'node:path';
 import { ProfileError } from './profile-store.js';
 import { canonicalJson } from './canonical-json.js';
 import { validAttoProof } from './atto-proof.js';
@@ -132,9 +134,9 @@ function requireUserApproval(request: MarketplaceProofApprovalRequest): void {
 
 function secureDirectoryChain(root: string, directory: string): void {
   assertPrivateDirectory(root, false);
-  const relative = directory.slice(root.length).split('/').filter(Boolean);
+  const descendants = relative(root, directory).split(sep).filter(Boolean);
   let current = root;
-  for (const component of relative) {
+  for (const component of descendants) {
     current = join(current, component);
     try { mkdirSync(current, { mode: PRIVATE_DIRECTORY_MODE }); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw invalidFile(); }
@@ -145,10 +147,10 @@ function secureDirectoryChain(root: string, directory: string): void {
 function assertPrivateDirectory(path: string, secure: boolean): void {
   try {
     const info = lstatSync(path);
-    if (!info.isDirectory() || info.isSymbolicLink() || !ownedByCurrentUser(info.uid)) throw invalidFile();
-    if (secure) chmodSync(path, PRIVATE_DIRECTORY_MODE);
+    if (!info.isDirectory() || info.isSymbolicLink() || (process.platform !== 'win32' && (typeof process.getuid !== 'function' || info.uid !== process.getuid()))) throw invalidFile();
+    if (secure && process.platform !== 'win32') chmodSync(path, PRIVATE_DIRECTORY_MODE);
     const secured = secure ? lstatSync(path) : info;
-    if ((secured.mode & 0o077) !== 0) throw invalidFile();
+    if (process.platform !== 'win32' && (secured.mode & 0o077) !== 0) throw invalidFile();
   } catch (error) {
     if (error instanceof ProfileError) throw error;
     throw invalidFile();
@@ -159,26 +161,32 @@ function writeUniquePrivateFile(path: string, content: string): void {
   const bytes = Buffer.from(content, 'utf8');
   if (bytes.byteLength > MAX_FILE_BYTES) throw invalidFile();
   const directory = dirname(path);
+  assertPrivateDirectory(directory, false);
   const temporary = join(directory, `.${randomBytes(16).toString('hex')}.tmp`);
   let descriptor: number | undefined;
   try {
     descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, PRIVATE_FILE_MODE);
-    fchmodSync(descriptor, PRIVATE_FILE_MODE);
+    // Windows files use the ordinary permissions inherited from their directory.
+    if (process.platform !== 'win32') securePrivatePermissions(temporary, 'file');
     writeFileSync(descriptor, bytes);
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
     try { linkSync(temporary, path); }
     catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'EEXIST' || readPrivateFile(path) !== content.trimEnd()) throw error;
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+      unlinkSync(temporary);
+      if (readPrivateFile(path) !== content.trimEnd()) throw error;
     }
-    fsyncDirectory(directory);
+    try { unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    syncPublishedPrivateFile(path);
+    syncPrivateDirectory(directory);
   } catch (error) {
     if (error instanceof ProfileError) throw error;
     throw invalidFile();
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
-    try { unlinkSync(temporary); fsyncDirectory(directory); } catch { /* A committed file is already durable; a temp cleanup is best effort. */ }
+    try { unlinkSync(temporary); syncPrivateDirectory(directory); } catch { /* A committed file is already durable; a temp cleanup is best effort. */ }
   }
 }
 
@@ -194,13 +202,20 @@ function readPrivateFile(path: string): string {
   let descriptor: number | undefined;
   try {
     assertPrivateDirectory(dirname(path), false);
+    const publication = lstatSync(path);
+    if (!publication.isFile() || publication.isSymbolicLink()
+      || (process.platform !== 'win32' && (typeof process.getuid !== 'function' || publication.uid !== process.getuid()
+        || (publication.mode & 0o777) !== PRIVATE_FILE_MODE))) throw invalidFile();
+    recoverPrivatePublication(path, /^\.[a-f0-9]{32}\.tmp$/);
     const before = lstatSync(path);
-    if (!before.isFile() || before.isSymbolicLink() || !ownedByCurrentUser(before.uid)
-      || (before.mode & 0o777) !== PRIVATE_FILE_MODE || before.size < 2 || before.size > MAX_FILE_BYTES) throw invalidFile();
+    if (!before.isFile() || before.isSymbolicLink() || before.nlink !== 1
+      || (process.platform !== 'win32' && (typeof process.getuid !== 'function' || before.uid !== process.getuid()
+        || (before.mode & 0o777) !== PRIVATE_FILE_MODE)) || before.size < 2 || before.size > MAX_FILE_BYTES) throw invalidFile();
     descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const info = fstatSync(descriptor);
-    if (!info.isFile() || info.dev !== before.dev || info.ino !== before.ino || !ownedByCurrentUser(info.uid)
-      || (info.mode & 0o777) !== PRIVATE_FILE_MODE || info.size < 2 || info.size > MAX_FILE_BYTES) throw invalidFile();
+    if (!info.isFile() || info.dev !== before.dev || info.ino !== before.ino || info.nlink !== 1
+      || (process.platform !== 'win32' && (typeof process.getuid !== 'function' || info.uid !== process.getuid()
+        || (info.mode & 0o777) !== PRIVATE_FILE_MODE)) || info.size < 2 || info.size > MAX_FILE_BYTES) throw invalidFile();
     const bytes = readFileSync(descriptor);
     if (bytes.length > MAX_FILE_BYTES) throw invalidFile();
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/\n$/, '');
@@ -210,15 +225,6 @@ function readPrivateFile(path: string): string {
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-}
-
-function fsyncDirectory(path: string): void {
-  const descriptor = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY);
-  try { fsyncSync(descriptor); } finally { closeSync(descriptor); }
-}
-
-function ownedByCurrentUser(uid: number): boolean {
-  return typeof process.getuid === 'function' && uid === process.getuid();
 }
 
 function asRecord(value: unknown): Record<string, unknown> {

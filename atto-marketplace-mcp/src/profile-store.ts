@@ -1,5 +1,5 @@
-import { mkdir, lstat } from 'node:fs/promises';
-import { chmodSync, closeSync, constants, fchmodSync, lstatSync, openSync } from 'node:fs';
+import { assertPrivatePermissions, securePrivatePermissions } from '@attocash/cli/internal-marketplace';
+import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs';
 import { isAbsolute, join, parse, resolve, sep } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
@@ -75,6 +75,7 @@ export class MarketplaceProfileStore {
   private readonly db: DatabaseSync;
 
   constructor(readonly home: string) {
+    assertProfileFiles(home);
     this.db = new DatabaseSync(join(home, 'profiles.sqlite'));
     try { this.assertCurrentSchema(); } catch (error) { this.db.close(); throw error; }
     this.db.exec(`PRAGMA busy_timeout=${PROFILE_DATABASE_BUSY_TIMEOUT_MS};`);
@@ -152,29 +153,36 @@ export class MarketplaceProfileStore {
         PRIMARY KEY(profile_id, api_key_id)
       );
     `);
-    this.secureFiles(home);
+    if (process.platform !== 'win32') assertProfileFiles(home);
   }
 
   static async open(home: string): Promise<MarketplaceProfileStore> {
-    if (process.platform === 'win32') {
-      throw new ProfileError('PROFILE_PERMISSIONS', 'Marketplace MCP profiles currently require POSIX 0700 directory and 0600 file permissions.');
+    home = resolve(home);
+    // Secure the directory before SQLite can create its database or journal.
+    ensureProfileHome(home);
+    if (process.platform !== 'win32') {
+      try { chmodSync(home, 0o700); }
+      catch { throw new ProfileError('PROFILE_PERMISSIONS', 'The Marketplace MCP profile directory permissions could not be secured.'); }
     }
-    await mkdir(home, { recursive: true, mode: 0o700 });
-    const info = await lstat(home);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new ProfileError('PROFILE_PATH', 'The Marketplace MCP profile directory must be a real directory.');
-    try { chmodSync(home, 0o700); }
-    catch { throw new ProfileError('PROFILE_PERMISSIONS', 'The Marketplace MCP profile directory permissions could not be secured.'); }
     const database = join(home, 'profiles.sqlite');
     try {
-      const databaseInfo = await lstat(database);
-      if (!databaseInfo.isFile() || databaseInfo.isSymbolicLink()) throw new ProfileError('PROFILE_PATH', 'The Marketplace MCP database must be a regular private file.');
-      try { chmodSync(database, 0o600); }
-      catch { throw new ProfileError('PROFILE_PERMISSIONS', 'The Marketplace MCP database permissions could not be secured.'); }
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
-      const file = openSync(database, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-      fchmodSync(file, 0o600);
-      closeSync(file);
+      const info = lstatSync(database);
+      if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1) throw new ProfileError('PROFILE_PATH', 'The Marketplace MCP database must be a regular private file.');
+      if (process.platform !== 'win32') {
+        try { chmodSync(database, 0o600); }
+        catch { throw new ProfileError('PROFILE_PERMISSIONS', 'The Marketplace MCP database permissions could not be secured.'); }
+      }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    if (!assertPrivateProfileFile(database, true)) {
+      assertPrivatePermissions(home, 'directory');
+      let descriptor: number | undefined;
+      try {
+        descriptor = openSync(database, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
+        if (process.platform !== 'win32') securePrivatePermissions(database, 'file');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
+        assertPrivateProfileFile(database, false);
+      } finally { if (descriptor !== undefined) closeSync(descriptor); }
     }
     return new MarketplaceProfileStore(home);
   }
@@ -187,7 +195,7 @@ export class MarketplaceProfileStore {
       if (readOnly) return undefined;
       try {
         const descriptor = openSync(database, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
-        try { fchmodSync(descriptor, 0o600); } finally { closeSync(descriptor); }
+        try { if (process.platform !== 'win32') securePrivatePermissions(database, 'file'); } finally { closeSync(descriptor); }
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
         assertPrivateProfileFile(database, false);
@@ -621,16 +629,8 @@ export class MarketplaceProfileStore {
     return new ProfileError('PROFILE_SCHEMA','This Marketplace MCP profile database uses an unsupported schema. Configure a fresh Marketplace MCP home; native wallet directories and their recovery state must be retained.');
   }
 
-  private secureFiles(home: string): void {
-    const database = join(home, 'profiles.sqlite');
-    for (const candidate of [home, database]) {
-      const info = lstatSync(candidate);
-      if (info.isSymbolicLink() || (candidate === home ? !info.isDirectory() : !info.isFile())) {
-        throw new ProfileError('PROFILE_PATH', 'Marketplace MCP profile files must be regular files in a private directory.');
-      }
-      chmodSync(candidate, candidate === home ? 0o700 : 0o600);
-    }
-  }
+
+
 }
 
 function profileFromRow(row: Record<string, unknown>): MarketplaceProfile {
@@ -685,8 +685,15 @@ function parseScopes(value: unknown): string[] {
 
 /** Validates public directory metadata without reading any wallet files or secrets. */
 export function assertWalletDirectory(path: string, allowMissing = false): boolean {
-  if (process.platform === 'win32' || !isAbsolute(path) || path.length > 4096 || resolve(path) !== path
+  if (!isAbsolute(path) || path.length > 4096 || resolve(path) !== path
     || /[\u0000-\u001f\u007f]/.test(path)) throw walletPathError();
+  if (process.platform === 'win32') {
+    try { assertPrivatePermissions(path, 'directory'); return true; }
+    catch (error) {
+      if (!allowMissing || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw walletPathError();
+      // Check existing ancestors from the root before accepting a missing setup target.
+    }
+  }
   let current = parse(path).root;
   for (const component of path.slice(current.length).split(sep).filter(Boolean)) {
     current = join(current, component);
@@ -699,7 +706,8 @@ export function assertWalletDirectory(path: string, allowMissing = false): boole
     if (!info.isDirectory() || info.isSymbolicLink()) throw walletPathError();
   }
   const info = lstatSync(path);
-  if (typeof process.getuid !== 'function' || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o700) throw walletPathError();
+  if (process.platform !== 'win32' && (typeof process.getuid !== 'function'
+    || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o700)) throw walletPathError();
   return true;
 }
 
@@ -710,9 +718,18 @@ function assertPrivateProfileFile(path: string, allowMissing: boolean): boolean 
     if (allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw walletPathError();
   }
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1 || typeof process.getuid !== 'function'
-    || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o600) throw walletPathError();
+  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1
+    || (process.platform !== 'win32' && (typeof process.getuid !== 'function'
+      || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o600))) throw walletPathError();
   return true;
+}
+
+/** Check existing SQLite artifacts before SQLite opens them. */
+function assertProfileFiles(home: string): void {
+  assertWalletDirectory(home);
+  const database = join(home, 'profiles.sqlite');
+  assertPrivateProfileFile(database, false);
+  for (const suffix of ['-journal', '-wal', '-shm']) assertPrivateProfileFile(database + suffix, true);
 }
 
 function walletPathError(): ProfileError {
@@ -721,4 +738,18 @@ function walletPathError(): ProfileError {
 
 export function requireSession(profile: MarketplaceProfile): void {
   if (profile.authMode!=='controller-session') throw new ProfileError('SETUP_REQUIRED','This operation requires a controller-session profile. Reconfigure a separate Marketplace MCP profile with `atto-marketplace-mcp setup --profile <new-id> --mode controller-session`; scoped API-key profiles do not gain funding authority.');
+}
+
+function ensureProfileHome(home: string): void {
+  let current = parse(home).root;
+  for (const component of home.slice(current.length).split(sep).filter(Boolean)) {
+    current = join(current, component);
+    let created = false;
+    try { mkdirSync(current, { mode: 0o700 }); created = true; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
+    const info = lstatSync(current);
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new ProfileError('PROFILE_PATH', 'The Marketplace MCP profile directory must be a real directory.');
+    if (created) securePrivatePermissions(current, 'directory');
+  }
+
 }

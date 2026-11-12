@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, symlinkSync, rmSync, lstatSync, linkSync, renameSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, symlinkSync, rmSync, lstatSync, linkSync, renameSync } from 'node:fs';
 import { spawn, spawnSync } from 'node:child_process';
 import { once } from 'node:events';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { NanoWallet, provisionNanoWallet, inspectNanoWallet, approveNanoWalletPolicy, verifyNanoMessage, derivePrivateKey, publicKey, addressFromPublicKey, addressPublicKey, NanoStateBlock, ZERO_HASH, upperHex, validWork } from '../dist/index.js';
 import { canonical, sha256 } from '../dist/configuration.js';
@@ -12,6 +13,7 @@ import { NanoJournal } from '../dist/journal.js';
 import { parsePaymentRequest, validatePaymentResponse } from '../dist/handoff.js';
 import { NanoRpcClient, epochLink, DEV_GENESIS_ACCOUNT } from '../dist/rpc.js';
 import { hexBytes, sign } from '../dist/protocol.js';
+import { securePrivatePermissions } from '@attocash/cli/internal-marketplace';
 import { publishPrivate, readPrivate, processOwnerAlive } from '../dist/private-files.js';
 import * as nanoAdapter from '../dist/index.js';
 import { signMarketplaceNanoController } from '../dist/index.js';
@@ -26,7 +28,22 @@ function work(root, receive = false) {
 async function fixture(t, { grants = { marketplaceFunding: true, externalTransfers: true, controllerPurposes: ['login'] }, limit = '100' } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'nano-engine-'));
     chmodSync(dir, 0o700);
-    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const wallets = new Set(), children = new Set();
+    t.after(async () => {
+        for (const child of children) {
+            if (child.exitCode !== null || child.signalCode !== null) continue;
+            const exited = once(child, 'exit');
+            child.kill('SIGKILL');
+            let deadline;
+            try {
+                await Promise.race([exited, new Promise((_, reject) => {
+                    deadline = setTimeout(() => reject(Error('Fixture child did not exit before cleanup.')), 5000);
+                })]);
+            } finally { clearTimeout(deadline); }
+        }
+        for (const wallet of wallets) wallet.close();
+        rmSync(dir, { recursive: true, force: true });
+    });
     const handoff = join(dir, 'handoff');
     mkdirSync(handoff, { mode: 0o700 });
     const seedFile = join(dir, 'seed.hex');
@@ -80,8 +97,19 @@ async function fixture(t, { grants = { marketplaceFunding: true, externalTransfe
         }, requireLoopbackDevelopmentEndpoint() {
         },
     };
-    const open = () => NanoWallet.open({ dataDir: dir, rpc, now: () => now });
-    return { dir, handoff, source, destination, key, setup, grants, rpc, open, published, blocks, get account() {
+    const open = (timestamp = now) => {
+        const wallet = NanoWallet.open({ dataDir: dir, rpc, now: () => timestamp });
+        const close = wallet.close.bind(wallet);
+        wallets.add(wallet);
+        wallet.close = () => {
+            if (!wallets.has(wallet)) return;
+            close();
+            wallets.delete(wallet);
+        };
+        return wallet;
+    };
+    const trackChild = child => { children.add(child); return child; };
+    return { trackChild, dir, handoff, source, destination, key, setup, grants, rpc, open, published, blocks, get account() {
             return account;
         }, set account(v) {
             account = v;
@@ -144,7 +172,7 @@ test('unknown publication fences new money even after 24h and retry publishes on
     // Then new spending stays fenced and the original signed bytes are reused.
     assert.equal(first.state, 'UNKNOWN');
     wallet.close();
-    wallet = NanoWallet.open({ dataDir: f.dir, rpc: f.rpc, now: () => now + 172800000 });
+    wallet = f.open(now + 172800000);
     t.after(() => wallet.close());
     await assert.rejects(wallet.call('transfer.send', transfer(f, '1')), { code: 'SOURCE_FENCED' });
     assert.equal((await wallet.call('transfer.send', args)).sendHash, first.sendHash);
@@ -215,13 +243,24 @@ test('private files reject symlinks, broad permissions, duplicate response repla
     publishPrivate(path, Buffer.from('{}\n'));
     // Then replacement, broad permissions and symlinks are rejected.
     assert.throws(() => publishPrivate(path, Buffer.from('{"other":1}\n')), { code: 'PRIVATE_FILE_CONFLICT' });
-    chmodSync(path, 0o644);
-    assert.throws(() => readPrivate(path), { code: 'PRIVATE_FILE' });
-    chmodSync(path, 0o600);
+    if (process.platform !== 'win32') {
+        chmodSync(path, 0o644);
+        assert.throws(() => readPrivate(path), { code: 'PRIVATE_FILE' });
+        securePrivatePermissions(path, 'file');
+    }
+    assert.deepEqual(readPrivate(path), Buffer.from('{}\n'));
     const alias = join(f.dir, 'alias');
-    symlinkSync(path, alias);
-    assert.throws(() => readPrivate(alias), { code: 'PRIVATE_FILE' });
+    if (process.platform === 'win32') {
+        symlinkSync(f.handoff, alias, 'junction');
+        const linkedPath = join(alias, 'private.json');
+        publishPrivate(join(f.handoff, 'private.json'), Buffer.from('{}\n'));
+        assert.throws(() => readPrivate(linkedPath), { code: 'PRIVATE_FILE' });
+    } else {
+        symlinkSync(path, alias);
+        assert.throws(() => readPrivate(alias), { code: 'PRIVATE_FILE' });
+    }
 });
+
 test('terminal policy update preserves keys and journal while explicit external grant changes authority', async (t) => {
     // Given the profile denies external spending and already owns a seed.
     const f = await fixture(t, { grants: { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] } });
@@ -234,6 +273,70 @@ test('terminal policy update preserves keys and journal while explicit external 
     t.after(() => wallet.close());
     assert.equal((await wallet.call('transfer.send', transfer(f))).state, 'CONFIRMED');
 });
+for (const mode of ['transient', 'changed', 'exhausted']) {
+    test(`policy replacement handles ${mode} rename refusal without changing unrelated wallet data`, async t => {
+        // Given an existing wallet and a child preload that refuses only policy-file renames.
+        const f = await fixture(t), path = join(f.dir, 'wallet.json');
+        const original = readFileSync(path), config = JSON.parse(original);
+        const concurrent = { ...config, limits: { maxPaymentAtomic: '7', rolling24hAtomic: '17' } };
+        const concurrentBytes = `${canonical(concurrent)}\n`;
+        const journalPath = join(f.dir, 'nano-wallet.sqlite3'), journal = Buffer.from('retained journal bytes');
+        writeFileSync(journalPath, journal, {mode:0o600});
+        const seed = readFileSync(config.keySource.seedFile), preload = join(f.dir, 'policy-rename-preload.mjs');
+        writeFileSync(preload, `
+            import fs from 'node:fs';
+            import {syncBuiltinESMExports} from 'node:module';
+            const rename = fs.renameSync;
+            globalThis.policyRenameAttempts = 0;
+            globalThis.policyRenameSources = new Set();
+            fs.renameSync = (source, target, ...args) => {
+                if (target === ${JSON.stringify(path)} && /[.]nano-policy-[a-f0-9]{32}[.]tmp$/.test(source)) {
+                    globalThis.policyRenameSources.add(source);
+                    const attempt = ++globalThis.policyRenameAttempts;
+                    if (${JSON.stringify(mode)} === 'changed' && attempt === 1)
+                        fs.writeFileSync(target, ${JSON.stringify(concurrentBytes)});
+                    if (${JSON.stringify(mode)} === 'exhausted' || attempt === 1)
+                        throw Object.assign(new Error('Synthetic policy rename refusal.'), {code:'EPERM',syscall:'rename'});
+                }
+                return rename(source,target,...args);
+            };
+            syncBuiltinESMExports();
+        `, {mode:0o600});
+        const grants = {marketplaceFunding:false,externalTransfers:false,controllerPurposes:['login']};
+        const limits = {maxPaymentAtomic:'100',rolling24hAtomic:'100'};
+        const childCode = `
+            import {approveNanoWalletPolicy} from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)};
+            try {
+                await approveNanoWalletPolicy({dataDir:${JSON.stringify(f.dir)},grants:${JSON.stringify(grants)},
+                    limits:${JSON.stringify(limits)},terminalConfirmed:true});
+                console.log(JSON.stringify({code:'OK',attempts:globalThis.policyRenameAttempts,sourceCount:globalThis.policyRenameSources.size}));
+            } catch(error) {
+                console.log(JSON.stringify({code:error.code,syscall:error.syscall,attempts:globalThis.policyRenameAttempts,sourceCount:globalThis.policyRenameSources.size}));
+            }
+        `;
+        // When the real policy owner handles the rename failure on the current operating system.
+        const child = spawnSync(process.execPath, ['--import', pathToFileURL(preload).href,
+            '--input-type=module', '-e', childCode], {encoding:'utf8',timeout:5000});
+        assert.equal(child.status,0,child.stderr);
+        const result = JSON.parse(child.stdout);
+        assert.equal(result.sourceCount,1);
+        // Then only Windows retries, every retry checks the original config, and exhaustion remains bounded.
+        if (process.platform === 'win32' && mode === 'transient') {
+            assert.equal(result.code,'OK');
+            assert.ok(Number.isInteger(result.attempts) && result.attempts >= 2 && result.attempts <= 20);
+            assert.deepEqual(JSON.parse(readFileSync(path)),{...config,grants,limits});
+        } else {
+            const changed = process.platform === 'win32' && mode === 'changed';
+            assert.equal(result.code,changed ? 'WALLET_CONFIGURATION_CHANGED' : 'EPERM');
+            assert.equal(result.attempts,process.platform === 'win32' && mode === 'exhausted' ? 20 : 1);
+            if (!changed) assert.equal(result.syscall,'rename');
+            assert.deepEqual(readFileSync(path),mode === 'changed' ? Buffer.from(concurrentBytes) : original);
+        }
+        assert.deepEqual(readFileSync(config.keySource.seedFile),seed);
+        assert.deepEqual(readFileSync(journalPath),journal);
+        assert.equal(readdirSync(f.dir).some(name => name.startsWith('.nano-policy-')),false);
+    });
+}
 test('controller signer accepts only fresh exact configured typed challenges; verification needs no wallet', async (t) => {
     // Given the controller grants login for one origin, network and audience.
     const f = await fixture(t), wallet = f.open();
@@ -307,7 +410,7 @@ test('confirmed rolling spend expires after 24 hours while current reservations 
     // When a new transfer arrives after the full 24-hour window.
     await wallet.call('transfer.send', transfer(f, '60'));
     wallet.close();
-    wallet = NanoWallet.open({ dataDir: f.dir, rpc: f.rpc, now: () => now + 86400001 });
+    wallet = f.open(now + 86400001);
     t.after(() => wallet.close());
     // Then only expired confirmed usage is released.
     assert.equal((await wallet.call('transfer.send', transfer(f, '60'))).state, 'CONFIRMED');
@@ -377,11 +480,11 @@ function restoreTerminal(descriptors) {
     });
 }
 
-test('SIGKILL between atomic publication link and unlink recovers exact response; unrelated hardlinks remain forbidden', async t => {
-    // Given the actual publisher is killed immediately after its create-only hard link.
+test('abrupt exit between atomic publication link and unlink recovers exact response; unrelated hardlinks remain forbidden', async t => {
+    // Given the actual publisher exits immediately after its create-only hard link.
     const f = await fixture(t), path = join(f.handoff, 'a'.repeat(32) + '.response.json'), moduleUrl = new URL('../dist/private-files.js', import.meta.url).href;
-    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const link=fs.linkSync;fs.linkSync=(...args)=>{link(...args);process.kill(process.pid,'SIGKILL');};syncBuiltinESMExports();const {publishPrivate}=await import(${JSON.stringify(moduleUrl)});publishPrivate(${JSON.stringify(path)},Buffer.from('{}\\n'));`]);
-    assert.equal(child.signal, 'SIGKILL');
+    const child = spawnSync(process.execPath, ['--input-type=module', '-e', `import fs from 'node:fs';import {syncBuiltinESMExports} from 'node:module';const link=fs.linkSync;fs.linkSync=(...args)=>{link(...args);process.exit(73);};syncBuiltinESMExports();const {publishPrivate}=await import(${JSON.stringify(moduleUrl)});publishPrivate(${JSON.stringify(path)},Buffer.from('{}\\n'));`]);
+    assert.equal(child.status, 73);
     assert.equal(lstatSync(path).nlink, 2);
     // When a restart reads and retries the exact saved response.
     assert.equal(readPrivate(path).toString(), '{}\n');
@@ -411,7 +514,7 @@ test('signed journal candidates cannot be rewritten or deleted, and malformed sa
     await assert.rejects(wallet.call('transfer.status', { requestId: badId }), { code: 'JOURNAL_CONFLICT' });
     assert.equal(f.published.length, published);
 });
-test('independent processes serialize live preparation, reclaim a killed unsigned attempt, and recover one durable signed candidate', { timeout: 10000 }, async (t) => {
+test('independent processes serialize live preparation, reclaim a killed unsigned attempt, and recover one durable signed candidate', { timeout: process.platform === 'win32' ? 300000 : 10000 }, async (t) => {
     // Given two independent processes share one owner-only profile and SQLite account lane.
     const f = await fixture(t), request = payment(f), moduleUrl = new URL('../dist/index.js', import.meta.url).href;
     const childCode = `
@@ -419,18 +522,18 @@ test('independent processes serialize live preparation, reclaim a killed unsigne
       const [dataDir,source,mode,operation,argText]=process.argv.slice(1),args=JSON.parse(argText);
       const snapshot={frontier:'A'.repeat(64),confirmedFrontier:'A'.repeat(64),balance:1000n,confirmedBalance:1000n,representative:source,confirmedRepresentative:source,epoch:2};
       function work(root){for(let n=0n;;n++){const nonce=n.toString(16).padStart(16,'0');if(validWork('nano:dev',2,false,root,nonce))return nonce;}}
-      const rpc={requirePinnedNetwork:async()=>{},accountSnapshot:async()=>snapshot,accountSnapshotOrNotFound:async()=>snapshot,verifyFrontierState:async()=>{},blockInfo:async()=>null,generateWork:async root=>{if(mode==='hold'){console.log('WORK_PENDING');await new Promise(r=>setTimeout(r,60000));}return work(root);}};
+      const rpc={requirePinnedNetwork:async()=>{},accountSnapshot:async()=>snapshot,accountSnapshotOrNotFound:async()=>snapshot,verifyFrontierState:async()=>{},blockInfo:async()=>null,generateWork:async root=>{if(mode==='hold'){console.log('WORK_PENDING');await new Promise(r=>setTimeout(r,${process.platform === 'win32' ? 300000 : 60000}));}return work(root);}};
       const wallet=NanoWallet.open({dataDir,rpc,now:()=>${now}});
       try{console.log(JSON.stringify(await wallet.call(operation,args)));}catch(error){console.log(JSON.stringify({errorCode:error.code}));}finally{wallet.close();}
     `;
     const args = ['--input-type=module', '-e', childCode, f.dir, f.source, 'hold', 'payment.prepare', JSON.stringify({ handoffId: request.handoffId })];
-    const held = spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    const held = f.trackChild(spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] }));
     t.after(() => { if (!held.killed)
         held.kill('SIGKILL'); });
     const [pending] = await once(held.stdout, 'data');
     assert.ok(String(pending).includes('WORK_PENDING'));
     function run(operation, values) {
-        const result = spawnSync(process.execPath, ['--input-type=module', '-e', childCode, f.dir, f.source, 'run', operation, JSON.stringify(values)], { encoding: 'utf8', timeout: 5000 });
+        const result = spawnSync(process.execPath, ['--input-type=module', '-e', childCode, f.dir, f.source, 'run', operation, JSON.stringify(values)], { encoding: 'utf8', timeout: process.platform === 'win32' ? 60000 : 5000 });
         assert.equal(result.status, 0, result.stderr);
         return JSON.parse(result.stdout.trim());
     }
@@ -878,11 +981,11 @@ test('account-bound draft funding retains one durable candidate across polling b
     assert.match(envelope.extensions['marketplace-account-binding'].info.bindingSignature, /^[A-F0-9]{128}$/);
     wallet.close();
     // The facilitator's confirmation budget does not invalidate a still-authorized saved handoff.
-    wallet = NanoWallet.open({ dataDir: f.dir, rpc: f.rpc, now: () => now + 2000 });
+    wallet = f.open(now + 2000);
     assert.equal((await wallet.call('payment.prepare', { handoffId: raw.handoffId })).state, 'PREPARED');
     assert.deepEqual(readFileSync(path), bytes); wallet.close();
     // Intent expiry leaves the signed candidate fenced and recoverable with its original identity.
-    wallet = NanoWallet.open({ dataDir: f.dir, rpc: f.rpc, now: () => now + 360000 });
+    wallet = f.open(now + 360000);
     t.after(() => wallet.close());
     const expired = await wallet.call('payment.prepare', { handoffId: raw.handoffId });
     assert.equal(expired.state, 'UNKNOWN'); assert.equal(expired.sendHash, first.sendHash);
@@ -892,4 +995,27 @@ test('account-bound draft funding retains one durable candidate across polling b
     assert.equal(record.responseJson, bytes.toString().trim());
     assert.equal(record.blockHash, first.sendHash); assert.equal(record.deadline, raw.expiresAt);
     assert.equal(f.published.length, 0);
+});
+
+
+test('fixture cleanup closes restarted wallets before removing exact signed recovery files', { timeout: process.platform === 'win32' ? 180000 : 10000 }, async t => {
+    // Given a subtest owns a wallet with an exact persisted signed response.
+    let directory;
+    await t.test('owned wallet lifecycle', async child => {
+        const f = await fixture(child), request = payment(f);
+        directory = f.dir;
+        let wallet = f.open();
+        await wallet.call('payment.prepare', { handoffId: request.handoffId });
+        const path = join(f.handoff, `${request.handoffId}.response.json`), bytes = readFileSync(path);
+        // When manual closure and restart reuse the original signed candidate.
+        wallet.close();
+        wallet.close();
+        wallet = f.open();
+        await wallet.call('payment.prepare', { handoffId: request.handoffId });
+        // Then the exact bytes survive and fixture cleanup owns the still-open restarted wallet.
+        assert.deepEqual(readFileSync(path), bytes);
+        child.after(() => wallet.close());
+    });
+    // Child cleanup completed within the bound, before its later close hook ran.
+    assert.equal(existsSync(directory), false);
 });

@@ -93,14 +93,18 @@ async function run(f, args, steps = [], terminal = true) {
     child.stdin.write(step.raw ? step.answer : `${step.answer}\n`);
   });
   // Keep stdin open: one Ctrl+C must restore input state and let the CLI exit by itself.
+  const closed = new Promise(resolve => child.once('close', resolve));
   const result = await new Promise((resolve, reject) => {
+    let timedOut = false;
     const timeout = setTimeout(async () => {
+      timedOut = true;
       const trace = await readFile(tracePath, 'utf8').catch(() => 'unavailable');
       child.kill();
+      await closed;
       reject(new Error(`CLI did not exit after its terminal response: ${stripVTControlCharacters(stderr)}\nInput trace: ${trace}`));
     }, 10_000);
     child.once('error', error => { clearTimeout(timeout); reject(error); });
-    child.once('close', code => { clearTimeout(timeout); resolve({ code, stdout, stderr: stripVTControlCharacters(stderr) }); });
+    child.once('close', code => { clearTimeout(timeout); if (!timedOut) resolve({ code, stdout, stderr: stripVTControlCharacters(stderr) }); });
   });
   assert.equal(index, steps.length, result.stderr);
   return { ...result, trace: JSON.parse(await readFile(tracePath, 'utf8')) };

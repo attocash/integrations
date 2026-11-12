@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { access, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -10,6 +10,7 @@ import test from 'node:test';
 const cliDirectory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? fileURLToPath(new URL('../', import.meta.url));
 const moduleUrl = path => pathToFileURL(join(cliDirectory, 'dist', path)).href;
 const { AttoApplication } = await import(moduleUrl('application/app.js'));
+const { securePrivatePermissions } = await import(moduleUrl('storage/private-permissions.js'));
 const recoveryPhrase = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
 
 async function fixture(t, initialize = true, { defaultCli = false } = {}) {
@@ -20,6 +21,11 @@ async function fixture(t, initialize = true, { defaultCli = false } = {}) {
       : join(root, 'xdg', 'atto-cli')
     : join(root, 'marketplace-wallet');
   t.after(() => rm(root, { recursive: true, force: true }));
+  if (process.platform === 'win32') {
+    const local = join(root, 'local');
+    await mkdir(local, { recursive: true });
+    securePrivatePermissions(local, 'directory');
+  }
   const open = () => new AttoApplication({ directory, secrets: {
     get: async () => recoveryPhrase,
     set: async () => {},
@@ -30,7 +36,7 @@ async function fixture(t, initialize = true, { defaultCli = false } = {}) {
     await application.createWallet(recoveryPhrase);
     await application.call('address_derive', { index: 0 });
     await application.close();
-    if (defaultCli) await writeFile(join(directory, 'profile.json'), JSON.stringify({ version: 1, credentialService: 'Atto CLI', defaultCli: true }));
+    if (defaultCli) await writeFile(join(directory, 'profile.json'), JSON.stringify({ version: 1, credentialService: 'Atto CLI', defaultCli: true }), { mode: 0o600 });
   }
   return { root, directory, open, initialize };
 }
@@ -96,14 +102,18 @@ async function run(f, { terminal = true, controllerIndex = 3, reuseExisting = fa
     await step.beforeAnswer?.();
     child.stdin.write(String(step.answer) + '\n');
   });
+  const closed = new Promise(resolve => child.once('close', resolve));
   const result = await new Promise((resolve, reject) => {
+    let timedOut = false;
     const timeout = setTimeout(async () => {
+      timedOut = true;
       const trace = await import('node:fs/promises').then(fs => fs.readFile(tracePath, 'utf8')).catch(() => 'unavailable');
       child.kill();
+      await closed;
       reject(new Error('Setup helper did not finish: ' + stripVTControlCharacters(stderr) + '\nTrace: ' + trace));
-    }, 10_000);
+    }, process.platform === 'win32' ? 30_000 : 10_000);
     child.once('error', error => { clearTimeout(timeout); reject(error); });
-    child.once('close', code => { clearTimeout(timeout); resolve({ code, stderr: stripVTControlCharacters(stderr) }); });
+    child.once('close', code => { clearTimeout(timeout); if (!timedOut) resolve({ code, stderr: stripVTControlCharacters(stderr) }); });
   });
   assert.equal(stepIndex, steps.length, result.stderr);
   const trace = JSON.parse(await (await import('node:fs/promises')).readFile(tracePath, 'utf8'));

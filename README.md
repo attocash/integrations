@@ -35,9 +35,10 @@ available OS password store:
 | Windows | Credential Manager |
 | Linux | An unlocked Secret Service provider, `secret-tool`, and access to your desktop D-Bus session |
 
-The CLI and wallet MCP support Linux, macOS, and Windows. Marketplace MCP's
-private wallet storage requires Linux or macOS. See each package guide for its
-requirements and troubleshooting.
+The CLI, wallet MCP, and Marketplace MCP support Linux, macOS, and Windows.
+Windows uses ordinary Node.js files in the current user's profile and Credential
+Manager for wallet recovery material. See each package guide for password-store
+prerequisites and troubleshooting.
 
 ### Use your terminal
 

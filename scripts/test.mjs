@@ -15,12 +15,14 @@ if (!included.length) throw new Error('No supported tests matched the requested 
 
 // Bound individual tests and the whole runner, including failed-fixture handles.
 // CI adds a separate hard step deadline so orphaned processes cannot occupy a job.
-const child = spawn(process.execPath, ['--test', '--test-timeout=180000', ...included], {
-  cwd: root, stdio: 'inherit', timeout: 8 * 60_000,
+const runnerMinutes = 8;
+const reporter = process.platform === 'win32' ? ['--test-reporter=tap'] : [];
+const child = spawn(process.execPath, ['--test', ...reporter, '--test-timeout=180000', ...included], {
+  cwd: root, stdio: 'inherit', timeout: runnerMinutes * 60_000,
 });
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => child.kill(signal));
 child.once('error', error => { console.error(error.message); process.exitCode = 1; });
 child.once('exit', (code, signal) => {
-  if (signal) console.error(`Test runner terminated with ${signal}; its process limit is eight minutes.`);
+  if (signal) console.error(`Test runner terminated with ${signal}; its process limit is ${runnerMinutes} minutes.`);
   process.exitCode = code ?? 1;
 });

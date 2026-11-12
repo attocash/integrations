@@ -17,7 +17,7 @@ const account = JSON.stringify({ publicKey: '11'.repeat(32), network: 'LOCAL', v
   balance: 100, lastTransactionHash: '22'.repeat(32), lastTransactionTimestamp: 1704616009211,
   representativeAlgorithm: 'V1', representativePublicKey: '33'.repeat(32) });
 
-test('a failed node connection is reported by the watch and reconnects without terminating MCP', { timeout: 8000 }, async t => {
+test('a failed node connection is reported by the watch and reconnects without terminating MCP', { timeout: process.platform === 'win32' ? 30_000 : 8000 }, async t => {
   // Given: an actual MCP subprocess with an empty read-only profile and a node
   // that drops the first connection before sending headers, then serves events.
   const directory = await mkdtemp(join(tmpdir(), 'atto-mcp-stream-failure-'));

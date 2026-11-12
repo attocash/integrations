@@ -1,6 +1,6 @@
+import { defaultMarketplaceHome } from './defaults.js';
 import { existsSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { createApplication } from '@attocash/cli/core';
 import { signMarketplaceAttoController } from '@attocash/cli/internal-marketplace';
@@ -21,7 +21,7 @@ export async function approveMarketplaceController(requestPath: string, options:
   requireTerminal();
   const home = resolve(options.home);
   const path = resolve(requestPath);
-  const match = /\/approvals\/([A-Za-z0-9][A-Za-z0-9_-]{0,47})\/([a-f0-9]{32})\.request\.json$/.exec(path);
+  const match = /\/approvals\/([A-Za-z0-9][A-Za-z0-9_-]{0,47})\/([a-f0-9]{32})\.request\.json$/.exec(path.split(sep).join('/'));
   if (!match || path !== approvalRequestPath(home, match[1]!, match[2]!)) throw invalid();
   const profileId = match[1]!, handoffId = match[2]!;
   const env = managedWalletEnvironment(home, options.env);
@@ -91,8 +91,8 @@ export async function runApproval(argv: string[], env: NodeJS.ProcessEnv): Promi
     if (argv[index] !== '--home' || home || !argv[index + 1]) throw new ProfileError('SETUP_USAGE', approvalUsage);
     home = argv[++index];
   }
-  home ??= env.MARKETPLACE_MCP_HOME ?? (resolve(path).includes('/approvals/')
-    ? dirname(dirname(dirname(resolve(path)))) : join(homedir(), '.config', 'atto', 'marketplace-mcp'));
+  home ??= env.MARKETPLACE_MCP_HOME ?? (resolve(path).includes(`${sep}approvals${sep}`)
+    ? dirname(dirname(dirname(resolve(path)))) : defaultMarketplaceHome(env));
   const result = await approveMarketplaceController(path, { home, env });
   process.stdout.write(`${JSON.stringify(result)}\n`);
 }

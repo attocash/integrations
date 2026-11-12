@@ -31,12 +31,23 @@ JavaScript verifier API. A regular `npm ci` installs the supported package set;
 the optional `ATTO_COMMONS_LOCAL_VERSION` override is only for deliberate local
 Commons development and does not change source package pins.
 
-The root test runner keeps all Atto CLI and wallet MCP suites enabled on Linux,
-macOS and Windows. Marketplace's private storage and executable-fixture suites
-require POSIX permissions; Windows still runs portable protocol/API tests and
-checks that private wallet startup fails closed. Tests have a three-minute
-individual deadline and an eight-minute runner deadline, with separate CI step
-and job limits. Package verification follows the same platform policy.
+The root test runner exercises Atto CLI, wallet MCP, Marketplace private storage,
+SQLite recovery, and stdio workflows on Linux, macOS, and Windows. Only fixtures
+that execute Unix-specific shell/password-store programs are excluded on Windows.
+Native Windows tests cover approval files, Nano storage, process restarts and
+recovery using Node.js filesystem support. Source tests allow eight minutes on
+every platform. Package verification retains ten-minute CLI/wallet-MCP,
+three-minute Marketplace MCP, and two-minute detached-global test-group limits.
+CI keeps ten-minute source and twenty-minute package steps within its
+thirty-five-minute test job. The Windows source runner emits TAP so assertion
+and cleanup errors remain visible if a later fixture reaches the overall deadline.
+
+POSIX files retain owner and mode checks. Windows uses ordinary per-user profile
+permissions without independently inspecting DACLs. Immutable publication, file
+identity, link and symbolic-link checks remain active on both platforms. Normal
+builds use Node.js and TypeScript; no permission executable, PowerShell checker,
+compiler verification step or additional SDK is used. Printed Windows approval
+commands still use PowerShell as the local terminal shell.
 
 Private-wallet fixtures use `test/support/temporary-directory.mjs` and place
 explicit wallet overrides beneath that canonical temporary root. Do not

@@ -1,8 +1,9 @@
 import { constants, closeSync, existsSync, fstatSync, fsyncSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, linkSync, unlinkSync, writeSync, renameSync, readdirSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, normalize, parse, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { setTimeout as delay } from 'node:timers/promises';
 import { fail } from './errors.js';
-const uid = process.getuid?.();
+import { assertPrivatePermissions, assertPrivatePermissionsBatch, securePrivatePermissions, syncPrivateDirectory } from '@attocash/cli/internal-marketplace';
 export function absolutePath(value: string): string {
     if (typeof value !== 'string' || !isAbsolute(value) || normalize(value) !== value || value.includes('\0') || value.length > 4096)
         fail('PRIVATE_FILE');
@@ -14,11 +15,16 @@ function components(path: string, create: boolean): void {
     for (const part of path.slice(current.length).split(sep).filter(Boolean)) {
         current = join(current, part);
         if (!existsSync(current) && create) {
+            let created = false;
             try {
                 mkdirSync(current, { mode: 0o700 });
+                created = true;
             }
-            catch {
+            catch (error) {
+                if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error;
             }
+            if (created) securePrivatePermissions(current, 'directory');
+            else assertPrivatePermissions(current, 'directory');
         }
         const st = lstatSync(current);
         if (st.isSymbolicLink() || !st.isDirectory())
@@ -28,20 +34,37 @@ function components(path: string, create: boolean): void {
 export function privateDirectory(path: string, create = true): string {
     try {
         components(path, create);
-        const st = lstatSync(path);
-        if ((uid !== undefined && st.uid !== uid) || (st.mode & 0o777) !== 0o700)
-            fail('PRIVATE_FILE');
+        assertPrivatePermissions(path, 'directory');
         return path;
     }
     catch {
         return fail('PRIVATE_FILE', 'Use private owner-only files and directories without symbolic links.');
     }
 }
-export function privateFile(path: string): void {
+function inspectPrivateFile(path: string): void {
     components(dirname(path), false);
     const st = lstatSync(path);
-    if (!st.isFile() || st.isSymbolicLink() || (uid !== undefined && st.uid !== uid) || (st.mode & 0o777) !== 0o600 || st.nlink !== 1)
-        fail('PRIVATE_FILE');
+    if (!st.isFile() || st.isSymbolicLink() || st.nlink !== 1) fail('PRIVATE_FILE');
+}
+/** Check every existing artifact in one operation without trusting parent privacy. */
+export function privateFiles(paths: ReadonlyArray<{ path: string; optional?: boolean }>, directories: readonly string[] = []): void {
+    try {
+        for (const directory of directories) components(directory, false);
+        for (const entry of paths) {
+            try { inspectPrivateFile(entry.path); }
+            catch (error) {
+                if (entry.optional && (error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+                throw error;
+            }
+        }
+        assertPrivatePermissionsBatch([
+            ...[...new Set(directories)].map(path => ({ path, kind: 'directory' as const })),
+            ...paths.map(entry => ({ ...entry, kind: 'file' as const })),
+        ]);
+    } catch { fail('PRIVATE_FILE'); }
+}
+export function privateFile(path: string): void {
+    privateFiles([{ path }]);
 }
 export function readPrivate(path: string, limit = 256000): Buffer {
     let fd: number | undefined;
@@ -76,11 +99,16 @@ export function readPrivate(path: string, limit = 256000): Buffer {
     }
 }
 export function syncDirectory(path: string): void {
-    const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+    syncPrivateDirectory(path);
+}
+/** Windows cannot fsync directory handles through Node. Flush the published file
+ * after its hard-link or rename metadata changes as well as before publication. */
+function syncPublishedFile(path: string): void {
+    if (process.platform !== 'win32') return;
+    const fd = openSync(path, constants.O_RDWR | constants.O_NOFOLLOW);
     try {
         fsyncSync(fd);
-    }
-    finally {
+    } finally {
         closeSync(fd);
     }
 }
@@ -88,6 +116,8 @@ export function writePrivateNew(path: string, content: Uint8Array): void {
     privateDirectory(dirname(absolutePath(path)));
     const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
     try {
+        // Windows files use ordinary directory inheritance.
+        if (process.platform !== 'win32') securePrivatePermissions(path, 'file');
         let offset = 0;
         while (offset < content.length)
             offset += writeSync(fd, content, offset);
@@ -101,7 +131,7 @@ export function writePrivateNew(path: string, content: Uint8Array): void {
 }
 /** Atomic create-only publication. Exact retries reuse the original private bytes. */
 export function publishPrivate(path: string, content: Uint8Array): void {
-    privateDirectory(dirname(absolutePath(path)));
+    absolutePath(path);
     const temporary = join(dirname(path), `.nano-${randomBytes(16).toString('hex')}.tmp`);
     writePrivateNew(temporary, content);
     try {
@@ -123,6 +153,7 @@ export function publishPrivate(path: string, content: Uint8Array): void {
                 throw error;
         }
         privateFile(path);
+        syncPublishedFile(path);
         syncDirectory(dirname(path));
     }
     finally {
@@ -138,19 +169,23 @@ export function recoverPublication(path: string): void {
     const target = lstatSync(path);
     if (target.nlink === 1)
         return;
-    privateDirectory(dirname(path), false);
-    if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 2 || (target.mode & 0o777) !== 0o600 || (uid !== undefined && target.uid !== uid))
+    components(dirname(path), false);
+    if (!target.isFile() || target.isSymbolicLink() || target.nlink !== 2)
         fail('PRIVATE_FILE');
     const matches = readdirSync(dirname(path)).filter(name => /^\.nano-[a-f0-9]{32}\.tmp$/.test(name)).filter(name => {
         const st = lstatSync(join(dirname(path), name));
-        return st.isFile() && !st.isSymbolicLink() && st.dev === target.dev && st.ino === target.ino && st.nlink === 2 && (st.mode & 0o777) === 0o600 && (uid === undefined || st.uid === uid);
+        if (!st.isFile() || st.isSymbolicLink() || st.dev !== target.dev || st.ino !== target.ino || st.nlink !== 2) return false;
+        return true;
     });
     if (matches.length !== 1)
         fail('PRIVATE_FILE');
-    const temporary = join(dirname(path), matches[0]!), current = lstatSync(path), other = lstatSync(temporary);
+    const temporary = join(dirname(path), matches[0]!);
+    assertPrivatePermissionsBatch([{ path: dirname(path), kind: 'directory' }, { path, kind: 'file' }, { path: temporary, kind: 'file' }]);
+    const current = lstatSync(path), other = lstatSync(temporary);
     if (current.ino !== target.ino || current.dev !== target.dev || current.nlink !== 2 || other.ino !== target.ino || other.dev !== target.dev || other.nlink !== 2)
         fail('PRIVATE_FILE');
     unlinkSync(temporary);
+    syncPublishedFile(path);
     syncDirectory(dirname(path));
     privateFile(path);
 }
@@ -181,14 +216,27 @@ export function processOwnerAlive(owner: string, identity: (pid: number) => stri
         return (error as NodeJS.ErrnoException).code !== 'ESRCH';
     }
 }
-export function replacePrivate(path: string, content: Uint8Array): void {
-    privateDirectory(dirname(path), false);
+export async function replacePrivate(path: string, content: Uint8Array, revalidate: () => void): Promise<void> {
     privateFile(path);
     const temporary = join(dirname(path), `.nano-policy-${randomBytes(16).toString('hex')}.tmp`);
     writePrivateNew(temporary, content);
     try {
-        privateFile(path);
-        renameSync(temporary, path);
+        for (let attempt = 0; ; attempt++) {
+            revalidate();
+            privateFile(path);
+            privateFile(temporary);
+            try {
+                renameSync(temporary, path);
+                break;
+            } catch (error) {
+                const failure = error as NodeJS.ErrnoException;
+                if (process.platform !== 'win32' || attempt >= 19 || failure.syscall !== 'rename'
+                    || (failure.code !== 'EPERM' && failure.code !== 'EBUSY')) throw error;
+            }
+            // Retry the same prepared file if Windows briefly refuses the atomic replacement.
+            await delay(100);
+        }
+        syncPublishedFile(path);
         syncDirectory(dirname(path));
         privateFile(path);
     }

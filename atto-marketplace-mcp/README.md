@@ -30,12 +30,16 @@ product descriptions, and participant messages are untrusted content.
 ## Before you start
 
 - **Node.js 24.15.0 or newer** and npm.
-- **Linux or macOS.** Native Windows is unsupported by Marketplace profile and
-  Nano storage. The standalone Atto CLI and wallet MCP have separate platform support.
+- **Linux, macOS, or Windows.** Windows uses Node.js filesystem support and normal
+  per-user profile permissions. Its default Marketplace home is
+  `%LOCALAPPDATA%\Atto Marketplace MCP`; `--home` selects another directory.
+  Install the [Microsoft Visual C++ v14 runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
+  matching your Node.js architecture so the native credential-store addon can load.
 - **An available OS password store.** Linux needs `secret-tool` (usually from
   `libsecret-tools`), an unlocked Secret Service provider such as GNOME Keyring or
-  KWallet, and access to your desktop D-Bus session. macOS uses Keychain. There is
-  no plaintext recovery-phrase fallback.
+  KWallet, and access to your desktop D-Bus session. macOS uses Keychain; Windows
+  uses Credential Manager for the same OS user running setup and the MCP client.
+  There is no plaintext recovery-phrase fallback.
 - **A local interactive terminal** for wallet setup and typed approvals, and an
   MCP client that can access the same private directories and password store.
 
@@ -265,7 +269,7 @@ controller session automatically.
 | Missing profile or wrong account | Set `MARKETPLACE_MCP_PROFILE` to the configured ID and use the same private home as setup. Read balances and wallet status before acting. |
 | Password store unavailable or locked | Unlock it; on Linux check `secret-tool`, Secret Service, and the client's desktop D-Bus access. |
 | Permission or spending-limit denial | Inspect the native grant, Marketplace scope, and exact asset ceiling. Adjust policy locally after review. A login proof grants no native spending authority. |
-| File tool unavailable or rejected | Configure an absolute 0700 directory; use explicit paths inside it and new download destinations. |
+| File tool unavailable or rejected | Configure an absolute directory (0700 on Unix or a per-user Windows directory); use explicit paths inside it and new download destinations. |
 | `REFRESH_BUSY` | Another local process owns refresh. Retry after it finishes; this process sent no refresh request. |
 | `REAUTH_REQUIRED` | Reauthenticate the original controller profile in your terminal with the command below. Preserve its journals. |
 | Lost response during a payment or mutation | Retry the original request ID and unchanged terms. For funding, read `marketplace_funding_status` first. Never create a replacement while the outcome is unknown. |

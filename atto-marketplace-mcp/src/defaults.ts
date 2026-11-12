@@ -5,7 +5,11 @@ import { ProfileError } from './profile-store.js';
 export const productionMarketplaceOrigin = 'https://api.atto.market';
 export const productionMarketplaceAudience = 'urn:marketplace:agent-api:live';
 export const defaultMarketplaceProfile = 'main';
-export function defaultMarketplaceHome(): string { return join(homedir(), '.config', 'atto', 'marketplace-mcp'); }
+export function defaultMarketplaceHome(env: NodeJS.ProcessEnv = process.env): string {
+  return process.platform === 'win32'
+    ? join(env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'Atto Marketplace MCP')
+    : join(homedir(), '.config', 'atto', 'marketplace-mcp');
+}
 
 /** Resolve a new connection before wallet setup can change local state. */
 export function marketplaceConnection(options: {origin?: string; audience?: string}): {origin: string; audience: string} {

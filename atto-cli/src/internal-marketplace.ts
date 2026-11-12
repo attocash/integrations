@@ -61,3 +61,5 @@ export async function signMarketplaceAttoController(options: { directory: string
 }
 
 export { inspectMarketplaceWalletSetup, withUnchangedMarketplaceWalletSetup, type MarketplaceWalletSetupSnapshot } from './marketplace/wallet-setup.js';
+
+export { assertPrivatePermissions, assertPrivatePermissionsBatch, securePrivatePermissions, securePrivatePermissionsBatch, syncPrivateDirectory, type PrivatePath } from './storage/private-permissions.js';

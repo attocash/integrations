@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { realpathSync } from 'node:fs';
 import { isAbsolute, resolve } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath } from 'node:url';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { createMarketplaceMcpServer } from './server.js';
 import { MarketplaceProfileStore } from './profile-store.js';
@@ -33,10 +33,10 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
   }
   const options = parseArgs(argv, env);
   if (options.help) {
-    process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup [--advanced] [--home <directory>] [--profile <name>] [--origin <origin> --audience <audience>]\nDefaults: production Marketplace, main profile, ~/.config/atto/marketplace-mcp.\nReuse the selected Atto CLI wallet and its current authority, choose Marketplace purposes, and optionally configure Nano. Use --advanced to choose accounts or configure native limits.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp [--profile <profile-id>] [--home <private-directory>] [--payment-handoff-dir <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --apply-atto-limit/--apply-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits apply only to new reservation holds; products:publish without them can manage existing holds.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
+    process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup [--advanced] [--home <directory>] [--profile <name>] [--origin <origin> --audience <audience>]\nDefaults: production Marketplace, main profile, per-user Marketplace home (override with --home).\nReuse the selected Atto CLI wallet and its current authority, choose Marketplace purposes, and optionally configure Nano. Use --advanced to choose accounts or configure native limits.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp [--profile <profile-id>] [--home <private-directory>] [--payment-handoff-dir <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --apply-atto-limit/--apply-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits apply only to new reservation holds; products:publish without them can manage existing holds.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
     return;
   }
-  const home = options.home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome();
+  const home = options.home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env);
   const profileId = options.profile ?? env.MARKETPLACE_MCP_PROFILE ?? defaultMarketplaceProfile;
   const profiles = await MarketplaceProfileStore.open(resolve(home));
   let server: ReturnType<typeof createMarketplaceMcpServer> | undefined;
@@ -89,10 +89,16 @@ function parseArgs(argv: string[], env: NodeJS.ProcessEnv): { profile?: string; 
   return result;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+if (process.argv[1] && isMainModule(process.argv[1])) {
   run().catch(error => {
     const message = error instanceof Error ? error.message : 'Marketplace MCP could not start.';
     process.stderr.write(`Marketplace MCP: ${message}\n`);
     process.exitCode = 1;
   });
+}
+
+function isMainModule(entry: string): boolean {
+  const own = realpathSync(fileURLToPath(import.meta.url));
+  const invoked = realpathSync(entry);
+  return process.platform === 'win32' ? own.toLowerCase() === invoked.toLowerCase() : own === invoked;
 }

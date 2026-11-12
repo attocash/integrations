@@ -776,8 +776,9 @@ the typed challenge and signs its exact message, then writes a private sibling
 file paths; an existing response is never overwritten. Expired challenges
 require a new request.
 
-File-based approval requires POSIX file-ownership support and is unavailable on
-native Windows.
+File-based approval uses Unix owner-only permissions or ordinary Windows per-user
+directory permissions. Node.js checks file identity, kind, links and symbolic-link
+aliases. Run printed Windows approval commands in PowerShell.
 
 This local review does not require or grant unattended message-signing access.
 For product purchase and refund approvals, the preview distinguishes proof-bound

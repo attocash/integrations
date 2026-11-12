@@ -16,8 +16,9 @@ test('private fixture roots resolve operating-system temporary-directory aliases
   const code = `import {tmpdir} from ${JSON.stringify(helper)}; process.stdout.write(tmpdir());`;
   // When a child resolves that temporary root before creating private fixtures.
   const output = execFileSync(process.execPath, ['--input-type=module', '--eval', code], {
-    env: {...process.env, TMPDIR: alias, TEMP: alias, TMP: alias}, timeout: 5000, encoding: 'utf8',
+    env: {...process.env, TMPDIR: alias, TEMP: alias, TMP: alias},
+    timeout: 5000, encoding: 'utf8',
   });
-  // Then fixture paths use the physical directory.
+  // Then every platform uses the resolved physical temporary directory.
   assert.equal(output, physical);
 });

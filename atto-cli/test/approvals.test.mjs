@@ -353,7 +353,7 @@ test('MCP automatic receiving starts after local approval and stops after revoca
   assert.equal(f.secretReads, reads);
 });
 
-test('a queued MCP mutation rechecks access after a local revocation', { timeout: 5000 }, async t => {
+test('a queued MCP mutation rechecks access after a local revocation', { timeout: process.platform === 'win32' ? 30_000 : 5000 }, async t => {
   // Given
   const f = await fixture(t);
   await f.local.approveLimitsProposal((await propose(f.mcp)).id);

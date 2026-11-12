@@ -1,6 +1,7 @@
+import { defaultMarketplaceHome } from './defaults.js';
+import { shellQuote } from './shell-quote.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
-import { homedir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { ProfileError, MarketplaceProfileStore, type NewProfile } from './profile-store.js';
 import { approvalRequestPath, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest,
   type MarketplaceProofApprovalRequest } from './approval-files.js';
@@ -46,7 +47,7 @@ interface SetupOptions {
 
 export async function runSetup(argv:string[],env:NodeJS.ProcessEnv):Promise<void> {
   const options=parseSetupArgs(argv);
-  const home=resolve(options.home ?? env.MARKETPLACE_MCP_HOME ?? join(homedir(),'.config','atto','marketplace-mcp'));
+  const home=resolve(options.home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env));
   env=managedWalletEnvironment(home,env);
   if (!options.profile) throw setupUsage('Choose a private profile ID with --profile.');
   const store=await MarketplaceProfileStore.open(home);
@@ -511,6 +512,5 @@ function printApprovalInstructions(profileId:string,handle:string,path:string,ho
     resumeCommand:`atto-marketplace-mcp setup --profile ${profileId} --complete --home ${shellQuote(home)}`,next});
 }
 function printJson(value:unknown):void {process.stdout.write(`${JSON.stringify(value)}\n`);}
-function shellQuote(value:string):string{return `'${value.replace(/'/g,"'\\''")}'`;}
 function setupUsage(message:string):ProfileError{return new ProfileError('SETUP_USAGE',message);}
 function setupFailure():ProfileError{return new ProfileError('SETUP_PROTOCOL','Marketplace setup returned an invalid response. Check the pinned origin and repeat only after confirming the previous action had no effect.');}

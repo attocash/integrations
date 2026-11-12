@@ -1,5 +1,5 @@
+import { defaultMarketplaceHome } from './defaults.js';
 import { createInterface } from 'node:readline/promises';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { provisionNanoWallet, approveNanoWalletPolicy, loadConfiguration, inspectNanoSeed, inspectNanoWallet, inspectNanoRecoveryWallet, type ControllerPurpose } from '@attocash/atto-marketplace-nano-adapter';
 import { initializeMarketplaceRecoveryWallet } from '@attocash/cli/internal-marketplace';
@@ -89,7 +89,7 @@ export async function runNanoTerminal(argv:string[],env:NodeJS.ProcessEnv):Promi
   process.stdout.write(`${JSON.stringify({status:'wallet-configured',...result})}\n`);
 }
 function environment(home:string|undefined,env:NodeJS.ProcessEnv):NodeJS.ProcessEnv {
-  return managedWalletEnvironment(resolve(home??env.MARKETPLACE_MCP_HOME??join(homedir(),'.config','atto','marketplace-mcp')),env);
+  return managedWalletEnvironment(resolve(home??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome(env)),env);
 }
 function requireTerminal():void {
   if(!process.stdin.isTTY||!process.stderr.isTTY)throw new ProfileError('TERMINAL_REQUIRED','Marketplace wallet setup and approvals require an interactive local terminal.');

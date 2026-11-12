@@ -9,10 +9,16 @@ values for your deployment during setup.
 
 One process uses one saved private profile, defaulting to `main`. A profile is a
 saved account and connection: it pins the Marketplace origin, account, and
-authentication mode. Linux and macOS are supported; profile directories and
-files require POSIX 0700/0600 privacy.
-Native Windows is unsupported. Native recovery material stays in the OS password
-store; bearer credentials and private approvals stay in the Marketplace home.
+authentication mode. Linux, macOS, and Windows are supported. Unix directories
+and files require POSIX 0700/0600 privacy. Windows uses ordinary Node.js filesystem
+support and normal per-user profile permissions; it does not independently inspect
+Windows DACLs. File identity, kind, links and symbolic-link aliases are checked
+when opening stored artifacts and publishing immutable approval or submission
+files. Native recovery material stays in the OS password store (Credential Manager
+on Windows); bearer credentials and private approvals stay in the Marketplace home.
+The Windows credential-store addon needs the [Microsoft Visual C++ v14 runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
+matching the Node.js architecture. Run printed Windows approval commands in
+PowerShell, which uses doubled apostrophes inside quoted literal paths.
 
 Administrator purchase reads, administrator receipt exports and refunds, and
 dispute resolution are excluded even for an administrator controller. Use the
@@ -29,7 +35,8 @@ atto-marketplace-mcp setup
 
 Guided setup uses `https://api.atto.market`, audience
 `urn:marketplace:agent-api:live`, profile `main`, and the private home
-`~/.config/atto/marketplace-mcp` without asking for connection settings.
+`~/.config/atto/marketplace-mcp` on Unix or `%LOCALAPPDATA%\Atto Marketplace MCP`
+on Windows without asking for connection settings.
 It lets you:
 
 - Create a dedicated Atto wallet or select your existing Atto CLI wallet at its
@@ -137,7 +144,8 @@ atto-marketplace-mcp setup --origin http://localhost:8080 \
 
 Runtime selection uses `--profile`, then `MARKETPLACE_MCP_PROFILE`, then `main`.
 Home selection uses `--home`, then `MARKETPLACE_MCP_HOME`, then
-`~/.config/atto/marketplace-mcp`. Keep setup's generated explicit client
+`~/.config/atto/marketplace-mcp` on Unix and `%LOCALAPPDATA%\Atto Marketplace MCP`
+on Windows. Keep setup's generated explicit client
 configuration to retain the selected home, profile and wallet paths even when
 the client has different environment settings. Existing saved profiles and
 pending setups retain their original origin and audience; new defaults never
@@ -297,7 +305,8 @@ installed executable; replace the private paths and profile with your selections
 ```
 
 Create `/home/user/marketplace-agent-files` yourself as a real directory owned by
-the MCP user, with POSIX mode `0700`, before enabling file tools, or set
+the MCP user, with POSIX mode `0700` or normal per-user Windows directory
+permissions, before enabling file tools, or set
 `MARKETPLACE_MCP_FILES_DIR` to that absolute directory.
 `marketplace_submission_file_upload` reads only a path you explicitly provide inside
 it. It uploads one file and returns a READY `fileId`; it never attaches the
@@ -396,7 +405,7 @@ payment payloads, or raw scoped API keys. It never upgrades from an API key to
 a controller session after an authorization error. Controller approvals and
 XNO payment handoffs use private typed files with opaque handles at the MCP
 boundary. Configure `MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR` or pass
-`--payment-handoff-dir` to select a dedicated 0700 directory shared locally
+`--payment-handoff-dir` to select a dedicated private directory shared locally
 with the private wallet host. The default is `<Marketplace home>/payment-handoffs`.
 The two files are named
 `<32-lowercase-hex-handle>.request.json` and `.response.json`; only the opaque

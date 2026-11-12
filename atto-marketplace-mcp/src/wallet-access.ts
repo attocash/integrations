@@ -144,7 +144,7 @@ export async function runAttoWalletAccessCommand(argv: string[], env: NodeJS.Pro
     throw setupRequired();
   }
   if (!assetSeen) throw setupRequired();
-  const selected = managedWalletEnvironment(home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(), env);
+  const selected = managedWalletEnvironment(home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env), env);
   const selection = readWalletSelection(selected.MARKETPLACE_MCP_HOME!);
   if (!selection?.attoAccess || selection.attoDirectory !== selected.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR) throw setupRequired();
   if (command === 'policy') {

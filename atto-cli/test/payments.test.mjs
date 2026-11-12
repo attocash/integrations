@@ -255,7 +255,7 @@ test('missing native publication evidence keeps the Marketplace signature and re
   assert.ok(f.state.requests.some(value => value.path.endsWith('/transactions/stream')));
 });
 
-test('a real CLI send exits while preparation continues and the next CLI send consumes that cache', { timeout: 20_000 }, async t => {
+test('a real CLI send exits while preparation continues and the next CLI send consumes that cache', { timeout: process.platform === 'win32' ? 60_000 : 20_000 }, async t => {
   // Given a synthetic wallet and credentials isolated from the user's keyring.
   const f = await fixture(t, [10]);
   const env = await credentialEnvironment(t, f.mnemonic());

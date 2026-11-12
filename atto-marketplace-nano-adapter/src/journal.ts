@@ -1,9 +1,9 @@
 import { DatabaseSync } from 'node:sqlite';
-import { existsSync, lstatSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync } from 'node:fs';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { canonical, sha256 } from './configuration.js';
-import { privateDirectory, privateFile, processIdentity, processOwnerAlive, writePrivateNew } from './private-files.js';
+import { privateFiles, processIdentity, processOwnerAlive, writePrivateNew } from './private-files.js';
 import { fail } from './errors.js';
 export type OperationState = 'PREPARING' | 'PREPARED' | 'UNKNOWN' | 'CONFIRMED' | 'COMPETING';
 export interface JournalRecord {
@@ -30,12 +30,19 @@ export interface JournalRecord {
     confirmedAt: number | null;
 }
 const columns = 'id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner,epoch,previous,previousBalance,representative,blockJson,blockHash,responseJson,deadline,confirmedAt';
+/** Validate retained rollback/WAL artifacts before SQLite can consume or delete
+ * them. A concurrent transaction may remove an already checked sidecar. */
+function privateJournalFiles(path: string): void {
+    privateFiles([
+        { path },
+        ...['-journal', '-wal', '-shm'].map(suffix => ({ path: `${path}${suffix}`, optional: true })),
+    ], [dirname(path)]);
+}
 /** One SQLite writer transaction reserves the account lane and rolling spend together. */
 export class NanoJournal {
     readonly db: DatabaseSync;
     private readonly token = `${processIdentity() ?? `${process.pid}:unknown`}:${randomUUID()}`;
     constructor(readonly dataDir: string) {
-        privateDirectory(dataDir);
         const path = join(dataDir, 'nano-wallet.sqlite3');
         if (!existsSync(path)) {
             try {
@@ -46,9 +53,10 @@ export class NanoJournal {
                     fail('JOURNAL_UNAVAILABLE');
             }
         }
-        privateFile(path);
+        privateJournalFiles(path);
         this.db = new DatabaseSync(path);
-        this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+        try {
+            this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
       CREATE TABLE IF NOT EXISTS operations (
         id TEXT PRIMARY KEY,kind TEXT NOT NULL,digest TEXT NOT NULL,requestJson TEXT NOT NULL,uniqueId TEXT NOT NULL UNIQUE,
         source TEXT NOT NULL,network TEXT NOT NULL,amount TEXT NOT NULL,destination TEXT NOT NULL,createdAt INTEGER NOT NULL,
@@ -67,7 +75,11 @@ export class NanoJournal {
         BEGIN SELECT RAISE(ABORT,'immutable signed candidate'); END;
       CREATE TRIGGER IF NOT EXISTS retain_signed BEFORE DELETE ON operations WHEN OLD.blockHash IS NOT NULL
         BEGIN SELECT RAISE(ABORT,'retain signed candidate'); END;`);
-        privateFile(path);
+            if (process.platform !== 'win32') privateJournalFiles(path);
+        } catch (error) {
+            this.db.close();
+            throw error;
+        }
     }
     close(): void {
         this.db.close();

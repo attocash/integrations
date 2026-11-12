@@ -29,24 +29,28 @@ test('parallel clients and store instances share one rotating refresh within thi
   // Given an expired session and a refresh response held while parallel reads arrive.
   const {home,store}=await fixture(t);
   const second=await MarketplaceProfileStore.open(home);
-  t.after(()=>second.close());
-  const gate=deferred(); const entered=deferred(); let refreshes=0; const authorization=[];
-  globalThis.fetch=async(url,options)=>{
-    if(String(url).endsWith('/refresh')) {refreshes++;entered.resolve();await gate.promise;return Response.json(rotated());}
-    authorization.push(options.headers.authorization);return Response.json({ok:true});
-  };
-  const first=new MarketplaceApiClient(store,'agent').request('/v1/agent/profile');
-  await entered.promise;
-  // When independent clients read that same pinned session before rotation completes.
-  const reads=[first,...Array.from({length:8},(_,i)=>new MarketplaceApiClient(i%2?store:second,'agent')
-    .request('/v1/agent/profile'))];
-  gate.resolve();
-  const results=await Promise.allSettled(reads);
-  // Then every read succeeds with the single committed rotated access token.
-  assert.equal(refreshes,1);
-  assert.ok(results.every(result=>result.status==='fulfilled'),JSON.stringify(results));
-  assert.deepEqual(authorization,Array(9).fill('Bearer rotated-access-token'));
-  assert.equal(store.getProfile('agent').refreshState,'READY');
+  try {
+    const gate=deferred(); const entered=deferred(); let refreshes=0; const authorization=[];
+    globalThis.fetch=async(url,options)=>{
+      if(String(url).endsWith('/refresh')) {refreshes++;entered.resolve();await gate.promise;return Response.json(rotated());}
+      authorization.push(options.headers.authorization);return Response.json({ok:true});
+    };
+    const first=new MarketplaceApiClient(store,'agent').request('/v1/agent/profile');
+    await entered.promise;
+    // When independent clients read that same pinned session before rotation completes.
+    const reads=[first,...Array.from({length:8},(_,i)=>new MarketplaceApiClient(i%2?store:second,'agent')
+      .request('/v1/agent/profile'))];
+    gate.resolve();
+    const results=await Promise.allSettled(reads);
+    // Then every read succeeds with the single committed rotated access token.
+    assert.equal(refreshes,1);
+    assert.ok(results.every(result=>result.status==='fulfilled'),JSON.stringify(results));
+    assert.deepEqual(authorization,Array(9).fill('Bearer rotated-access-token'));
+    assert.equal(store.getProfile('agent').refreshState,'READY');
+  } finally {
+    // Close every connection before the fixture's after hook removes its files on Windows.
+    second.close();
+  }
 });
 
 for(const outcome of ['denied','network','malformed']) test(`parallel refresh ${outcome} remains unknown without replay`,async t=>{

@@ -1,6 +1,6 @@
+import { defaultMarketplaceHome } from './defaults.js';
 import { runNanoTerminal, nanoWalletUsage } from './nano-terminal.js';
 import {existsSync} from 'node:fs';
-import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { ProfileError } from './profile-store.js';
 import { ensurePaymentHandoffDirectory } from './payment-handoff-files.js';
@@ -44,7 +44,7 @@ export async function runWalletSetup(argv: string[], env: NodeJS.ProcessEnv): Pr
   }
   const nodeUrl = publicUrl(options.get('--node-url'));
   const workerUrl = publicUrl(options.get('--worker-url'));
-  const home = resolve(options.get('--home') ?? env.MARKETPLACE_MCP_HOME ?? join(homedir(), '.config', 'atto', 'marketplace-mcp'));
+  const home = resolve(options.get('--home') ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env));
   const walletEnv = managedWalletEnvironment(home, env);
   const directory = walletEnv.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR!;
   ensurePaymentHandoffDirectory(home);

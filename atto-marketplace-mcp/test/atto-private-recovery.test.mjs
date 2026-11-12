@@ -33,7 +33,7 @@ async function selectedEnvironment(f) {
   return {MARKETPLACE_MCP_HOME: home, MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: f.directory};
 }
 
-test('actual private producer and stdio consumer agree on interrupted, signed and canonically rejected payments', { timeout: 30_000 }, async t => {
+test('actual private producer and stdio consumer agree on interrupted, signed and canonically rejected payments', { timeout: process.platform === 'win32' ? 60_000 : 30_000 }, async t => {
   const f = await fixture(t, [10], undefined, '100', undefined, { internalMarketplacePayment: config });
   const request = intent(f);
   await f.reopen('mcp');
@@ -98,7 +98,7 @@ test('the consumer accepts proven unsigned expiry but strictly rejects extra or 
   // Replay only returned public DTOs to exercise parser rejection without corrupting a journal.
   const replayDirectory = join(f.directory, 'dto-replay');
   await mkdir(replayDirectory, { mode: 0o700 });
-  const response = join(replayDirectory, 'response.json'), host = join(replayDirectory, 'host');
+  const response = join(replayDirectory, 'response.json'), host = join(replayDirectory, 'host.mjs');
   const require = createRequire(import.meta.url);
   const source = `#!${process.execPath}\nimport {readFileSync} from 'node:fs';\nimport {McpServer} from ${JSON.stringify(pathToFileURL(require.resolve('@modelcontextprotocol/server')).href)};\nimport {StdioServerTransport} from ${JSON.stringify(pathToFileURL(require.resolve('@modelcontextprotocol/server/stdio')).href)};\nconst server=new McpServer({name:'dto-replay',version:'1'});\nserver.registerTool('wallet_call',{inputSchema:{}},async()=>{const structuredContent={result:JSON.parse(readFileSync(${JSON.stringify(response)},'utf8'))};return {structuredContent,content:[{type:'text',text:JSON.stringify(structuredContent)}]};});\nawait server.connect(new StdioServerTransport());\n`;
   await writeFile(host, source, { mode: 0o700 });

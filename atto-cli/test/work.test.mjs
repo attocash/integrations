@@ -614,10 +614,13 @@ test('the finite worker budget stops an unresponsive queue at sixty seconds and 
   f.state.blocked = true;
   f.state.accounts = Array.from({ length: 110 }, (_, index) => account((index + 1).toString(16).padStart(64, '0'), (index + 111).toString(16).padStart(64, '0')));
   assert.ok(JSON.stringify(f.state.accounts.map(value => value.toJson())).length > 32_767);
-  const began = Date.now();
   // When one detached worker attempts the retained jobs.
   await detachedPrepare(f);
-  await until(() => f.state.workRequests.length === 2);
+  // A delayed observer may see a later retry batch after the first two requests.
+  await until(() => f.state.workRequests.length >= 2);
+  // The worker lifetime starts inside drain, after child startup. Measure its
+  // remaining lifetime from observed work so cold initialization is separate.
+  const began = Date.now();
   assert.equal(f.store.get('work.queue').length, 100);
   await until(() => stopped(f.store), 63_000);
   // Then it exits within its lifetime budget without discarding unfinished jobs.

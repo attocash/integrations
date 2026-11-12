@@ -8,6 +8,7 @@ import { AttoError } from '../domain/errors.js';
 import { SpendLedger, type LimitsProposal, type McpAccess } from '../spending/ledger.js';
 import { inspectWalletProfile, type WalletProfile } from '../storage/profiles.js';
 import { StateStore } from '../storage/state.js';
+import { assertPrivatePermissionsBatch } from '../storage/private-permissions.js';
 import type { AccountPool, NetworkName, SpendingPolicy, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
 
 /** Public saved state only. Recovery credentials and payment journals never enter this snapshot. */
@@ -88,6 +89,14 @@ async function withExistingWallet<T>(options: { directory: string; index: number
   if (!existsSync(join(profile.directory, 'state.sqlite'))) {
     throw new AttoError('WALLET_NOT_INITIALIZED', 'Choose an initialized existing CLI wallet or use advanced wallet setup.');
   }
+  // Check the existing Windows database before even read-only schema inspection.
+  // New wallet state is still opened only after the normal lifecycle lease.
+  if (process.platform === 'win32') assertPrivatePermissionsBatch([
+    { path: profile.directory, kind: 'directory' },
+    ...['', '-journal', '-wal', '-shm'].map(suffix => ({
+      path: join(profile.directory, `state.sqlite${suffix}`), kind: 'file' as const, optional: suffix !== '',
+    })),
+  ]);
   // Compact setup must not implicitly upgrade or repair an older profile.
   const inspection = new DatabaseSync(join(profile.directory, 'state.sqlite'), { readOnly: true });
   try {

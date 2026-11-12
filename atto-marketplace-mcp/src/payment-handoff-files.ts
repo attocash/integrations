@@ -1,5 +1,7 @@
-import { chmodSync, closeSync, constants, fchmodSync, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
-import { isAbsolute, join, parse, resolve, sep } from 'node:path';
+import { recoverPrivatePublication, syncPublishedPrivateFile } from './private-file-sync.js';
+import { securePrivatePermissions, syncPrivateDirectory } from '@attocash/cli/internal-marketplace';
+import { chmodSync, closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join, parse, resolve, sep } from 'node:path';
 import { randomBytes } from 'node:crypto';
 import { canonicalJson } from './canonical-json.js';
 import { PaymentHandoffError, parseXnoPaymentRequest, parseXnoPaymentResponse, type XnoPaymentRequest, type XnoPaymentResponse } from './payment-handoff.js';
@@ -60,10 +62,10 @@ export function ensurePaymentHandoffDirectory(directory: string): string {
   }
   const info = lstatSync(target);
   if (info.isSymbolicLink() || !info.isDirectory()
-    || (typeof process.getuid === 'function' && info.uid !== process.getuid())) throw fileError();
-  chmodSync(target, 0o700);
+    || (process.platform !== 'win32' && typeof process.getuid === 'function' && info.uid !== process.getuid())) throw fileError();
+  if (process.platform !== 'win32') chmodSync(target, 0o700);
   const secured = lstatSync(target);
-  if (!secured.isDirectory() || secured.isSymbolicLink() || (secured.mode & 0o077) !== 0) throw fileError();
+  if (!secured.isDirectory() || secured.isSymbolicLink() || (process.platform !== 'win32' && (secured.mode & 0o077) !== 0)) throw fileError();
   return target;
 }
 
@@ -77,14 +79,16 @@ function writePrivateJson(directory: string, handoffId: string, kind: 'request' 
   let descriptor: number | undefined;
   try {
     descriptor = openSync(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
-    fchmodSync(descriptor, 0o600);
+    // Windows files use the ordinary permissions inherited from their directory.
+    if (process.platform !== 'win32') securePrivatePermissions(temporary, 'file');
     writeFileSync(descriptor, content, { encoding: 'utf8' });
     fsyncSync(descriptor);
     closeSync(descriptor);
     descriptor = undefined;
     linkSync(temporary, path);
-    unlinkSync(temporary);
-    syncDirectory(safeDirectory);
+    try { unlinkSync(temporary); } catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    syncPublishedPrivateFile(path);
+    syncPrivateDirectory(safeDirectory);
   } catch (error) {
     if (descriptor !== undefined) closeSync(descriptor);
     try { unlinkSync(temporary); } catch { /* The temporary file was not created or was already removed. */ }
@@ -111,16 +115,27 @@ function readPrivateJson(directory: string, handoffId: string, kind: 'request' |
 function readPrivateText(directory: string, path: string): string {
   let descriptor: number | undefined;
   try {
+    const name = /^([a-f0-9]{32})\.(request|response)\.json$/.exec(basename(path));
+    if (!name) throw fileError();
+    const ownTemporary = `${name[1]}[.]${name[2]}[.][a-f0-9]{24}[.]tmp`;
+    const nanoTemporary = name[2] === 'response' ? '|nano-[a-f0-9]{32}[.]tmp' : '';
+    const publication = lstatSync(path);
+    if (!publication.isFile() || publication.isSymbolicLink()
+      || (process.platform !== 'win32' && ((publication.mode & 0o077) !== 0
+        || (typeof process.getuid === 'function' && publication.uid !== process.getuid())))) throw fileError();
+    recoverPrivatePublication(path, new RegExp(`^[.](?:${ownTemporary}${nanoTemporary})$`));
     const directoryInfo = lstatSync(directory);
     const beforeOpen = lstatSync(path);
-    if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory() || (directoryInfo.mode & 0o077) !== 0
-      || beforeOpen.isSymbolicLink() || !beforeOpen.isFile() || (beforeOpen.mode & 0o077) !== 0
-      || beforeOpen.size < 2 || beforeOpen.size > MAX_FILE_BYTES
-      || (typeof process.getuid === 'function' && (directoryInfo.uid !== process.getuid() || beforeOpen.uid !== process.getuid()))) throw fileError();
+    if (directoryInfo.isSymbolicLink() || !directoryInfo.isDirectory()
+      || (process.platform !== 'win32' && ((directoryInfo.mode & 0o077) !== 0 || (beforeOpen.mode & 0o077) !== 0
+        || (typeof process.getuid === 'function' && (directoryInfo.uid !== process.getuid() || beforeOpen.uid !== process.getuid()))))
+      || beforeOpen.isSymbolicLink() || !beforeOpen.isFile() || beforeOpen.nlink !== 1
+      || beforeOpen.size < 2 || beforeOpen.size > MAX_FILE_BYTES) throw fileError();
     descriptor = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW);
     const opened = fstatSync(descriptor);
-    if (!opened.isFile() || (opened.mode & 0o077) !== 0 || opened.size < 2 || opened.size > MAX_FILE_BYTES
-      || (typeof process.getuid === 'function' && opened.uid !== process.getuid())) throw fileError();
+    if (!opened.isFile() || (process.platform !== 'win32' && ((opened.mode & 0o077) !== 0
+      || (typeof process.getuid === 'function' && opened.uid !== process.getuid()))) || opened.nlink !== 1 || opened.dev !== beforeOpen.dev || opened.ino !== beforeOpen.ino
+      || opened.size < 2 || opened.size > MAX_FILE_BYTES) throw fileError();
     const bytes = readFileSync(descriptor);
     if (bytes.length > MAX_FILE_BYTES) throw fileError();
     return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
@@ -130,15 +145,6 @@ function readPrivateText(directory: string, path: string): string {
   } finally {
     if (descriptor !== undefined) closeSync(descriptor);
   }
-}
-
-function syncDirectory(directory: string): void {
-  let descriptor: number | undefined;
-  try {
-    descriptor = openSync(directory, constants.O_RDONLY);
-    fsyncSync(descriptor);
-  } catch { throw fileError(); }
-  finally { if (descriptor !== undefined) closeSync(descriptor); }
 }
 
 function assertHandoffId(value: string): void {

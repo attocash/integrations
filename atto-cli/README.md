@@ -19,7 +19,7 @@ Requires **Node.js 24.15.0 or newer** and an accessible OS password store:
 | --- | --- |
 | macOS | Keychain access for the CLI |
 | Linux | `secret-tool` (usually `libsecret-tools`), an unlocked Secret Service provider such as GNOME Keyring or KWallet, and access to its D-Bus session |
-| Windows | Credential Manager access for the CLI |
+| Windows | Credential Manager access and the [Microsoft Visual C++ v14 runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170) matching Node.js architecture |
 
 ```sh
 npm install --global @attocash/cli
@@ -35,6 +35,10 @@ npx --yes @attocash/cli@latest --help
 The executable is `atto`. There is no plaintext recovery-phrase fallback when
 the password store is unavailable. Headless Linux environments need a working
 Secret Service session too; check it with `atto doctor`.
+
+Windows uses Node.js filesystem support and normal per-user profile permissions.
+Recovery material stays in Credential Manager; no permission-checking executable
+or additional SDK is needed.
 
 ## Set up the wallet
 
@@ -249,7 +253,7 @@ shared spending limits and a durable request ID. See
 
 Review Marketplace's exact request file and typed challenge in your own terminal.
 See [local proof approvals](https://github.com/attocash/integrations/blob/main/docs/cli-reference.md#review-a-marketplace-wallet-approval)
-for origin checks, file requirements, and native Windows limitations.
+for origin checks and private-file requirements on each supported platform.
 
 ## Profiles and recovery
 
