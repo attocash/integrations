@@ -7,7 +7,7 @@ import { pathToFileURL } from 'node:url';
 const storage = process.env.ATTO_TEST_CLI_PACKAGE_DIR
   ? new URL('./dist/storage/', pathToFileURL(join(process.env.ATTO_TEST_CLI_PACKAGE_DIR, 'package.json')))
   : new URL('../dist/storage/', import.meta.url);
-const { assertPrivatePermissions, securePrivatePermissions, assertPrivatePermissionsBatch, securePrivatePermissionsBatch, syncPrivateDirectory } = await import(new URL('private-permissions.js', storage));
+const { assertPrivatePermissions, securePrivatePermissions, assertPrivatePermissionsBatch, syncPrivateDirectory } = await import(new URL('private-permissions.js', storage));
 
 function privateRoot(t) {
   const directory = mkdtempSync(join(realpathSync(tmpdir()), 'atto-private-permissions-'));
@@ -66,9 +66,10 @@ test('POSIX permission batches validate existing children and skip only optional
   writeFileSync(first, '', { mode: 0o600 }); writeFileSync(second, '', { mode: 0o600 });
   chmodSync(second, 0o644);
   const paths = [{ path: directory, kind: 'directory' }, { path: first, kind: 'file' }, { path: second, kind: 'file' }, { path: join(directory, 'missing-wal'), kind: 'file', optional: true }];
-  // When / Then
+  // When one existing child still has broad permissions, the whole batch is rejected.
   assert.throws(() => assertPrivatePermissionsBatch(paths), { code: 'PRIVATE_PERMISSIONS' });
-  securePrivatePermissionsBatch(paths);
+  securePrivatePermissions(second, 'file');
+  // Then the corrected child passes alongside existing artifacts and optional absent sidecars.
   assert.doesNotThrow(() => assertPrivatePermissionsBatch(paths));
   chmodSync(first, 0o644);
   assert.throws(() => assertPrivatePermissionsBatch(paths), { code: 'PRIVATE_PERMISSIONS' });

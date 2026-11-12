@@ -31,6 +31,7 @@ const {MarketplaceProfileStore} = await import(pathToFileURL(join(packageDirecto
 const {saveWalletSelection} = await import(pathToFileURL(join(packageDirectory, 'dist/wallet-preferences.js')).href);
 const {validAttoProof} = await import(pathToFileURL(join(packageDirectory, 'dist/atto-proof.js')).href);
 const {callWallet} = await import(pathToFileURL(join(packageDirectory, 'dist/wallet-process.js')).href);
+const {shellQuote} = await import(pathToFileURL(join(packageDirectory, 'dist/shell-quote.js')).href);
 const main = join(packageDirectory, 'dist/main.js');
 // Published BIP39 test material, never a user's recovery phrase.
 const phrase = 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art';
@@ -189,8 +190,8 @@ async function approveAndRetry(f, name, args) {
   let first;
   try {first = await tool(client, name, args);} finally {await client.close();}
   assert.equal(first.status, 'approval_required');
-  assert.match(first.walletCommand, /^atto-marketplace-mcp approve /);
   const requestPath = join(f.home, 'approvals', 'acceptance', `${first.handoffId}.request.json`);
+  assert.equal(first.walletCommand, `${process.platform==='win32'?'& ':''}${shellQuote(process.execPath)} ${shellQuote(main)} approve ${shellQuote(requestPath)}`);
   const request = JSON.parse(await readFile(requestPath, 'utf8'));
   assert.equal(request.accountId, f.profile.accountId); assert.equal(request.identityId, f.profile.identityId);
   assert.equal(request.challenge.message.split('\n')[6], `Binding Hash: ${binding(request)}`);

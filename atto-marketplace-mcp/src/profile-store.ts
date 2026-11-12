@@ -737,7 +737,7 @@ function walletPathError(): ProfileError {
 }
 
 export function requireSession(profile: MarketplaceProfile): void {
-  if (profile.authMode!=='controller-session') throw new ProfileError('SETUP_REQUIRED','This operation requires a controller-session profile. Reconfigure a separate Marketplace MCP profile with `atto-marketplace-mcp setup --profile <new-id> --mode controller-session`; scoped API-key profiles do not gain funding authority.');
+  if (profile.authMode!=='controller-session') throw new ProfileError('SETUP_REQUIRED','This operation requires a controller-session profile. Use guided setup to configure a separate controller-session profile; scoped API-key profiles do not gain funding authority.');
 }
 
 function ensureProfileHome(home: string): void {

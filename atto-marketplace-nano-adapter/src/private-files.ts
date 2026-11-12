@@ -98,9 +98,6 @@ export function readPrivate(path: string, limit = 256000): Buffer {
             closeSync(fd);
     }
 }
-export function syncDirectory(path: string): void {
-    syncPrivateDirectory(path);
-}
 /** Windows cannot fsync directory handles through Node. Flush the published file
  * after its hard-link or rename metadata changes as well as before publication. */
 function syncPublishedFile(path: string): void {
@@ -127,7 +124,7 @@ export function writePrivateNew(path: string, content: Uint8Array): void {
         closeSync(fd);
     }
     privateFile(path);
-    syncDirectory(dirname(path));
+    syncPrivateDirectory(dirname(path));
 }
 /** Atomic create-only publication. Exact retries reuse the original private bytes. */
 export function publishPrivate(path: string, content: Uint8Array): void {
@@ -154,7 +151,7 @@ export function publishPrivate(path: string, content: Uint8Array): void {
         }
         privateFile(path);
         syncPublishedFile(path);
-        syncDirectory(dirname(path));
+        syncPrivateDirectory(dirname(path));
     }
     finally {
         if (existsSync(temporary))
@@ -186,7 +183,7 @@ export function recoverPublication(path: string): void {
         fail('PRIVATE_FILE');
     unlinkSync(temporary);
     syncPublishedFile(path);
-    syncDirectory(dirname(path));
+    syncPrivateDirectory(dirname(path));
     privateFile(path);
 }
 export function processIdentity(pid = process.pid): string | null {
@@ -237,7 +234,7 @@ export async function replacePrivate(path: string, content: Uint8Array, revalida
             await delay(100);
         }
         syncPublishedFile(path);
-        syncDirectory(dirname(path));
+        syncPrivateDirectory(dirname(path));
         privateFile(path);
     }
     finally {

@@ -19,6 +19,8 @@ on Windows); bearer credentials and private approvals stay in the Marketplace ho
 The Windows credential-store addon needs the [Microsoft Visual C++ v14 runtime](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist?view=msvc-170)
 matching the Node.js architecture. Run printed Windows approval commands in
 PowerShell, which uses doubled apostrophes inside quoted literal paths.
+The `sh` examples below use Unix shell syntax; for Windows setup and custom
+private paths, follow the [setup guide](https://atto.market/setup).
 
 Administrator purchase reads, administrator receipt exports and refunds, and
 dispute resolution are excluded even for an administrator controller. Use the
@@ -192,14 +194,10 @@ atto-marketplace-mcp setup --home "$MARKETPLACE_MCP_HOME" --profile local-agent 
 ```
 
 Explicit controller-session setup prepares a durable typed login approval.
-Run its printed `atto-marketplace-mcp approve` command in your local terminal,
-then complete the same setup. Marketplace MCP verifies the exact controller
-signature before submitting it and saving the session. Guided setup performs
-these steps in the current terminal. Resume explicit setup with:
-
-```sh
-atto-marketplace-mcp setup --home "$MARKETPLACE_MCP_HOME" --profile local-agent --complete
-```
+Run its reported `walletCommand` and `resumeCommand` unchanged in your local
+terminal to approve and complete the same setup. Marketplace MCP verifies the
+exact controller signature before submitting it and saving the session.
+Guided setup performs these steps in the current terminal.
 
 A definite `SIGNER_UNAVAILABLE` (HTTP 503 `signer_unavailable`) or
 `SIGNER_REQUEST_REJECTED` (HTTP 403 `signer_request_rejected`) response leaves
@@ -264,17 +262,9 @@ and preserve both wallet directories and journals. Existing native Nano seeds
 remain supported with `--seed-file`; their native derivation and addresses stay
 unchanged. Never use the same account with independently coordinated journals.
 
-For any protected Marketplace action, run the exact returned command in your
-own terminal. Both Atto and Nano use the same command:
-
-```sh
-atto-marketplace-mcp approve /absolute/private/home/approvals/<profile>/<handoff-id>.request.json --home /absolute/private/home
-```
-
-For an npx-only installation, replace only the leading `atto-marketplace-mcp`
-with `npx --yes @attocash/marketplace-mcp@latest`, keeping all arguments and
-quoted paths unchanged. Use your pinned server version in place of `@latest`
-when applicable.
+For any protected Marketplace action, run its returned `walletCommand`
+unchanged in your own terminal. Both Atto and Nano commands include absolute
+Node and installed entrypoint paths.
 
 Review the origin, account, controller, purpose and full action terms before
 approving. Retry the original Marketplace tool with its identical request ID and

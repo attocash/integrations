@@ -4,11 +4,14 @@ import assert from 'node:assert/strict';
 import { link, lstat, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
-import {
+import { pathToFileURL } from 'node:url';
+
+const packageDirectory = process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR ?? join(import.meta.dirname, '..');
+const {
   ensurePaymentHandoffDirectory, readXnoPaymentRequest, readXnoPaymentResponse, readXnoPaymentResponseForRecovery,
   writeXnoPaymentRequest, writeXnoPaymentResponse,
-} from '../dist/payment-handoff-files.js';
-import { createXnoPaymentRequest } from '../dist/payment-handoff.js';
+} = await import(pathToFileURL(join(packageDirectory, 'dist/payment-handoff-files.js')).href);
+const { createXnoPaymentRequest } = await import(pathToFileURL(join(packageDirectory, 'dist/payment-handoff.js')).href);
 
 test('typed XNO files are atomically private and immutable for the configured handoff directory', async () => {
   // Given a configured private directory and one account-bound challenge.

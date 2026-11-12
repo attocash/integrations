@@ -1,4 +1,4 @@
-import { shellQuote } from './shell-quote.js';
+import { marketplaceCommand, shellQuote } from './shell-quote.js';
 import { asRecord, redact } from './marketplace-results.js';
 import { commandPointerFromError } from './marketplace-api.js';
 import { requireSession } from './profile-store.js';
@@ -313,7 +313,7 @@ function protectedMutationRecovery(input:FreshProofMutationInput):Record<string,
 
 function approvalRequired(requestId:string,handle:string,request:MarketplaceProofApprovalRequest,path:string):Record<string,unknown> {
   return {status:'approval_required',requestId,handoffId:handle,purpose:request.purpose,expiresAt:request.challenge.expiresAt,
-    walletCommand:`atto-marketplace-mcp approve ${shellQuote(path)}`,
+    walletCommand:`${marketplaceCommand} approve ${shellQuote(path)}`,
     next:'Run this exact command in a local wallet terminal, then call the same Marketplace tool again with the identical request ID and action. The signed response remains in the private profile directory.'};
 }
 

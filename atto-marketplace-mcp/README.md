@@ -51,6 +51,12 @@ it through the Marketplace account workflow.
 
 ## Install
 
+In Windows PowerShell, start with `npx.cmd --yes @attocash/marketplace-mcp@latest setup`.
+Use `npm.cmd` and `npx.cmd` for fixed-argument npm commands. The
+`atto-marketplace-mcp` shell examples below assume a Unix global installation;
+for custom private paths or recovery, follow the [setup guide](https://atto.market/setup)'s
+local installation and direct Node commands.
+
 ```sh
 npm install --global @attocash/marketplace-mcp
 atto-marketplace-mcp --help
@@ -176,15 +182,10 @@ There are three separate kinds of authority:
 | Marketplace profile | One pinned origin, account, and authentication mode per process: controller session or scoped API key. Scoped keys need exact operation scopes and per-asset ceilings where required. |
 | Typed controller proof | One-off approval for exact protected terms, such as login, payout changes, withdrawals, credential changes, and controller-session Shop purchases or seller refunds. It does not grant generic signing or native spending. |
 
-When a tool returns `status: "approval_required"`, run its exact `walletCommand`
+When a tool returns `status: "approval_required"`, run its `walletCommand` unchanged
 in your own terminal. Review the origin, audience, account, controller, purpose,
 and action terms. Then retry the original tool with the **same `requestId` and
 identical arguments**. The private signature stays outside tool responses.
-
-If you installed only through npx, replace the leading `atto-marketplace-mcp`
-in that command with `npx --yes @attocash/marketplace-mcp@latest`. Preserve every
-argument and quoted request-file path. If you pinned your server version, use
-that same version for approval.
 
 Administrator operations are excluded even if the controller is an administrator:
 use the browser workspace for administrator purchase reads, receipt exports,

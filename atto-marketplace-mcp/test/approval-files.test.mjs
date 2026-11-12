@@ -5,7 +5,9 @@ import { link, lstat, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'n
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { dirname, join } from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { approvalRequestDigest, readApprovalRequest, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest, writeApprovalResponse } from '../dist/approval-files.js';
+const packageDirectory = process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR ?? join(import.meta.dirname, '..');
+const { approvalRequestDigest, readApprovalRequest, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest, writeApprovalResponse } =
+  await import(pathToFileURL(join(packageDirectory, 'dist/approval-files.js')).href);
 
 const handoffId = '0123456789abcdef0123456789abcdef';
 

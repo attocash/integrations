@@ -15,17 +15,13 @@ export function assertPrivatePermissionsBatch(paths: readonly PrivatePath[]): vo
   privatePermissionsBatch(paths, false);
 }
 
-/** Apply POSIX owner-only modes before writing; check metadata on Windows. */
-export function securePrivatePermissionsBatch(paths: readonly PrivatePath[]): void {
-  privatePermissionsBatch(paths, true);
-}
-
 export function assertPrivatePermissions(path: string, kind: PrivatePathKind): void {
   assertPrivatePermissionsBatch([{ path, kind }]);
 }
 
+/** Apply POSIX owner-only modes before writing; check metadata on Windows. */
 export function securePrivatePermissions(path: string, kind: PrivatePathKind): void {
-  securePrivatePermissionsBatch([{ path, kind }]);
+  privatePermissionsBatch([{ path, kind }], true);
 }
 
 function privatePermissionsBatch(paths: readonly PrivatePath[], secure: boolean): void {

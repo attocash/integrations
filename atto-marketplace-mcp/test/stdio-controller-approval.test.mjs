@@ -11,6 +11,7 @@ import { AttoPrivateKey } from '@attocash/commons-core';
 import { MarketplaceProfileStore } from '../dist/profile-store.js';
 import { approvalRequestDigest } from '../dist/approval-files.js';
 import { runSetup } from '../dist/setup.js';
+import { shellQuote } from '../dist/shell-quote.js';
 
 const accountId='11111111-1111-4111-8111-111111111111';
 const agentId='22222222-2222-4222-8222-222222222222';
@@ -46,7 +47,8 @@ test('payout enrollment uses an exact typed local approval and durable same-requ
     const pending=await client.callTool({name:'marketplace_payout_address_mutate',arguments:args});
     const handoff=JSON.parse(contentText(pending)).result;
     assert.equal(handoff.status,'approval_required');
-    assert.match(handoff.walletCommand,/^atto-marketplace-mcp approve /);
+    const command=`${process.platform==='win32'?'& ':''}${shellQuote(process.execPath)} ${shellQuote(serverMain)}`;
+    assert.ok(handoff.walletCommand.startsWith(`${command} approve `));
     assert.equal(requests.filter(r=>r.path==='/v1/agent/payout-addresses').length,0);
     assert.equal(requests.filter(r=>r.path==='/v1/agent/payout-addresses/challenges').length,1);
     assert.ok(requests.every(r=>r.authorization==='Bearer controller-session-token'));

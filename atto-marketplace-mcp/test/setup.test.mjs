@@ -13,6 +13,7 @@ const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??join(i
 const { runSetup: runSetupCommand }=await import(pathToFileURL(join(packageDirectory,'dist/setup.js')).href);
 const { MarketplaceProfileStore }=await import(pathToFileURL(join(packageDirectory,'dist/profile-store.js')).href);
 const { approvalRequestDigest, writeApprovalRequest }=await import(pathToFileURL(join(packageDirectory,'dist/approval-files.js')).href);
+const { shellQuote }=await import(pathToFileURL(join(packageDirectory,'dist/shell-quote.js')).href);
 
 const accountId='11111111-1111-4111-8111-111111111111';
 const agentId='22222222-2222-4222-8222-222222222222';
@@ -61,21 +62,26 @@ test('explicit setup prepares a typed login handoff without signing or submittin
   // Given a pinned Marketplace challenge and a raw wallet host that must never be called.
   const requests=[];
   const http=await listen(async(req,res)=>{await readBody(req);requests.push(req.url);return json(res,200,loginChallenge());});
-  const home=await mkdtemp(join(tmpdir(),'marketplace-explicit-login-'));
+  const root=await mkdtemp(join(tmpdir(),'marketplace-explicit-login-'));
+  const home=join(root,"O'Brien & $(literal)");
   try{
     // When explicit setup begins, it only prepares an immutable typed approval.
-    const output=await withoutSetupOutput(()=>runSetupCommand(['--profile','agent','--home',home,'--origin',http.origin,
-      '--audience','marketplace','--controller-address',controllerAddress,'--controller-index','7','--mode','controller-session'],
-      {MARKETPLACE_MCP_WALLET_HOST_COMMAND:'/never-run-a-raw-signer'}));
+    const args=['--profile','agent','--home',home,'--origin',http.origin,
+      '--audience','marketplace','--controller-address',controllerAddress,'--controller-index','7','--mode','controller-session'];
+    const output=await withoutSetupOutput(()=>runSetupCommand(args,{MARKETPLACE_MCP_WALLET_HOST_COMMAND:'/never-run-a-raw-signer'}));
     const result=JSON.parse(output.trim());assert.equal(result.status,'approval_required');
-    assert.match(result.walletCommand,/^atto-marketplace-mcp approve /);
+    const command=`${process.platform==='win32'?'& ':''}${shellQuote(process.execPath)} ${shellQuote(join(packageDirectory,'dist/main.js'))}`;
+    const requestPath=join(home,'approvals','agent',`${result.handoffId}.request.json`);
+    assert.equal(result.walletCommand,`${command} approve ${shellQuote(requestPath)} --home ${shellQuote(home)}`);
+    assert.equal(result.resumeCommand,`${command} setup --profile agent --complete --home ${shellQuote(home)}`);
     // Then no native key store or session endpoint has been reached and --status prints the same owner command.
+    await assert.rejects(runSetupCommand(args,{}),error=>error.code==='SETUP_IN_PROGRESS'&&error.message.endsWith(result.resumeCommand));
     assert.deepEqual(requests,['/v1/agent/auth/challenges']);
     const status=JSON.parse((await withoutSetupOutput(()=>runSetupCommand(['--profile','agent','--home',home,'--status'],{}))).trim());
     assert.equal(status.status,'LOGIN_APPROVAL');assert.equal(status.walletCommand,result.walletCommand);
     const store=await MarketplaceProfileStore.open(home);
     try{assert.deepEqual(store.listProfileIds(),[]);}finally{store.close();}
-  }finally{await stopSetupServer(http);await rm(home,{recursive:true,force:true});}
+  }finally{await stopSetupServer(http);await rm(root,{recursive:true,force:true});}
 });
 
 test('local setup consumes its exact typed login approval and stores only the selected controller-session profile', async () => {

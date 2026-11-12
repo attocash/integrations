@@ -1,5 +1,5 @@
 import { defaultMarketplaceHome } from './defaults.js';
-import { shellQuote } from './shell-quote.js';
+import { marketplaceCommand, shellQuote } from './shell-quote.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { ProfileError, MarketplaceProfileStore, type NewProfile } from './profile-store.js';
@@ -89,7 +89,7 @@ async function reauthenticate(store:MarketplaceProfileStore,profileId:string,hom
 async function beginSetup(store:MarketplaceProfileStore,options:SetupOptions,home:string,env:NodeJS.ProcessEnv):Promise<void> {
   const profileId=required(options.profile,'profile');
   if (store.listProfileIds().includes(profileId)) throw new ProfileError('PROFILE_EXISTS','This profile ID is already configured. Use --reauthenticate to renew its controller session while keeping its journals.');
-  if (store.getSetupState(profileId)) throw new ProfileError('SETUP_IN_PROGRESS',`This setup has a pending private approval. Continue with: atto-marketplace-mcp setup --profile ${profileId} --complete`);
+  if (store.getSetupState(profileId)) throw new ProfileError('SETUP_IN_PROGRESS',`This setup has a pending private approval. Continue with: ${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`);
   const origin=normalizeOrigin(required(options.origin,'origin'));
   const audience=required(options.audience,'audience');
   if (audience.length>255 || /[\r\n\0]/.test(audience) || audience.trim()!==audience) throw setupUsage('Use the exact configured Agent API audience as one nonempty line of at most 255 characters.');
@@ -121,7 +121,7 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
   const existing=store.listProfileIds().includes(profileId)?store.getProfile(profileId):undefined;
   const pending=store.getSetupState(profileId);
   if (!pending) {
-    if (!existing) throw new ProfileError('SETUP_REQUIRED','No pending setup exists for this profile ID. Start with atto-marketplace-mcp setup and a fresh controller challenge.');
+    if (!existing) throw new ProfileError('SETUP_REQUIRED',`No pending setup exists for this profile ID. Start with ${marketplaceCommand} setup --profile ${profileId} --home ${shellQuote(home)} and a fresh controller challenge.`);
     if(store.needsReauthentication(profileId))throw new ProfileError('REAUTH_REQUIRED','Run setup --profile '+profileId+' --reauthenticate with the same --home to renew this session and retain its payment journals.');
     printJson({status:'ready',profileId:existing.id,origin:existing.origin,accountId:existing.accountId,authMode:existing.authMode});
     return;
@@ -294,8 +294,8 @@ function reportSetupStatus(store:MarketplaceProfileStore,profileId:string,home:s
   const saved=asRecord(JSON.parse(state.privatePayload));
   const request=saved.request?parseApprovalRequest(saved.request):undefined;
   printJson({status:state.state,profileId,...(request?{handoffId:request.handoffId,expiresAt:request.challenge.expiresAt,
-    walletCommand:`atto-marketplace-mcp approve ${shellQuote(approvalRequestPath(home,profileId,request.handoffId))} --home ${shellQuote(home)}`}:{}) ,
-    ...(state.state==='LOGIN_READY'?{resumeCommand:`atto-marketplace-mcp setup --profile ${profileId} --complete --home ${shellQuote(home)}`}:{}),
+    walletCommand:`${marketplaceCommand} approve ${shellQuote(approvalRequestPath(home,profileId,request.handoffId))} --home ${shellQuote(home)}`}:{}) ,
+    ...(state.state==='LOGIN_READY'?{resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`}:{}),
     ...(typeof saved.controllerNetwork==='string'?{controllerNetwork:saved.controllerNetwork}:{})});
 }
 
@@ -508,8 +508,8 @@ function isUuid(value:unknown):value is string {return typeof value==='string'&&
 function asRecord(value:unknown):Record<string,unknown>{if(value===null||typeof value!=='object'||Array.isArray(value))throw setupFailure();return value as Record<string,unknown>;}
 function required(value:string|undefined,label:string):string{if(!value)throw setupUsage(`Provide --${label.replaceAll(' ','-')}.`);return value;}
 function printApprovalInstructions(profileId:string,handle:string,path:string,home:string,next:string):void {
-  printJson({status:'approval_required',profileId,handoffId:handle,walletCommand:`atto-marketplace-mcp approve ${shellQuote(path)} --home ${shellQuote(home)}`,
-    resumeCommand:`atto-marketplace-mcp setup --profile ${profileId} --complete --home ${shellQuote(home)}`,next});
+  printJson({status:'approval_required',profileId,handoffId:handle,walletCommand:`${marketplaceCommand} approve ${shellQuote(path)} --home ${shellQuote(home)}`,
+    resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`,next});
 }
 function printJson(value:unknown):void {process.stdout.write(`${JSON.stringify(value)}\n`);}
 function setupUsage(message:string):ProfileError{return new ProfileError('SETUP_USAGE',message);}

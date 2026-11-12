@@ -8,6 +8,7 @@ import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { MarketplaceProfileStore } from '../dist/profile-store.js';
 import { approvalRequestDigest } from '../dist/approval-files.js';
+import { shellQuote } from '../dist/shell-quote.js';
 
 const accountId='11111111-1111-4111-8111-111111111111';
 const agentId='22222222-2222-4222-8222-222222222222';
@@ -58,13 +59,14 @@ test('Nano Shop purchase rejects a changed NOMS signature and recovers the same 
   const pending=JSON.parse(text(await client.callTool({name:'marketplace_product_purchase',arguments:args}))).result;
   assert.equal(pending.status,'approval_required');
   assert.equal(pending.purpose,'product purchase');
-  assert.match(pending.walletCommand,/^atto-marketplace-mcp approve '/);
+  const command=`${process.platform==='win32'?'& ':''}${shellQuote(process.execPath)} ${shellQuote(serverMain)}`;
+  assert.ok(pending.walletCommand.startsWith(`${command} approve `));
   const requestPath=join(home,'approvals','nano-buyer',`${pending.handoffId}.request.json`);
   const request=JSON.parse(await readFile(requestPath,'utf8'));
   assert.deepEqual(request.controller,{network:'NANO',address:nanoAddress,index:0});
   assert.deepEqual(request.action,{kind:'productPurchase',releaseId,expectedReleaseHash:releaseHash,sellerAgentId:agentId,
     asset:'ATTO',grossAtomic:'101',feeAtomic:'1',netAtomic:'100',idempotencyKey:requestId});
-  assert.equal(pending.walletCommand,`atto-marketplace-mcp approve '${requestPath}'`);
+  assert.equal(pending.walletCommand,`${command} approve ${shellQuote(requestPath)}`);
   assert.equal(seen.filter(row=>row.path===`/v1/agent/releases/${releaseId}/purchase`).length,0);
 
   // When the saved response carries a changed signature nibble, then verification fails before claiming or sending the action.
