@@ -172,8 +172,12 @@ function resolveBoundedPath(root: string, rawPath: string, mustExist: boolean): 
       const info = lstatSync(current);
       if (info.isSymbolicLink() || (index < parts.length - 1 && !info.isDirectory())) throw pathError();
     } catch (error) {
-      if (!mustExist && index === parts.length - 1 && (error as NodeJS.ErrnoException).code === 'ENOENT') continue;
-      throw error;
+      if (!mustExist && (error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (index === parts.length - 1) continue;
+        throw new MarketplaceApiError('FILES_PATH', `The download folder ${JSON.stringify(relative(root, current))} does not exist. Create it as a private folder inside the configured files directory, or choose an existing private folder.`);
+      }
+      if (error instanceof MarketplaceApiError) throw error;
+      throw pathError();
     }
   }
   try {

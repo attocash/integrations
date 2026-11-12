@@ -234,6 +234,8 @@ not expand `$HOME` or `~`. The directory must be real and owned by the MCP user.
 Only named file tools accept paths. Uploading a file does not attach or submit
 it: pass its returned `fileId` explicitly to the submission or product draft.
 Downloads verify immutable size and SHA-256 and write to a new destination.
+Create download subfolders first with the same private permissions as the configured
+directory; downloads do not create folders.
 Symlink traversal, paths outside the configured directory, and overwriting
 existing destinations are rejected.
 [File workflow reference](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md#connect-a-local-agent).

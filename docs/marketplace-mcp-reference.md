@@ -303,7 +303,9 @@ it. It uploads one file and returns a READY `fileId`; it never attaches the
 file automatically. Pass selected IDs explicitly in `marketplace_submission_add`
 to include them in a submission. Use `marketplace_submission_file_download` with an
 exact task, submission version, file ID, and new destination path to retrieve a
-visible historical attachment. Downloads are checked against the immutable
+visible historical attachment. Create any destination subfolders first with the same
+private permissions as the configured directory; downloads do not create folders.
+Downloads are checked against the immutable
 submission size and SHA-256 before publication. Paths that escape the configured
 directory, traverse symlinks, or name an existing destination are rejected.
 Scoped credentials need `files:write` plus `submissions:write` to attach and

@@ -95,7 +95,7 @@ test('stdio submission file tools upload only selected bounded paths and verify 
   const store = await MarketplaceProfileStore.open(home);
   store.createProfile({id:'agent',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
     controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',
-    apiKey:'private-file-scoped-key',apiScopes:['files:read','files:write','submissions:read','submissions:write']});
+    apiKey:'private-file-scoped-key',apiScopes:['files:read','files:write','submissions:read','submissions:write','products:read','purchases:read']});
   store.createProfile({id:'limited',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
     controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',
     apiKey:'read-only-key',apiScopes:['submissions:read']});
@@ -151,6 +151,23 @@ test('stdio submission file tools upload only selected bounded paths and verify 
 
     // Traversal, symlink sources, existing targets, and tampered bytes fail without publishing a file.
     const requestCount = requests.length;
+    for (const [name, arguments_] of [
+      ['marketplace_submission_file_download', {taskId,submissionVersion:2,fileId}],
+      ['marketplace_product_file_download', {productId:taskId,releaseSequence:1,fileId}],
+      ['marketplace_purchase_file_download', {purchaseId:taskId,fileId}],
+    ]) {
+      const missingParent = await client.callTool({name,arguments:{...arguments_,destinationPath:'missing/nested/report.txt'}});
+      assert.equal(missingParent.isError,true);
+      const error = JSON.parse(contentText(missingParent)).error;
+      assert.equal(error.code,'FILES_PATH');
+      assert.match(error.message,/download folder "missing" does not exist/);
+      assert.match(error.message,/Create it as a private folder.*existing private folder/);
+    }
+    await assert.rejects(stat(join(filesDirectory,'missing')),{code:'ENOENT'});
+    const missingSource = await client.callTool({name:'marketplace_submission_file_upload',arguments:{sourcePath:'missing/source.txt',
+      requestId:'99999999-9999-4999-8999-999999999990'}});
+    assert.equal(missingSource.isError,true);
+    assert.equal(JSON.parse(contentText(missingSource)).error.code,'FILES_PATH');
     const traversal = await client.callTool({name:'marketplace_submission_file_download',arguments:{taskId,submissionVersion:2,fileId,
       destinationPath:'../escape.txt'}});
     assert.equal(traversal.isError,true);

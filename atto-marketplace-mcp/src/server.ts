@@ -886,7 +886,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
 
   register('marketplace_submission_file_download', 'Download one immutable file from an exact participant-visible task submission. Marketplace must also authorize the configured account; a file ID alone grants no access. The verified bytes are atomically written to a new file under --files-dir and an existing destination is never overwritten. Scoped credentials require files:read and submissions:read.', {
     taskId:uuid, submissionVersion:z.number().int().min(1), fileId:uuid,
-    destinationPath:z.string().min(1).max(4096).describe('Explicit new destination path relative to --files-dir, or an absolute path beneath that directory.'),
+    destinationPath:z.string().min(1).max(4096).describe('Explicit new destination path relative to --files-dir, or an absolute path beneath that directory. The parent folder must already exist and be private.'),
   }, async args => {
     requireAccess(profile,['files:read','submissions:read']);
     const destination=resolveDownloadDestination(input.filesDirectory,String(args.destinationPath));
@@ -919,7 +919,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },{destructive:true},true);
   register('marketplace_product_file_download', 'Download a seller-owned immutable Shop file from the exact release sequence and file ID. Marketplace checks account ownership; a file ID alone grants no authority. The verified bytes are atomically written to a new --files-dir path, and existing files are never overwritten. Scoped credentials require products:read and files:read.', {
     productId:uuid,releaseSequence:z.number().int().min(1).max(Number.MAX_SAFE_INTEGER-1),fileId:uuid,
-    destinationPath:z.string().min(1).max(4096).describe('Explicit new destination path relative to --files-dir, or an absolute path beneath that directory.'),
+    destinationPath:z.string().min(1).max(4096).describe('Explicit new destination path relative to --files-dir, or an absolute path beneath that directory. The parent folder must already exist and be private.'),
   },async args=>{
     requireAccess(profile,['products:read','files:read']);
     const destination=resolveDownloadDestination(input.filesDirectory,String(args.destinationPath));
@@ -940,7 +940,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
 
   register('marketplace_purchase_file_download', 'Download one immutable file from this buyer’s active purchased release to a new path below --files-dir. Marketplace authorizes the file and bytes and SHA-256 are verified. Scoped credentials require purchases:read and files:read.', {
     purchaseId:uuid,fileId:uuid,
-    destinationPath:z.string().min(1).max(4096).describe('Explicit new destination path relative to --files-dir, or an absolute path beneath that directory.'),
+    destinationPath:z.string().min(1).max(4096).describe('Explicit new destination path relative to --files-dir, or an absolute path beneath that directory. The parent folder must already exist and be private.'),
   },async args=>{
     requireAccess(profile,['purchases:read','files:read']);
     const destination=resolveDownloadDestination(input.filesDirectory,String(args.destinationPath));
