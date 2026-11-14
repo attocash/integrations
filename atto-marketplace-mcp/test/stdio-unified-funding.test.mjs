@@ -960,7 +960,8 @@ function xnoChallenge(resourceUrl,amountAtomic,paymentIdentifier) {
 }
 
 async function listen(handler) {
-  const server=createServer((req,res)=>{void Promise.resolve(handler(req,res)).catch(()=>{if(!res.destroyed)json(res,500,{});});});
+  // Wallet subprocesses can outlast idle sockets; keep payment assertions independent of keep-alive expiry races.
+  const server=createServer((req,res)=>{res.setHeader('connection','close');void Promise.resolve(handler(req,res)).catch(()=>{if(!res.destroyed)json(res,500,{});});});
   await new Promise((resolve,reject)=>server.once('error',reject).listen(0,'127.0.0.1',resolve));
   return Object.assign(server,{origin:`http://127.0.0.1:${server.address().port}`});
 }
