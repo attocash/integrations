@@ -658,7 +658,11 @@ for (const mismatch of [
   {name:'task binding',change:{taskId:'88888888-8888-4888-8888-888888888888'},expectedCode:'APPLICATION_BINDING'},
   {name:'asset binding',change:{asset:'ATTO'},expectedCode:'APPLICATION_BINDING'},
   {name:'application ID',change:{applicationId:'not-a-uuid'},expectedCode:'APPLICATION_BINDING'},
-  {name:'positive amount',change:{amountAtomic:'0'},expectedCode:'APPLICATION_BINDING'},
+  {name:'zero without no-hold state',change:{amountAtomic:'0'},expectedCode:'APPLICATION_BINDING'},
+  {name:'zero with false hold',change:{amountAtomic:'0',bondReserved:true,reservationPricingEvidence:null},expectedCode:'APPLICATION_BINDING'},
+  {name:'zero with hold transaction',change:{amountAtomic:'0',bondReserved:false,bondReserveTransactionId:'77777777-7777-4777-8777-777777777777'},expectedCode:'APPLICATION_BINDING'},
+  {name:'zero with release transaction',change:{amountAtomic:'0',bondReserved:false,bondReleaseTransactionId:'77777777-7777-4777-8777-777777777777'},expectedCode:'APPLICATION_BINDING'},
+  {name:'zero with fake pricing',change:{amountAtomic:'0',bondReserved:false,reservationPricingEvidence:{}},expectedCode:'APPLICATION_BINDING'},
   {name:'caller maximum',change:{amountAtomic:'11'},callerMaxAtomic:'10',expectedCode:'APPLICATION_BINDING'},
   {name:'scoped asset ceiling',change:{amountAtomic:'21'},callerMaxAtomic:'30',grantLimit:'20',expectedCode:'CEILING_EXCEEDED'},
 ]) {
@@ -704,6 +708,41 @@ for (const mismatch of [
     }
   });
 }
+
+test('free application zero cap rejects repricing and preserves exact restart recovery', async()=>{
+  // Given a free request with an explicit zero maximum and a positive first acknowledgement.
+  const taskId='44444444-4444-4444-8444-444444444444';
+  const requestId='66666666-6666-4666-8666-666666666666';
+  const result={applicationId:'77777777-7777-4777-8777-777777777777',taskId,asset:'XNO',amountAtomic:'0',
+    state:'PENDING',version:1,bondReserved:false};
+  const writes=[];
+  const http=await listen(async(req,res)=>{
+    writes.push({body:JSON.parse(await readBody(req)),key:req.headers['idempotency-key']});
+    return json(res,201,writes.length===1?{...result,amountAtomic:'1',bondReserved:true}:result);
+  });
+  const fixture=await profileHome({origin:http.origin,authMode:'scoped-api-key',apiKey:'scoped',
+    apiScopes:['applications:apply'],applyXnoLimit:'30'});
+  let client=await connect(fixture.home,'agent');
+  const command={taskId,requestId,expectedTaskVersion:8,proposal:'Deliver the completed work.',asset:'XNO',callerMaxAtomic:'0'};
+  try {
+    // When repricing is rejected and the original request is retried after a process restart.
+    const repriced=await client.callTool({name:'marketplace_application_create',arguments:command});
+    assert.equal(JSON.parse(contentText(repriced)).error.code,'APPLICATION_BINDING');
+    assert.equal(fixture.store.getMutationByRequestId('agent',requestId).state,'PENDING');
+    await client.close(); client=await connect(fixture.home,'agent');
+    const created=await client.callTool({name:'marketplace_application_create',arguments:command});
+    assert.equal(created.isError,undefined,contentText(created));
+    assert.equal(writes[0].body.callerMaxAtomic,'0');
+    assert.equal(writes[0].key,requestId);
+    await client.close(); client=await connect(fixture.home,'agent');
+    const replay=await client.callTool({name:'marketplace_application_create',arguments:command});
+    assert.equal(replay.isError,undefined,contentText(replay));
+    // Then the free acknowledgement completes recovery and later replay makes no additional request.
+    assert.deepEqual(JSON.parse(JSON.parse(contentText(replay)).result.resultIdentity),result);
+    assert.equal(writes.length,2);
+    assert.deepEqual(writes[0],writes[1]);
+  } finally {await client.close();http.close();fixture.store.close();await rm(fixture.home,{recursive:true,force:true});}
+});
 
 test('ATTO-only credentials cannot create a new XNO application and the tool exposes only current direct inputs', async () => {
   // Given a scoped credential with an ATTO application ceiling and the current MCP tool catalogue.

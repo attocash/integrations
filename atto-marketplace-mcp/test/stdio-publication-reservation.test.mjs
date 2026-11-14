@@ -110,6 +110,73 @@ test('stdio publication quote and cap bind new holds while legacy keys can updat
   }
 });
 
+for (const scenario of ['free', 'malformed-price', 'malformed-held-quote']) {
+  test(`stdio zero publication supports ${scenario} without changing the reviewed request`,async()=>{
+    // Given the backend's fixed-scale zero USD quote and a seller with explicit publication authority.
+    const free={...snapshot,amountAtomic:'0',usdAmount:'0.000000000000000000',priceUsd:null,fetchedAt:null,alreadyReserved:false};
+    const requests=[];
+    let quoteUsd=free.usdAmount;
+    const http=await listen(async(req,res)=>{
+      const body=req.method==='GET'?undefined:JSON.parse((await readBody(req)).toString('utf8'));
+      requests.push({path:req.url,body,key:req.headers['idempotency-key']});
+      if(req.method==='GET') return json(res,200,{productId,sellerAgentId:agentId,published:false,
+        currentReleaseId:null,currentReleaseHash:null,publicationReservation:null,
+        draft:{version:2,title:'Research bundle',summaryMarkdown:'Public overview',paidMarkdown:'Private content',
+          licenseText:'Personal use',asset:'ATTO',priceAtomic:'100',fileIds:[],files:[]},
+        releases:[],nextReleaseBeforeSequence:null,createdAt:'2026-10-01T10:00:00Z',updatedAt:'2026-10-02T10:00:00Z'});
+      if(req.url.endsWith('/publication-quote')) return json(res,200,{...free,usdAmount:quoteUsd,
+        ...(scenario==='malformed-price'?{priceUsd:'400'}:scenario==='malformed-held-quote'?{alreadyReserved:true}:{})});
+      if(req.url.endsWith('/publish')) {
+        const first=requests.filter(row=>row.path.endsWith('/publish')).length===1;
+        const {alreadyReserved,...invalidHold}=free;
+        return json(res,200,{productId,draftVersion:2,published:true,releaseId,releaseHash,publicationReservation:first?invalidHold:null});
+      }
+      return json(res,404,{});
+    });
+    const home=await mkdtemp(join(tmpdir(),'marketplace-free-publication-'));
+    const store=await MarketplaceProfileStore.open(home);
+    store.createProfile({id:'seller',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
+      controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',apiKey:'seller-key',
+      apiScopes:['products:read','products:publish'],productPublishAttoLimit:'500'});
+    let client=await connect(home,'seller');
+    try {
+      // When the seller reviews the exact server quote before creating a publication request.
+      const quote=await client.callTool({name:'marketplace_product_publication_quote',arguments:{productId,expectedVersion:2}});
+      if(scenario!=='free') { assert.equal(quote.isError,true); return; }
+      assert.deepEqual(JSON.parse(contentText(quote)).result,free);
+      for (const usdAmount of ['0','0.0','0.0000000000000000000','0.1','00','0e0']) {
+        quoteUsd=usdAmount;
+        const scaled=await client.callTool({name:'marketplace_product_publication_quote',arguments:{productId,expectedVersion:2}});
+        if(usdAmount==='0'||usdAmount==='0.0') assert.equal(scaled.isError,undefined,contentText(scaled));
+        else assert.equal(scaled.isError,true);
+      }
+      quoteUsd=free.usdAmount;
+      const args={productId,requestId:'99999999-9999-4999-8999-999999999996',expectedVersion:2,
+        confirmsDistributionRights:true,maxReservationAtomic:'0'};
+      const malformed=await client.callTool({name:'marketplace_product_publish',arguments:args});
+      assert.equal(malformed.isError,true);
+      assert.equal(store.getMutationByRequestId('seller',args.requestId).state,'PENDING');
+      await client.close(); client=await connect(home,'seller');
+      const published=await client.callTool({name:'marketplace_product_publish',arguments:args});
+      assert.equal(published.isError,undefined,contentText(published));
+      assert.equal(JSON.parse(contentText(published)).result.publicationReservation,null);
+      // Then malformed results stay recoverable and the retry preserves the reviewed zero maximum.
+      const sent=requests.find(row=>row.path.endsWith('/publish'));
+      assert.deepEqual(sent.body,{expectedVersion:2,confirmsDistributionRights:true,maxReservationAtomic:'0'});
+      assert.equal(sent.key,args.requestId);
+      assert.deepEqual(requests.filter(row=>row.path.endsWith('/publish')),[sent,sent]);
+      await client.close(); client=await connect(home,'seller');
+      const before=requests.length;
+      const replay=await client.callTool({name:'marketplace_product_publish',arguments:args});
+      assert.equal(replay.isError,undefined,contentText(replay));
+      assert.equal(JSON.parse(JSON.parse(contentText(replay)).result.resultIdentity).publicationReservation,null);
+      assert.equal(requests.length,before);
+      const changed=await client.callTool({name:'marketplace_product_publish',arguments:{...args,maxReservationAtomic:'1'}});
+      assert.equal(JSON.parse(contentText(changed)).error.code,'IDEMPOTENCY_CONFLICT');
+    } finally { await client.close();http.close();store.close();await rm(home,{recursive:true,force:true}); }
+  });
+}
+
 async function connect(home,profile) {
   const client=new Client({name:'test-marketplace-publication',version:'1.0.0'});
   const environment=Object.fromEntries(Object.entries(process.env).filter(([key,value])=>typeof value==='string'

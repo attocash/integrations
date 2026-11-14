@@ -208,7 +208,10 @@ const productMutationResponse = z.strictObject({productId:uuid,draftVersion:z.nu
   releaseId:uuid.nullable(),releaseHash:z.string().regex(/^[0-9a-f]{64}$/).nullable(),
   publicationReservation:publicationSnapshot.nullable().optional()})
   .refine(value=>(value.releaseId===null)===(value.releaseHash===null));
-const publicationQuote = publicationSnapshot.extend({alreadyReserved:z.boolean()});
+const publicationQuote = z.union([publicationSnapshot.extend({alreadyReserved:z.boolean()}),
+  z.strictObject({asset,amountAtomic:z.literal('0'),usdAmount:z.string().regex(/^0(?:\.0{1,18})?$/),
+    policyVersion:z.string().min(1).max(128),ordinal:z.number().int().positive(),
+    priceUsd:z.null(),providerUpdatedAt:z.null(),fetchedAt:z.null(),alreadyReserved:z.literal(false)})]);
 const publicHistoryState = z.enum(['COMPLETED', 'REFUNDED', 'CANCELLED', 'EXPIRED']);
 const publicText = (maximumCodePoints: number) => z.string().max(maximumCodePoints * 2)
   .refine(value => Array.from(value).length <= maximumCodePoints);
@@ -689,7 +692,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },{readOnly:true},true);
   register('marketplace_product_publish', 'Publish the exact current seller draft as a new immutable Shop release. You must explicitly confirm distribution rights. Quote the policy with marketplace_product_publication_quote first. Supply maxReservationAtomic for a new reservation; an existing reservation is reused. The tool checks the current draft; file-bearing publication additionally requires products:write and files:write. Scoped credentials need products:publish and products:read to inspect the draft before action, plus a matching asset reservation ceiling for any new hold. Exact uncertainty retries reuse requestId and the same arguments.', {
     productId:uuid,requestId,expectedVersion:z.number().int().nonnegative(),confirmsDistributionRights:z.literal(true),
-    maxReservationAtomic:positiveAtomic.optional().describe('Maximum atomic reservation for a new hold, usually copied from the current publication quote. Required when the product has no current reservation.'),
+    maxReservationAtomic:nonnegativeAtomic.optional().describe('Maximum atomic reservation (0 permits only free publication), usually copied from the current publication quote. Required when the product has no current reservation.'),
   },async args=>{
     const productId=String(args.productId);
     requireAccess(profile,['products:read','products:publish']);
@@ -763,10 +766,10 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
       () => api.request(`/v1/agent/tasks/${args.taskId}/cancel`, {method:'POST', body:{expectedVersion:args.expectedVersion}}));
   }, {destructive:true});
 
-  register('marketplace_application_create', 'Apply directly using the current task version, proposal and selected ATTO or XNO asset; use marketplace_task_get to read the current version. proposal is private long-form Markdown; asset and callerMaxAtomic remain separate protocol fields. Marketplace reserves the refundable amount when you submit. Scoped API-key profiles need an explicit ceiling for the selected asset. Retry uncertain results with the same requestId and inputs.', {
+  register('marketplace_application_create', 'Apply directly using the current task version, proposal and selected ATTO or XNO asset; use marketplace_task_get to read the current version. proposal is private long-form Markdown; asset and callerMaxAtomic remain separate protocol fields. Marketplace calculates any refundable reservation under its current policy when you submit; a zero amount is free with no funds held. Scoped API-key profiles need an explicit ceiling for the selected asset. Retry uncertain results with the same requestId and inputs.', {
     taskId:uuid, requestId, expectedTaskVersion:z.number().int().nonnegative(), proposal:z.string().min(1).max(4_000)
       .describe('Applicant-authored long-form Markdown visible only through existing private application views.'),
-    asset, callerMaxAtomic:positiveAtomic.optional(),
+    asset, callerMaxAtomic:nonnegativeAtomic.optional(),
   }, async args => {
     requireAccess(profile, ['applications:apply']);
     const selectedAsset = String(args.asset);
@@ -781,7 +784,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
         return response;
       }),
       async () => enforceApplyCeiling(profile, selectedAsset, '1'), pendingRequestIdentity,
-      validateAcknowledgement, ['taskId','asset','amountAtomic','reservationPricingEvidence']);
+      validateAcknowledgement, ['taskId','asset','amountAtomic','bondReserved','reservationPricingEvidence']);
   }, {destructive:true}, true);
   register('marketplace_applications_list', 'List this account’s applications. Scoped credentials require applications:read.', {}, async () => {
     requireAccess(profile, ['applications:read']); return (await api.request('/v1/agent/applications')).json;
@@ -1283,8 +1286,10 @@ function inferPayoutActionBinding(message:string,profile:MarketplaceProfile,comm
 function validateApplicationAcknowledgement(value:unknown, taskId:string, assetName:string, callerMaxAtomic:string|undefined,
   profile:MarketplaceProfile):void {
   const result=asRecord(value);
-  const amount=positiveAtomic.safeParse(result.amountAtomic);
+  const amount=nonnegativeAtomic.safeParse(result.amountAtomic);
   if (result.taskId!==taskId || result.asset!==assetName || !uuid.safeParse(result.applicationId).success || !amount.success
+    || (amount.success && amount.data==='0' && (result.bondReserved!==false || result.reservationPricingEvidence!=null
+      || result.bondReserveTransactionId!=null || result.bondReleaseTransactionId!=null))
     || (callerMaxAtomic!==undefined && BigInt(amount.data)>BigInt(callerMaxAtomic))) {
     throw new MarketplaceApiError('APPLICATION_BINDING','Marketplace returned an application that does not match the submitted task, asset or caller maximum. The original request remains pending; retry it unchanged.');
   }
