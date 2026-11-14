@@ -104,23 +104,28 @@ test('read-only selection reads work during a concurrent SQLite WAL writer', asy
 });
 
 test('selection updates wait for a concurrent writer and retain its committed other role', async t => {
+  // Given a competing writer with the same SQLite busy policy as the application.
   const f = await fixture(t);
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   const holder = spawn(process.execPath, ['--input-type=module', '-e', `
     import {DatabaseSync} from 'node:sqlite';
     const db = new DatabaseSync(process.argv[1]);
-    db.exec('BEGIN IMMEDIATE');
+    db.exec('PRAGMA busy_timeout=5000; BEGIN IMMEDIATE');
     db.prepare('UPDATE wallet_selection SET nano_directory=? WHERE singleton=1').run(process.argv[2]);
     process.stdout.write('locked');
     setTimeout(() => { db.exec('COMMIT'); db.close(); }, 600);
   `, f.database, f.nano], {stdio: ['ignore', 'pipe', 'pipe']});
-  const completed = once(holder, 'exit');
-  holder.stderr.resume();
+  const completed = once(holder, 'close');
+  let holderError = '';
+  holder.stderr.setEncoding('utf8');
+  holder.stderr.on('data', chunk => { holderError += chunk; });
   t.after(() => { if (holder.exitCode === null) holder.kill(); });
   const [locked] = await once(holder.stdout, 'data');
   assert.equal(locked.toString(), 'locked');
+  // When another role is saved while the competing writer holds its transaction.
   await saveWalletSelection(f.home, {nanoControllerDirectory: f.controller});
-  assert.deepEqual(await completed, [0, null]);
+  // Then both writers commit and the role patches merge without losing either update.
+  assert.deepEqual(await completed, [0, null], holderError);
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto, nanoDirectory: f.nano, nanoControllerDirectory: f.controller});
 });
 
