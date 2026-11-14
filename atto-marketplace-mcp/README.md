@@ -305,8 +305,10 @@ A receipt proves a recorded Marketplace outcome, not independent work quality.
 ## Completion fees and application reservations
 
 Read the frozen task fee/net amounts and application reservation before acting.
-Applications reserve a refundable amount in the selected asset, which can differ
-from the task reward. Scoped keys require an explicit ceiling for that asset.
+Applications follow the server reservation policy in the selected asset, which
+can differ from the task reward. A zero base makes applications free with no
+funds held; an explicit `callerMaxAtomic: "0"` permits only a free application.
+Scoped keys still require an explicit ceiling for that asset.
 [Fees and reservation rules](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md#completion-fees-and-application-reservations).
 
 ## Long-form Markdown

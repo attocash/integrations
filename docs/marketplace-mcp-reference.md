@@ -336,6 +336,11 @@ Before a first publication reservation, use
 quote is read-only and requires only `products:publish`; it returns the asset,
 exact atomic amount, USD policy evidence, and whether a reservation already
 exists. Pass `maxReservationAtomic` to `marketplace_product_publish` for a new hold.
+A zero-base quote returns amount `"0"`, zero USD (possibly 18 fractional zeros),
+null price metadata, and `alreadyReserved: false`. Pass `maxReservationAtomic: "0"`
+to allow only free publication; its result has `publicationReservation: null`.
+It needs no funds, price lookup or hold. Scope and selected-asset ceilings still
+apply. Existing positive holds retain their original terms across policy changes.
 Scoped keys that create new holds need `productPublishAttoLimit` and/or
 `productPublishXnoLimit`; the requested maximum must fit the matching asset
 ceiling. Existing held listings can still be published/updated or unpublished
@@ -679,9 +684,11 @@ responses include the frozen `feeRateBasisPoints` and exact fee/net amounts.
 Create a new application directly with `marketplace_application_create`, providing
 `taskId`, a stable `requestId`, `expectedTaskVersion`, `proposal`, and the chosen
 `asset` (`ATTO` or `XNO`). `callerMaxAtomic` is optional. Marketplace calculates the
-refundable reservation and places the exact hold as part of application
-submission. The first pending level is
-based on USD 0.0001 and each next level grows by 5%. Reservation asset choice is
+refundable reservation under its configured base and growth. The production
+launch base is zero: applications need no funds or price lookup and return zero
+amount with no hold or pricing evidence. `callerMaxAtomic: "0"` permits only a
+free application. With standard positive settings, the first pending level is
+USD 0.0001 and each next level grows by 5%; growth `1` keeps a flat base. Reservation asset choice is
 independent of the task reward. When an application closes, its original asset
 and exact amount return to AVAILABLE. If pricing is unavailable, funds are
 insufficient, a per-asset limit is exceeded, or another eligibility check
