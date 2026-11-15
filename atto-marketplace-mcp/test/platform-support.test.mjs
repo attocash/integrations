@@ -102,19 +102,18 @@ test('native Nano provisioning and the private Node wallet child share the same 
   // Given synthetic import bytes in a private disposable directory and no live node.
   const parent = await mkdtemp(join(tmpdir(), "Nano O'Brien native-"));
   t.after(() => rm(parent, {recursive:true,force:true}));
-  const seedFile = join(parent,'synthetic-seed.hex'), dataDir = join(parent,'selected Nano wallet'), handoffDirectory = join(parent,'private handoffs');
+  const seedFile = join(parent,'synthetic-seed.hex'), dataDir = join(parent,'selected Nano wallet');
   await writeFile(seedFile, `${'01'.repeat(32)}\n`, {mode:0o600});
   const options = {dataDir,seedFile,derivationIndex:1,network:'nano:dev',rpcUrl:'http://localhost:1',
-    origin:'http://localhost:8080',audience:'native-platform-test',handoffDirectory,terminalConfirmed:true};
+    origin:'http://localhost:8080',audience:'native-platform-test',terminalConfirmed:true};
   // When native provisioning publishes the configuration and the actual Node stdio child reads it.
   const wallet = await provisionNanoWallet(options);
-  const identity = await callWallet({...process.env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir,
-    MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:handoffDirectory}, {asset:'XNO',operation:'identity.list',input:{}});
+  const identity = await callWallet({...process.env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir}, {asset:'XNO',operation:'identity.list',input:{}});
   // Then the original identity and private native paths survive an exact setup retry without contacting RPC.
   assert.equal(identity.address, wallet.address);
   assert.equal((await provisionNanoWallet(options)).address, wallet.address);
   assert.equal((await inspectNanoWallet(dataDir)).sourceAddress, wallet.address);
-  for (const path of [dataDir,handoffDirectory]) assertPrivatePermissions(path, 'directory');
+  for (const path of [dataDir]) assertPrivatePermissions(path, 'directory');
   for (const path of [seedFile,wallet.configurationPath]) assertPrivatePermissions(path, 'file');
   assert.equal(await readFile(seedFile,'utf8'), `${'01'.repeat(32)}\n`);
 });

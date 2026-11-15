@@ -46,8 +46,8 @@ test('shared source stays in original OS namespace, pins identity on every use a
     try { await assert.rejects(reset.resetWallet(null), { code: 'WALLET_BUSY' }); } finally { await reset.close(); }
     assert.equal(removed, false);
   });
-  const dataDir = join(root, 'nano'), handoffDirectory = join(root, 'handoff');
-  const options = { dataDir, recoveryWalletDirectory: directory, derivationIndex: 0, network: 'nano:dev', rpcUrl: 'http://localhost:17076', origin: 'http://localhost:8080', audience: 'marketplace', handoffDirectory, expectedAddress: inspected.address, terminalConfirmed: true };
+  const dataDir = join(root, 'nano');
+  const options = { dataDir, recoveryWalletDirectory: directory, derivationIndex: 0, network: 'nano:dev', rpcUrl: 'http://localhost:17076', origin: 'http://localhost:8080', audience: 'marketplace',  expectedAddress: inspected.address, terminalConfirmed: true };
   const provisioned = await provisionNanoWallet(options), config = await inspectNanoWallet(dataDir);
   assert.equal(provisioned.address, nanoAddress); assert.equal(config.version, 1);
   assert.equal(config.keySource.derivationVersion, 'bip39-ed25519-slip10-nano-v1');
@@ -62,7 +62,7 @@ test('shared source stays in original OS namespace, pins identity on every use a
   assert.deepEqual(readFileSync(provisioned.configurationPath), savedConfig);
   const wallet = NanoWallet.open({ dataDir });
   try { assert.deepEqual(await wallet.call('identity.list'), { identities: [{ address: nanoAddress, index: 0, network: 'nano:dev' }] }); } finally { wallet.close(); }
-  await approveNanoWalletPolicy({ dataDir, grants: { marketplaceFunding: false, externalTransfers: true, controllerPurposes: ['login'] }, limits: { maxPaymentAtomic: '2', rolling24hAtomic: '3' }, terminalConfirmed: true });
+  await approveNanoWalletPolicy({ dataDir, grants: { externalTransfers: true, controllerPurposes: ['login'] }, limits: { maxPaymentAtomic: '2', rolling24hAtomic: '3' }, terminalConfirmed: true });
   assert.deepEqual(loadConfiguration(dataDir).keySource.recoverySource, source);
   assert.equal((await inspectNanoWallet(dataDir)).sourceAddress, nanoAddress);
   await assert.rejects(withMarketplaceRecoverySeed({ ...source, credentialAccount: 'different' }, () => {}), { code: 'WALLET_MISMATCH' });

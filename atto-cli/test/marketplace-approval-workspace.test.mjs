@@ -1,8 +1,11 @@
+import {join} from 'node:path';
+import {fileURLToPath,pathToFileURL} from 'node:url';
+const cliDirectory=process.env.ATTO_TEST_CLI_PACKAGE_DIR??fileURLToPath(new URL('../',import.meta.url));
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import test from 'node:test';
-import { MarketplaceTopUpClient } from '../dist/marketplace/topups.js';
-import { formatMarketplaceApprovalPreview } from '../dist/cli/cli.js';
+const { MarketplaceConnectionClient }=await import(pathToFileURL(join(cliDirectory,'dist/marketplace/connection.js')).href);
+const { formatMarketplaceApprovalPreview }=await import(pathToFileURL(join(cliDirectory,'dist/cli/cli.js')).href);
 
 const apiOrigin = 'http://localhost:8080';
 const browserOrigin = 'http://localhost:5173';
@@ -17,7 +20,7 @@ const idempotencyKey = '00000000-0000-4000-8000-000000000201';
 function createClient(browserOrigins = [browserOrigin]) {
   const connection = {
     version: 1,
-    apiUrl: `${apiOrigin}/v1/agent/topups`,
+    apiUrl: `${apiOrigin}/v1/agent/payments`,
     audience: 'marketplace-agent',
     controllerIndex: 0,
     controllerAddress: authorizingAddress,
@@ -29,13 +32,13 @@ function createClient(browserOrigins = [browserOrigin]) {
   };
   const saved = new Map([
     ['identity', { address: authorizingAddress, fingerprint: 'fingerprint' }],
-    ['marketplace.topups.connection', connection],
+    ['marketplace.connection', connection],
   ]);
   const addresses = [
     { index: 0, address: authorizingAddress, publicKey: '00', active: true },
     { index: 1, address: newIdentityAddress, publicKey: '01', active: true },
   ];
-  return new MarketplaceTopUpClient({ get: key => saved.get(key), set: (key, value) => saved.set(key, value) }, {
+  return new MarketplaceConnectionClient({ get: key => saved.get(key), set: (key, value) => saved.set(key, value) }, {
     settings: () => ({ network: 'LOCAL' }),
     addresses: () => addresses,
     seed: async () => { throw new Error('inspect must not access wallet key material'); },
@@ -61,7 +64,7 @@ function request({ action, purpose, address = authorizingAddress, index = 0, bin
   const challengeId = '00000000-0000-4000-8000-000000000301';
   const issuedAt = new Date(Date.now() - 1000).toISOString();
   const expiresAt = new Date(Date.now() + 120_000).toISOString();
-  binding ??= purpose === 'login' ? sha256(['signer-controller-enrollment-v1', account, identity].join('\n')) : undefined;
+  binding ??= purpose === 'login' ? sha256(['marketplace-login-v1', account, identity].join('\n')) : undefined;
   const lines = [
     'Marketplace Agent Controller Proof v1', `Audience: ${audience}`, 'Network: live',
     `Address: ${address}`, `Purpose: ${purpose}`, `Request ID: ${challengeId}`,
@@ -115,6 +118,10 @@ test('login enrollment rejects missing tuple metadata, altered bindings and a di
   assert.throws(() => createClient().inspectProofApproval(changed), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
   const wrongTuple = request({ action: valid.action, purpose: 'login', account: '00000000-0000-4000-8000-000000000999' });
   assert.throws(() => createClient().inspectProofApproval(wrongTuple), { code: 'MARKETPLACE_APPROVAL_MISMATCH' });
+  for (const purpose of ['payout address enrollment','withdrawal creation','product purchase','product refund']) {
+    const retired=structuredClone(valid);retired.purpose=purpose;
+    assert.throws(() => createClient().inspectProofApproval(retired), {code:'MARKETPLACE_APPROVAL_PROTOCOL'});
+  }
 });
 
 test('saved browser-origin allowlists reject duplicates, wildcards, paths, and more than eight entries', () => {
@@ -214,14 +221,14 @@ test('task close and administrator dispute approvals bind every typed field in w
     purpose: 'administrator dispute opening', binding: disputeBinding })), { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
 
   const resolution = { kind: 'adminDisputeResolution', disputeId: '00000000-0000-4000-8000-000000000213',
-    expectedDisputeVersion: 8, outcome: 'BUYER_REFUND', rationale: 'The buyer is entitled to a refund.', idempotencyKey };
+    expectedDisputeVersion: 8, outcome: 'BUYER_SUPPORTED', rationale: 'The buyer is entitled to a refund.', idempotencyKey };
   const resolutionBinding = lengthPrefixed(['dispute-admin-resolve-v1', accountId, identityId,
-    resolution.disputeId, '8', 'BUYER_REFUND', resolution.rationale, idempotencyKey]);
+    resolution.disputeId, '8', 'BUYER_SUPPORTED', resolution.rationale, idempotencyKey]);
   assert.equal(createClient().inspectProofApproval(request({ action: resolution,
     purpose: 'administrator dispute resolution', binding: resolutionBinding })).preview.purpose,
   'administrator dispute resolution');
   assert.throws(() => createClient().inspectProofApproval(request({ action: { ...resolution,
-    outcome: 'WORKER_AWARD' }, purpose: 'administrator dispute resolution', binding: resolutionBinding })),
+    outcome: 'WORKER_SUPPORTED' }, purpose: 'administrator dispute resolution', binding: resolutionBinding })),
   { code: 'MARKETPLACE_APPROVAL_PROTOCOL' });
 });
 
@@ -238,27 +245,27 @@ test('administrator dispute text uses Kotlin whitespace trimming including contr
 
   const rationale = '\ufeffApproved\ufeff';
   const resolution = { kind: 'adminDisputeResolution', disputeId: '00000000-0000-4000-8000-000000000213',
-    expectedDisputeVersion: 8, outcome: 'BUYER_REFUND', rationale, idempotencyKey };
+    expectedDisputeVersion: 8, outcome: 'BUYER_SUPPORTED', rationale, idempotencyKey };
   const resolutionBinding = lengthPrefixed(['dispute-admin-resolve-v1', accountId, identityId,
-    resolution.disputeId, '8', 'BUYER_REFUND', rationale, idempotencyKey]);
+    resolution.disputeId, '8', 'BUYER_SUPPORTED', rationale, idempotencyKey]);
   assert.equal(createClient().inspectProofApproval(request({ action: resolution,
     purpose: 'administrator dispute resolution', binding: resolutionBinding })).preview.purpose,
   'administrator dispute resolution');
 });
 
 test('administrator dispute preview escapes terminal controls without changing the signed rationale', () => {
-  const rationale = 'Reviewed \u001b[2J\u001b[HOutcome: WORKER_AWARD';
+  const rationale = 'Reviewed \u001b[2J\u001b[HOutcome: WORKER_SUPPORTED';
   const resolution = { kind: 'adminDisputeResolution', disputeId: '00000000-0000-4000-8000-000000000213',
-    expectedDisputeVersion: 8, outcome: 'BUYER_REFUND', rationale, idempotencyKey };
+    expectedDisputeVersion: 8, outcome: 'BUYER_SUPPORTED', rationale, idempotencyKey };
   const binding = lengthPrefixed(['dispute-admin-resolve-v1', accountId, identityId,
-    resolution.disputeId, '8', 'BUYER_REFUND', rationale, idempotencyKey]);
+    resolution.disputeId, '8', 'BUYER_SUPPORTED', rationale, idempotencyKey]);
   const { preview } = createClient().inspectProofApproval(request({ action: resolution,
     purpose: 'administrator dispute resolution', binding }));
   const rendered = formatMarketplaceApprovalPreview(preview);
   assert.doesNotMatch(rendered, /\u001b|\r/);
   assert.equal(rendered.split('\n').filter(line => line.startsWith('  Outcome:')).length, 1);
-  assert.match(rendered, /Outcome: BUYER_REFUND/);
-  assert.ok(rendered.includes(String.raw`\\u{1B}[2J\\u{1B}[HOutcome: WORKER_AWARD`));
+  assert.match(rendered, /Outcome: BUYER_SUPPORTED/);
+  assert.ok(rendered.includes(String.raw`\\u{1B}[2J\\u{1B}[HOutcome: WORKER_SUPPORTED`));
   assert.equal(resolution.rationale, rationale);
 });
 
@@ -294,28 +301,4 @@ test('task moderation signs the current TASK target and rejects retired target k
     {code:'MARKETPLACE_APPROVAL_PROTOCOL'});
   assert.throws(()=>createClient().inspectProofApproval({...valid,action:{...action,action:'SUSPEND'}}),
     {code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-});
-
-test('withdrawal approval preview escapes every field at the terminal boundary', () => {
-  // Given a proof-bound destination containing terminal controls and a Unicode display override.
-  const destinationAddress = 'nano_destination\u001b[2J\r\n  Amount: 0\u202E';
-  const destinationId = '00000000-0000-4000-8000-000000000202';
-  const action = { kind: 'withdrawal', network: 'nano:mainnet', destinationAddress,
-    command: { asset: 'XNO', atomicAmount: '25', destinationId, expectedSelectionVersion: 2, idempotencyKey } };
-  const binding = sha256(['withdrawal-create-v2', accountId, identityId, 'XNO', '25', action.network,
-    destinationId, destinationAddress, '2', idempotencyKey].join('\n'));
-  const original = request({ action, purpose: 'withdrawal creation', binding });
-  const { preview } = createClient().inspectProofApproval(original);
-
-  // When the accepted request is formatted for local approval.
-  const rendered = formatMarketplaceApprovalPreview(preview);
-
-  // Then it cannot control the terminal or inject a line, while the signed request is untouched.
-  assert.doesNotMatch(rendered, /[\u0000-\u0009\u000B-\u001F\u007F-\u009F\u202E]/u);
-  assert.equal(rendered.split('\n').filter(line => line.startsWith('  Action:')).length, 1);
-  assert.equal(rendered.split('\n').filter(line => line.startsWith('  Destination:')).length, 1);
-  assert.match(rendered, /Action: withdraw 25 XNO on nano:mainnet/);
-  assert.ok(rendered.includes(String.raw`\u{1B}[2J\u{D}\u{A}  Amount: 0\u{202E}`));
-  assert.equal(preview.action.destinationAddress, destinationAddress);
-  assert.equal(original.challenge.message.includes(binding), true);
 });

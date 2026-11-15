@@ -14,8 +14,6 @@ const identityId = '33333333-3333-4333-8333-333333333333';
 const taskId = '44444444-4444-4444-8444-444444444444';
 const applicationId = '55555555-5555-4555-8555-555555555555';
 const requestId = '66666666-6666-4666-8666-666666666666';
-const commandId = '77777777-7777-4777-8777-777777777777';
-const statusUrl = '/v1/agent/commands/' + commandId;
 const hirePath = '/v1/agent/tasks/' + taskId + '/hire';
 const engagementPath = '/v1/agent/tasks/' + taskId + '/engagement';
 const serverMain = join(import.meta.dirname, '../dist/main.js');
@@ -59,83 +57,35 @@ test('direct hire conflict remains a 409 and cannot become success from an engag
   }
 });
 
-test('terminal asynchronous hire rejection survives restart and replay without another POST', async () => {
-  const requests = [];
-  let commandStatus = 'PENDING';
-  const http = await listen(async (req, res) => {
-    const body = await readBody(req);
-    requests.push({method: req.method, path: req.url, body});
-    if (req.method === 'POST' && req.url === hirePath) {
-      return json(res, 202, {commandId, status: 'PENDING', statusUrl,
-        result: null, errorCode: null, httpStatus: null});
-    }
-    if (req.method === 'GET' && req.url === statusUrl) {
-      if (commandStatus === 'REJECTED') {
-        return json(res, 200, {commandId, status: 'REJECTED', statusUrl,
-          result: {error: 'task_conflict', message: 'The task is no longer open at that version.'},
-          errorCode: 'task_conflict', httpStatus: 409});
-      }
-      return json(res, 200, {commandId, status: 'PENDING', statusUrl,
-        result: null, errorCode: null, httpStatus: null});
-    }
-    if (req.method === 'GET' && req.url === engagementPath) {
-      return json(res, 200, {taskId, acceptedApplicationId: applicationId, state: 'ACTIVE', version: 0});
-    }
-    return json(res, 404, {});
+test('lost direct hire acknowledgement recovers the exact original request after restart',async()=>{
+  const requests=[];let loseResponse=true;
+  const result={taskId,acceptedApplicationId:applicationId,state:'ACTIVE',version:0};
+  const http=await listen(async(req,res)=>{
+    const body=await readBody(req);requests.push({method:req.method,path:req.url,body,key:req.headers['idempotency-key']});
+    if(req.method==='POST'&&req.url===hirePath){if(loseResponse){loseResponse=false;req.socket.destroy();return;}return json(res,200,result);}
+    return json(res,404,{});
   });
-  const fixture = await profileHome(http.origin);
-  let client = await connect(fixture.home, 300);
-  try {
-    const pending = await client.callTool({name: 'marketplace_application_hire', arguments: hireArgs});
-    assert.equal(pending.isError, true);
-    assert.equal(pending.structuredContent.error.code, 'COMMAND_PENDING');
-    assert.equal(pending.structuredContent.error.details.commandId, commandId);
-    assert.equal(pending.structuredContent.error.details.statusUrl, statusUrl);
-    assert.equal(requests.filter(value => value.method === 'POST' && value.path === hirePath).length, 1);
-
-    await client.close();
-    commandStatus = 'REJECTED';
-    client = await connect(fixture.home, 5_000);
-    const rejected = await client.callTool({name: 'marketplace_application_hire', arguments: hireArgs});
-    assert.equal(rejected.isError, true);
-    assert.equal(rejected.structuredContent.error.code, 'COMMAND_REJECTED');
-    assert.equal(rejected.structuredContent.error.httpStatus, 409);
-    assert.equal(rejected.structuredContent.error.details.commandId, commandId);
-    assert.equal(rejected.structuredContent.error.details.statusUrl, statusUrl);
-    assert.equal(rejected.structuredContent.error.details.terminal, true);
-
-    const replay = await client.callTool({name: 'marketplace_application_hire', arguments: hireArgs});
-    assert.equal(replay.isError, true);
-    assert.equal(replay.structuredContent.error.code, 'COMMAND_REJECTED');
-    assert.equal(replay.structuredContent.error.details.commandId, commandId);
-    assert.equal(requests.filter(value => value.method === 'POST' && value.path === hirePath).length, 1,
-      'restart and replay must resume the saved command pointer, never resubmit hire');
-    assert.ok(requests.some(value => value.method === 'GET' && value.path === statusUrl));
-    assert.equal(requests.filter(value => value.method === 'GET' && value.path === engagementPath).length, 0);
-    assert.deepEqual(requests.find(value => value.method === 'POST' && value.path === hirePath).body,
-      {expectedVersion: 1, applicationId});
-  } finally {
-    await client.close();
-    http.close();
-    fixture.store.close();
-    await rm(fixture.home, {recursive: true, force: true});
-  }
+  const fixture=await profileHome(http.origin);let client=await connect(fixture.home);
+  try{
+    const unknown=await client.callTool({name:'marketplace_application_hire',arguments:hireArgs});
+    assert.equal(unknown.isError,true);assert.equal(unknown.structuredContent.error.code,'MARKETPLACE_UNAVAILABLE');
+    await client.close();client=await connect(fixture.home);
+    const recovered=await client.callTool({name:'marketplace_application_hire',arguments:hireArgs});
+    assert.equal(recovered.isError,undefined);assert.deepEqual(JSON.parse(contentText(recovered)).result,result);
+    assert.equal(requests.length,2);assert.deepEqual(requests[0],requests[1]);
+    assert.deepEqual(requests[0].body,{expectedVersion:1,applicationId});
+  }finally{await client.close();http.close();fixture.store.close();await rm(fixture.home,{recursive:true,force:true});}
 });
 
-test('successful hire replay returns the saved result without another command or engagement read', async () => {
+test('successful hire replay returns the saved result without another request or engagement read', async () => {
   const requests = [];
   const engagement = {taskId, acceptedApplicationId: applicationId, state: 'ACTIVE', version: 0,
-    asset: 'ATTO', grossAtomic: '1000', feeAtomic: '10', workerNetAtomic: '990', feeRateBasisPoints: 100};
+    asset: 'ATTO', grossAtomic: '1000', feeAtomic: '10', feeRateBasisPoints: 100};
   const http = await listen(async (req, res) => {
     const body = await readBody(req);
     requests.push({method: req.method, path: req.url, body});
     if (req.method === 'POST' && req.url === hirePath) {
-      return json(res, 202, {commandId, status: 'PENDING', statusUrl,
-        result: null, errorCode: null, httpStatus: null});
-    }
-    if (req.method === 'GET' && req.url === statusUrl) {
-      return json(res, 200, {commandId, status: 'SETTLED', statusUrl,
-        result: engagement, errorCode: null, httpStatus: 200});
+      return json(res,200,engagement);
     }
     if (req.method === 'GET' && req.url === engagementPath) {
       return json(res, 200, engagement);
@@ -149,7 +99,6 @@ test('successful hire replay returns the saved result without another command or
     assert.equal(first.isError, undefined);
     assert.deepEqual(JSON.parse(contentText(first)).result, engagement);
     const postCount = requests.filter(value => value.method === 'POST' && value.path === hirePath).length;
-    const statusCount = requests.filter(value => value.method === 'GET' && value.path === statusUrl).length;
 
     const replay = await client.callTool({name: 'marketplace_application_hire', arguments: hireArgs});
     assert.equal(replay.isError, undefined);
@@ -157,7 +106,6 @@ test('successful hire replay returns the saved result without another command or
     assert.equal(replayResult.recovered, true);
     assert.deepEqual(JSON.parse(replayResult.resultIdentity), {taskId, acceptedApplicationId: applicationId, state: 'ACTIVE', version: 0});
     assert.equal(requests.filter(value => value.method === 'POST' && value.path === hirePath).length, postCount);
-    assert.equal(requests.filter(value => value.method === 'GET' && value.path === statusUrl).length, statusCount);
     assert.equal(requests.filter(value => value.method === 'GET' && value.path === engagementPath).length, 0);
   } finally {
     await client.close();
@@ -178,11 +126,10 @@ async function profileHome(origin) {
   return {home, store};
 }
 
-async function connect(home, commandWaitMs = 30_000) {
+async function connect(home) {
   const client = new Client({name: 'test-application-hire-recovery', version: '1.0.0'});
   const environment = Object.fromEntries(Object.entries(process.env).filter(([key, value]) =>
     typeof value === 'string' && key !== 'NODE_TEST_CONTEXT' && !key.startsWith('NODE_TEST_')));
-  environment.MARKETPLACE_COMMAND_WAIT_MS = String(commandWaitMs);
   await client.connect(new StdioClientTransport({command: process.execPath,
     args: [serverMain, '--profile', 'agent', '--home', home], env: environment, stderr: 'pipe'}));
   return client;

@@ -125,7 +125,7 @@ MCP client. Copy it, reconnect, then try:
 > Show my Shop purchases and which downloads are available.
 
 Marketplace tools cover buyer, worker, and seller workflows. Publishing,
-funding, and other protected actions follow their respective permissions and
+direct payments, and other protected actions follow their respective permissions and
 approvals. Human users can also use the Marketplace browser workspace.
 
 [Marketplace setup and workflows →](atto-marketplace-mcp/README.md)
@@ -158,7 +158,7 @@ user retains its normal local access.
 | --- | --- |
 | Payments, labels, receiving, and scripts | [CLI guide](atto-cli/README.md) |
 | Assistant setup, wallet access, and tools | [Wallet MCP guide](atto-mcp/README.md) |
-| Tasks, applications, submissions, Shop, and funding | [Marketplace MCP guide](atto-marketplace-mcp/README.md) |
+| Tasks, applications, submissions, Shop, and direct payments | [Marketplace MCP guide](atto-marketplace-mcp/README.md) |
 | Embed the wallet engine in a Node.js application | [Public library API](docs/library-api.md) |
 | Understand the bundled Nano wallet engine | [Nano adapter guide](atto-marketplace-nano-adapter/README.md) |
 | Build, test, or install local artifacts | [Contributor guide](docs/contributing.md) |

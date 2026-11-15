@@ -22,7 +22,6 @@ const activeBuyer = {
   asset: 'ATTO',
   grossAtomic: '1000000000',
   feeAtomic: '10000000',
-  workerNetAtomic: '990000000',
   feeRateBasisPoints: 100,
   state: 'ACTIVE',
   version: 2,
@@ -38,7 +37,6 @@ const completedWorker = {
   asset: 'XNO',
   grossAtomic: '1000',
   feeAtomic: '10',
-  workerNetAtomic: '990',
   feeRateBasisPoints: 100,
   state: 'COMPLETED',
   version: 5,
@@ -216,8 +214,7 @@ async function profileHome({ origin, apiScopes }) {
     id: 'agent', origin, audience: 'marketplace', accountId, agentId, identityId,
     controllerNetwork: 'ATTO', controllerAddress: `atto://${'a'.repeat(61)}`,
     authMode: 'scoped-api-key', apiKey: 'scoped-engagement-read-key', apiScopes,
-    applyAttoLimit: null, applyXnoLimit: null,
-  });
+    });
   return { home, store };
 }
 

@@ -8,37 +8,35 @@ import { dispatchNanoOperation, loadConfiguration, defaultDataDirectory } from '
 import { selectedAttoWallet } from './wallet-access.js';
 import { canonicalWalletDestination, normalizeWalletResult, publicWalletIdentity } from './wallet-results.js';
 
-export const walletOperations = ['controller.sign','payment.prepare','payment.status','identity.list','balance.get',
-  'transfer.send','transfer.status','receive','receivable.list'] as const;
+export const walletOperations = ['controller.sign','identity.list','balance.get',
+  'transfer.send','transfer.status','receive','receivable.list','payment.prepare','payment.authorize','payment.status'] as const;
 export type WalletOperation = typeof walletOperations[number];
 export type WalletAsset = 'ATTO' | 'XNO';
 export interface WalletRequest {
   asset: WalletAsset;
   operation: WalletOperation;
   input: Record<string, unknown>;
-  marketplace?: { apiUrl: string; audience: string } | undefined;
 }
 
 /** Trusted, installed adapters only. Each adapter owns its key access, permissions and durable state. */
 export async function executeWalletRequest(request: WalletRequest, env: NodeJS.ProcessEnv): Promise<unknown> {
   if (request.operation === 'transfer.send') request = {...request,input:{...request.input,
     destination:canonicalWalletDestination(request.asset, request.input.destination)}};
-  const internal = request.operation === 'controller.sign' || request.operation === 'payment.prepare' || request.operation === 'payment.status';
+  const internal = request.operation === 'controller.sign';
   if (!internal && Object.hasOwn(request.input, 'index')) throw walletError('INVALID_REQUEST');
   if (request.asset === 'XNO') {
-    const names: Record<WalletOperation,string> = {'controller.sign':'message.sign','payment.prepare':'payment.prepare',
-      'payment.status':'payment.status','identity.list':'identity.list','balance.get':'balance.get',
+    const names: Record<WalletOperation,string> = {'controller.sign':'message.sign','identity.list':'identity.list','balance.get':'balance.get',
+      'payment.prepare':'payment.prepare','payment.authorize':'payment.authorize','payment.status':'payment.status',
       'transfer.send':'transfer.send','transfer.status':'transfer.status',receive:'receive','receivable.list':'receivable.list'};
-    const selected=request.operation==='controller.sign'&&env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR
+    const selected=request.operation==='controller.sign'&&request.input.purpose!=='payment evidence'&&env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR
       ? {...env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR}:env;
-    if (request.operation === 'controller.sign' || request.operation === 'payment.prepare' || request.operation === 'payment.status') {
+    if (request.operation === 'controller.sign') {
       return dispatchNanoOperation(selected, names[request.operation], request.input);
     }
+    if (request.operation === 'payment.prepare' || request.operation === 'payment.authorize' || request.operation === 'payment.status') return dispatchNanoOperation(selected, names[request.operation], request.input);
     const configuration = loadConfiguration(defaultDataDirectory(selected));
     const identity = publicWalletIdentity({asset:'XNO',network:configuration.network,address:configuration.sourceAddress,
-      index:configuration.derivationIndex,permissions:{marketplaceFunding:configuration.grants.marketplaceFunding,
-        externalTransfers:configuration.grants.externalTransfers,
-        receive:configuration.grants.marketplaceFunding || configuration.grants.externalTransfers}});
+      index:configuration.derivationIndex,permissions:{externalTransfers:configuration.grants.externalTransfers,receive:configuration.grants.externalTransfers}});
     // Status describes the configured account and grants. Configuration loading
     // validates its original shared journal binding without opening signing keys.
     if (request.operation === 'identity.list') return normalizeWalletResult(identity, request.operation, {}, request.input);
@@ -57,13 +55,9 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
     } finally { await app.close(); }
   }
   let app: ApplicationSession;
-  if ((request.operation === 'payment.prepare' || request.operation === 'payment.status') && !request.marketplace) {
-    throw walletError('WALLET_SETUP_REQUIRED');
-  }
   let status: Record<string, unknown> | undefined;
   let selection: ReturnType<typeof selectedAttoWallet> | undefined;
   app = createInternalMarketplaceWalletApplication({directory,
-    ...(request.marketplace ? {internalMarketplacePayment:request.marketplace} : {}),
     authorizeWrite:(currentStatus: unknown) => {
       if (!status || !selection) throw walletError('WALLET_SETUP_REQUIRED');
       const current = selectedAttoWallet(env, currentStatus);
@@ -73,25 +67,27 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
         || currentIdentity.fingerprint !== originalIdentity.fingerprint) {
         throw walletError('WALLET_SETUP_REQUIRED');
       }
-      const allowed = request.operation === 'payment.prepare' ? current.permissions.marketplaceFunding
-        : request.operation === 'transfer.send' ? current.permissions.externalTransfers
+      const allowed = request.operation === 'transfer.send' || ['payment.prepare','payment.authorize'].includes(request.operation) ? current.permissions.externalTransfers
         : request.operation === 'receive' ? current.permissions.receive : true;
       if (!allowed) throw walletError('PERMISSION_DENIED');
     }});
   try {
-    const names: Record<WalletOperation,string> = {'controller.sign':'message_sign','payment.prepare':'marketplace_pay_intent',
-      'payment.status':'marketplace_pay_intent_status','identity.list':'wallet_status','balance.get':'balances_get',
+    const names: Record<WalletOperation,string> = {'controller.sign':'message_sign','identity.list':'wallet_status','balance.get':'balances_get',
+      'payment.prepare':'payment_prepare','payment.authorize':'payment_authorize','payment.status':'payment_status',
       'transfer.send':'send','transfer.status':'journal_get',receive:'receive','receivable.list':'receivables_list'};
     const args = {...request.input};
     status = await app.call('wallet_status', {}) as Record<string, unknown>;
     selection = selectedAttoWallet(env, status);
     const identity = publicWalletIdentity({asset:'ATTO',...selection});
+    if (request.operation === 'payment.prepare' || request.operation === 'payment.authorize' || request.operation === 'payment.status') {
+      args.index = identity.index;
+      return await app.call(names[request.operation], args);
+    }
     if (request.operation === 'transfer.send' || request.operation === 'balance.get' || request.operation === 'receive' || request.operation === 'receivable.list') {
       if (args.network !== identity.network) throw walletError('NETWORK_MISMATCH');
       delete args.network;
       args.index = identity.index;
     }
-    if (request.operation === 'payment.prepare') args.index = identity.index;
     if (request.operation === 'transfer.send' || request.operation === 'transfer.status') {
       if (request.operation === 'transfer.send') {
         try { await app.call('send', args); }
@@ -107,7 +103,6 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
       return normalizeWalletResult(identity, request.operation, journal.record, request.input);
     }
     const result = await app.call(names[request.operation], args);
-    if (request.operation === 'payment.prepare' || request.operation === 'payment.status') return result;
     return normalizeWalletResult(identity, request.operation, result, request.input);
   } finally { await app.close(); }
 }
@@ -133,7 +128,7 @@ export function createWalletHost(env: NodeJS.ProcessEnv = process.env): McpServe
   server.registerTool('wallet_call', {
     description:'Private typed wallet adapter request. No generic hash signing, key export or remote plugin loading.',
     inputSchema:z.strictObject({asset:z.enum(['ATTO','XNO']),operation:z.enum(walletOperations),
-      input:z.record(z.string(),z.unknown()),marketplace:z.strictObject({apiUrl:z.string().max(2048),audience:z.string().max(255)}).optional()}),
+      input:z.record(z.string(),z.unknown())}),
   }, async request => {
     try {
       const result = await executeWalletRequest(request, env);

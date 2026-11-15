@@ -3,11 +3,11 @@ import { runNanoTerminal, nanoWalletUsage } from './nano-terminal.js';
 import {existsSync} from 'node:fs';
 import { join, resolve } from 'node:path';
 import { ProfileError } from './profile-store.js';
-import { ensurePaymentHandoffDirectory } from './payment-handoff-files.js';
+import { ensurePrivateDirectory } from './private-directory.js';
 import { managedWalletEnvironment } from './wallet-home.js';
 import {approveAttoWalletAccess,runAttoWalletAccessCommand} from './wallet-access.js';
 
-const usage = 'Usage: atto-marketplace-mcp wallet setup [--asset ATTO] [--home <private-directory>] [--index <index>] --network <atto:live|atto:beta|atto:dev|atto:local> --node-url <url> --worker-url <url>\nAtto policy: atto-marketplace-mcp wallet policy --asset ATTO [--home <private-directory>] [--allow-marketplace-funding] [--allow-external-transfers]\n';
+const usage = 'Usage: atto-marketplace-mcp wallet setup [--asset ATTO] [--home <private-directory>] [--index <index>] --network <atto:live|atto:beta|atto:dev|atto:local> --node-url <url> --worker-url <url>\nAtto policy: atto-marketplace-mcp wallet policy --asset ATTO [--home <private-directory>] [--allow-external-transfers]\n';
 
 /** Wallet recovery and approvals execute only in a person's local terminal. */
 export async function runWalletSetup(argv: string[], env: NodeJS.ProcessEnv): Promise<void> {
@@ -47,8 +47,8 @@ export async function runWalletSetup(argv: string[], env: NodeJS.ProcessEnv): Pr
   const home = resolve(options.get('--home') ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env));
   const walletEnv = managedWalletEnvironment(home, env);
   const directory = walletEnv.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR!;
-  ensurePaymentHandoffDirectory(home);
-  ensurePaymentHandoffDirectory(directory);
+  ensurePrivateDirectory(home);
+  ensurePrivateDirectory(directory);
   process.stderr.write(`Marketplace MCP Atto wallet: ${directory}\nNative network: ${network}\nNode: ${nodeUrl}\nWork server: ${workerUrl}\n`);
   const { setupMarketplaceWallet } = await import('@attocash/cli/terminal');
   let reuseExisting=false;

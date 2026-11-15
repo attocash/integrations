@@ -6,31 +6,16 @@ const uuid=z.string().uuid();
 const hash=z.string().regex(/^[0-9a-f]{64}$/);
 const atomic=z.string().regex(/^(0|[1-9][0-9]{0,64})$/);
 const instant=z.string().datetime({offset:true});
-export const productPurchaseResult=z.strictObject({
-  purchaseId:uuid,commandId:uuid,productId:uuid,releaseId:uuid,releaseHash:hash,manifestHash:hash,
-  buyerAgentId:uuid,sellerAgentId:uuid,asset:z.enum(['ATTO','XNO']),grossAtomic:atomic,feeAtomic:atomic,
-  netAtomic:atomic,feeRateBasisPoints:z.number().int().min(0).max(10_000),status:z.enum(['ACTIVE','REFUNDED']),
-  version:z.number().int().nonnegative(),entitlementActive:z.boolean(),receiptId:uuid,receiptHash:hash,
-  createdAt:instant,refundedAt:instant.nullable(),refundReceiptId:uuid.nullable(),
-  refundReceiptHash:hash.nullable(),refundCommandId:uuid.nullable(),
-}).superRefine((value,context)=>{
-  if (BigInt(value.grossAtomic)<=0n || BigInt(value.grossAtomic)!==BigInt(value.feeAtomic)+BigInt(value.netAtomic)
-    || value.entitlementActive!==(value.status==='ACTIVE')
-    || (value.status==='ACTIVE' && [value.refundedAt,value.refundReceiptId,value.refundReceiptHash,value.refundCommandId].some(item=>item!==null))
-    || (value.status==='REFUNDED' && [value.refundedAt,value.refundReceiptId,value.refundReceiptHash,value.refundCommandId].some(item=>item===null))) {
-    context.addIssue({code:'custom',message:'Inconsistent product settlement'});
-  }
-});
+export const productPurchaseResult=z.object({
+  purchaseId:uuid,productId:uuid,releaseId:uuid,releaseHash:hash,manifestHash:hash,buyerAgentId:uuid,sellerAgentId:uuid,
+  asset:z.enum(['ATTO','XNO']),grossAtomic:atomic,status:z.enum(['RESERVED','EXPIRED','PAYMENT_PENDING','ACTIVE','PAID_UNFULFILLED','REFUNDED']),
+  version:z.number().int().nonnegative(),entitlementActive:z.boolean(),paymentRequirementId:uuid,reservationExpiresAt:instant,
+  receiptId:uuid.nullable(),receiptHash:hash.nullable(),createdAt:instant,refundedAt:instant.nullable(),refundReceiptId:uuid.nullable(),
+  refundReceiptHash:hash.nullable(),refundPaymentRequirementId:uuid.nullable(),paidTransactionHash:hash.nullable(),
+}).refine(p=>BigInt(p.grossAtomic)>0n && p.entitlementActive===(p.status==='ACTIVE'));
 export type ProductPurchaseResult=z.infer<typeof productPurchaseResult>;
 export const productSellerOrder=z.strictObject({purchaseId:uuid,buyerAgentId:uuid,releaseId:uuid,
-  status:z.enum(['ACTIVE','REFUNDED']),createdAt:instant,refundedAt:instant.nullable()});
-export const productPurchaseChallenge=z.strictObject({releaseId:uuid,releaseHash:hash,sellerAgentId:uuid,
-  asset:z.enum(['ATTO','XNO']),grossAtomic:atomic,feeAtomic:atomic,netAtomic:atomic,
-  challenge:z.strictObject({challengeId:uuid,message:z.string().min(1).max(4096),issuedAt:instant,expiresAt:instant})});
-export const productRefundChallenge=z.strictObject({purchaseId:uuid,authority:z.literal('SELLER'),
-  buyerAgentId:uuid,sellerAgentId:uuid,asset:z.enum(['ATTO','XNO']),grossAtomic:atomic,feeAtomic:atomic,
-  netAtomic:atomic,originalPurchaseReceiptHash:hash,
-  challenge:z.strictObject({challengeId:uuid,message:z.string().min(1).max(4096),issuedAt:instant,expiresAt:instant})});
+  status:z.enum(['RESERVED','EXPIRED','PAYMENT_PENDING','ACTIVE','PAID_UNFULFILLED','REFUNDED']),createdAt:instant,refundedAt:instant.nullable()});
 export const productPaidContent=z.strictObject({purchaseId:uuid,releaseId:uuid,
   paidMarkdown:z.string().max(40_000).nullable(),licenseText:z.string().max(16_000),manifestHash:hash,
   files:z.array(z.strictObject({ordinal:z.number().int().nonnegative(),fileId:uuid,contentVersionId:uuid,
@@ -41,57 +26,26 @@ export const productReceipt=z.strictObject({receiptId:uuid,kind:z.enum(['PURCHAS
   contentSha256:hash,signatureBase64:z.string().min(1).max(128),keyVersion:z.string().min(1).max(64)});
 export type ProductReceipt=z.infer<typeof productReceipt>;
 
-const common=['schema','keyVersion','receiptId','purchaseId','buyerAccountId','buyerAgentId',
-  'sellerAccountId','sellerAgentId','productId','releaseId','releaseHash','manifestHash','asset',
-  'grossAtomic','feeAtomic','netAtomic','feeRateBasisPoints','commandId','ledgerTransactionId',
-  'outcome','createdAt','settledAt'];
-const refund=['originalPurchaseReceiptId','originalPurchaseReceiptHash',
-  'originalPurchaseLedgerTransactionId','authority','actorAccountId','actorIdentityId'];
-
-export function verifyProductReceipt(receipt:ProductReceipt,
-  key:{version:string;algorithm:string;publicKeyBase64:string},purchase:ProductPurchaseResult):void {
+export function verifyProductReceipt(receipt:ProductReceipt,key:{version:string;algorithm:string;publicKeyBase64:string},purchase:ProductPurchaseResult):void {
   try {
-    const isRefund=receipt.kind==='REFUND';
-    const fields=isRefund?[...common,...refund]:common;
-    const schema=`marketplace-product-${isRefund?'refund':'purchase'}-receipt-v1`;
-    const domain=`marketplace-product-${isRefund?'refund':'purchase'}-receipt-signature-v1\0`;
-    if (key.version!==receipt.keyVersion || key.algorithm!=='Ed25519'
-      || Object.keys(receipt.content).length!==fields.length
-      || Object.keys(receipt.content).some(field=>!fields.includes(field))) throw invalid();
-    const bytes=decodeBase64(receipt.canonicalBase64,500_000);
-    const content:Record<string,string>={};
-    let offset=0;
-    for (const field of fields) {
-      if (offset+4>bytes.length) throw invalid();
-      const length=bytes.readUInt32BE(offset); offset+=4;
-      if (length>16_384 || offset+length>bytes.length) throw invalid();
-      content[field]=new TextDecoder('utf-8',{fatal:true}).decode(bytes.subarray(offset,offset+length));
-      offset+=length;
-      if (content[field]!==receipt.content[field]) throw invalid();
-    }
-    if (offset!==bytes.length || content.schema!==schema || content.keyVersion!==key.version
-      || content.receiptId!==receipt.receiptId || content.purchaseId!==purchase.purchaseId
-      || content.productId!==purchase.productId || content.releaseId!==purchase.releaseId
-      || content.releaseHash!==purchase.releaseHash || content.manifestHash!==purchase.manifestHash
-      || content.buyerAgentId!==purchase.buyerAgentId || content.sellerAgentId!==purchase.sellerAgentId
-      || content.asset!==purchase.asset || content.grossAtomic!==purchase.grossAtomic
-      || content.feeAtomic!==purchase.feeAtomic || content.netAtomic!==purchase.netAtomic
-      || content.feeRateBasisPoints!==String(purchase.feeRateBasisPoints)
-      || content.commandId!==(isRefund?purchase.refundCommandId:purchase.commandId)
-      || content.outcome!==(isRefund?'REFUNDED':'PURCHASED')
-      || !Number.isFinite(Date.parse(content.createdAt??''))
-      || !Number.isFinite(Date.parse(content.settledAt??''))) throw invalid();
-    if (isRefund) {
-      if (receipt.receiptId!==purchase.refundReceiptId || receipt.contentSha256!==purchase.refundReceiptHash
-        || content.originalPurchaseReceiptId!==purchase.receiptId
-        || content.originalPurchaseReceiptHash!==purchase.receiptHash
-        || !['SELLER','ADMIN'].includes(content.authority??'')) throw invalid();
-    } else if (receipt.receiptId!==purchase.receiptId || receipt.contentSha256!==purchase.receiptHash) throw invalid();
+    const kind=receipt.kind.toLowerCase();
+    if(key.version!==receipt.keyVersion || key.algorithm!=='Ed25519') throw invalid();
+    const bytes=decodeBase64(receipt.canonicalBase64,500000);
+    const c=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(bytes)) as Record<string,string>;
+    if(!c || Array.isArray(c) || Object.keys(c).length!==Object.keys(receipt.content).length
+      || Object.keys(c).some(k=>typeof c[k]!=='string'||c[k]!==receipt.content[k])
+      || c.schema!==`marketplace-product-${kind}-receipt-v2` || c.receiptId!==receipt.receiptId
+      || c.purchaseId!==purchase.purchaseId || c.productId!==purchase.productId || c.releaseId!==purchase.releaseId
+      || c.releaseHash!==purchase.releaseHash || c.manifestHash!==purchase.manifestHash || c.asset!==purchase.asset
+      || c.amountAtomic!==purchase.grossAtomic || c.buyerAgentId!==purchase.buyerAgentId || c.sellerAgentId!==purchase.sellerAgentId
+      || c.paymentRequirementId!==(receipt.kind==='PURCHASE'?purchase.paymentRequirementId:purchase.refundPaymentRequirementId)
+      || receipt.receiptId!==(receipt.kind==='PURCHASE'?purchase.receiptId:purchase.refundReceiptId)
+      || receipt.contentSha256!==(receipt.kind==='PURCHASE'?purchase.receiptHash:purchase.refundReceiptHash)
+      || !/^[a-f0-9]{64}$/i.test(c.transactionHash??'') || !c.senderAddress || !c.recipientAddress) throw invalid();
     const digest=createHash('sha256').update(bytes).digest();
-    if (digest.toString('hex')!==receipt.contentSha256) throw invalid();
+    if(digest.toString('hex')!==receipt.contentSha256) throw invalid();
     const publicKey=createPublicKey({key:decodeBase64(key.publicKeyBase64,256),format:'der',type:'spki'});
-    if (!verify(null,Buffer.concat([Buffer.from(domain),digest]),publicKey,
-      decodeBase64(receipt.signatureBase64,128))) throw invalid();
+    if(!verify(null,Buffer.concat([Buffer.from(`marketplace-product-${kind}-v2\0`),digest]),publicKey,decodeBase64(receipt.signatureBase64,128))) throw invalid();
   } catch { throw invalid(); }
 }
 

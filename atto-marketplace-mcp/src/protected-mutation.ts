@@ -1,12 +1,11 @@
 import { marketplaceCommand, shellQuote } from './shell-quote.js';
 import { asRecord, redact } from './marketplace-results.js';
-import { commandPointerFromError } from './marketplace-api.js';
 import { requireSession } from './profile-store.js';
 import { mutationHash } from './canonical-json.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { z } from 'zod';
-import { MarketplaceApiClient, MarketplaceApiError, parseCommandPointer, type ApiResponse, type MarketplaceCommandPointer } from './marketplace-api.js';
+import { MarketplaceApiClient, MarketplaceApiError, type ApiResponse } from './marketplace-api.js';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
 import { approvalRequestPath, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest, type MarketplaceProofApprovalRequest } from './approval-files.js';
 
@@ -59,54 +58,10 @@ export async function freshProofMutation(input: FreshProofMutationInput): Promis
   if (previous.state==='COMPLETE' || handoff.state==='COMPLETE') {
     const result=saved.result;
     if (result===undefined) throw new ProfileError('RECOVERY_REQUIRED','The protected Marketplace operation completed, but its safe result is unavailable locally.');
-    if (previous.state!=='COMPLETE' && input.operation!=='withdrawal-create') input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-    if (input.operation==='withdrawal-create') {
-      const withdrawalId=asRecord(result).withdrawalId;
-      if (typeof withdrawalId!=='string' || !uuid.safeParse(withdrawalId).success) {
-        throw new ProfileError('RECOVERY_REQUIRED','The saved withdrawal result has no original withdrawal ID. Use marketplace_withdrawals_list to reconcile it.');
-      }
-      const current=await input.api.request(`/v1/agent/withdrawals/${withdrawalId}`);
-      validateWithdrawalResult(input,saved,current.json,withdrawalId,handle,asRecord(saved.result).state==='REJECTED'?'REJECTED':undefined);
-      const recovered=input.result?input.result(current.json,saved.context):safeMutationResult(current.json);
-      if (previous.state!=='COMPLETE') input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-      return {...asRecord(recovered),recovered:true};
-    }
+    if (previous.state!=='COMPLETE') input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
     return {...asRecord(result),recovered:true};
   }
-  if (handoff.state==='COMMAND_PENDING') {
-    const pointer=parseCommandPointer(saved.commandPointer);
-    if (!pointer) throw new ProfileError('RECOVERY_REQUIRED','The durable command pointer is missing from its private approval journal.');
-    return resumeProtectedCommand(input,handle,requestHash,saved,pointer);
-  }
   if (handoff.state==='UNKNOWN' || handoff.state==='SUBMITTING') {
-    if (isShopFinancialProof(input.operation)) {
-      const request=parseApprovalRequest(saved.request);
-      if (saved.requestHash!==requestHash || mutationHash(saved.command)!==mutationHash(input.payload)) {
-        throw new ProfileError('IDEMPOTENCY_CONFLICT','The saved signed Shop action differs from the original request.');
-      }
-      const responsePath=approvalRequestPath(input.home,input.profile.id,handle).replace(/\.request\.json$/,'.response.json');
-      if (!existsSync(responsePath)) return {status:'unknown',requestId:input.requestId,handoffId:handle,
-        ...protectedMutationRecovery(input)};
-      const response=validateApprovalResponse(request,readApprovalResponse(input.home,input.profile.id,handle));
-      await verifyApprovalSignature(request,response,input.env);
-      const proof={challengeId:response.challengeId,message:response.message,signature:response.signature};
-      try {
-        const sent=await input.send(proof); // One exact same-key replay; Marketplace owns admission and effects.
-        if (sent.command) {
-          saved={...saved,commandPointer:sent.command};
-          input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-          return resumeProtectedCommand(input,handle,requestHash,saved,sent.command);
-        }
-        return completeProtectedMutation(input,handle,request,requestHash,input.payload,saved.context,sent.json);
-      } catch (error) {
-        const pointer=commandPointerFromError(error);
-        if (pointer) {
-          saved={...saved,commandPointer:pointer};
-          input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-        }
-        throw error;
-      }
-    }
     return {status:'unknown',requestId:input.requestId,handoffId:handle,...protectedMutationRecovery(input)};
   }
   if (handoff.state==='EXPIRED') throw new ProfileError('APPROVAL_EXPIRED','This exact approval has expired. Inspect its resource state, then use a new request ID only when the operation is known not to have been applied.');
@@ -150,126 +105,11 @@ export async function freshProofMutation(input: FreshProofMutationInput): Promis
   const proof={challengeId:response.challengeId,message:response.message,signature:response.signature};
   try {
     const sent=await input.send(proof);
-    if (sent.command) {
-      saved={...saved,commandPointer:sent.command};
-      input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-      return resumeProtectedCommand(input,handle,requestHash,saved,sent.command);
-    }
     return completeProtectedMutation(input,handle,request,requestHash,input.payload,saved.context,sent.json);
   } catch (error) {
-    const pointer=commandPointerFromError(error);
-    if (pointer) {
-      saved={...saved,commandPointer:pointer};
-      input.store.setHandoffState(input.profile.id,handle,'COMMAND_PENDING',JSON.stringify(saved));
-      if (input.operation==='withdrawal-create') return resumeProtectedCommand(input,handle,requestHash,saved,pointer);
-      throw error;
-    }
     input.store.setHandoffState(input.profile.id,handle,'UNKNOWN',JSON.stringify(saved));
     const recovery=protectedMutationRecovery(input);
     throw new ProfileError('MUTATION_UNKNOWN',`Marketplace may have applied this signed operation. Use ${String(recovery.reconciliationTool)} to reconcile it. ${String(recovery.next)}`);
-  }
-}
-
-function isShopFinancialProof(operation:string):boolean {
-  return operation==='product-purchase' || operation==='product-refund';
-}
-
-async function resumeProtectedCommand(input:FreshProofMutationInput,handle:string,requestHash:string,
-  saved:Record<string,unknown>,pointer:MarketplaceCommandPointer):Promise<unknown> {
-  try {
-    const completed=await input.api.resumeCommand(pointer);
-    return completeProtectedMutation(input,handle,parseApprovalRequest(saved.request),requestHash,
-      saved.command??input.payload,saved.context,completed.json);
-  } catch(error) {
-    if (!(error instanceof MarketplaceApiError) || error.details?.terminal!==true
-      || error.details.commandId!==pointer.commandId || error.details.statusUrl!==pointer.statusUrl) throw error;
-    if (input.operation==='withdrawal-create') {
-      const current=await input.api.request(`/v1/agent/withdrawals/${pointer.commandId}`);
-      validateWithdrawalResult(input,saved,current.json,pointer.commandId,handle,'REJECTED');
-      const result=input.result?input.result(current.json,saved.context):safeMutationResult(current.json);
-      input.store.setHandoffState(input.profile.id,handle,'COMPLETE',JSON.stringify({...saved,result}));
-      input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-      return result;
-    }
-    if (!isShopFinancialProof(input.operation)) throw error;
-    const result={status:'rejected',requestId:input.requestId,commandId:pointer.commandId,
-      errorCode:error.code,httpStatus:error.httpStatus??409};
-    input.store.setHandoffState(input.profile.id,handle,'COMPLETE',JSON.stringify({...saved,result}));
-    input.store.completeMutation(input.profile.id,input.requestId,requestHash,handle);
-    return result;
-  }
-}
-
-/** Explicit owner GET can reconcile an old pointer-less UNKNOWN, without replaying its mutation. */
-export async function reconcileUnknownWithdrawal(input:{store:MarketplaceProfileStore;profile:MarketplaceProfile;
-  api:MarketplaceApiClient;withdrawalId:string;result:unknown}):Promise<void> {
-  const result=asRecord(input.result);
-  if (result.state!=='REJECTED' || !uuid.safeParse(result.requestId).success) return;
-  const requestId=String(result.requestId);
-  const mutation=input.store.getMutationByRequestId(input.profile.id,requestId);
-  if (!mutation || mutation.operation!=='withdrawal-create' || mutation.target!==input.profile.accountId
-    || mutation.state!=='PENDING' || !mutation.resultIdentity || !/^[a-f0-9]{32}$/.test(mutation.resultIdentity)) return;
-  const handle=mutation.resultIdentity;
-  const handoff=input.store.getHandoff(input.profile.id,handle);
-  if (handoff.kind!=='CONTROLLER_APPROVAL' || handoff.state!=='UNKNOWN') return;
-  const saved=asRecord(JSON.parse(handoff.privatePayload));
-  if (handoff.requestHash!==mutation.requestHash || saved.requestHash!==mutation.requestHash) {
-    throw new MarketplaceApiError('COMMAND_PROTOCOL','The original withdrawal journal has conflicting request bindings.');
-  }
-  validateWithdrawalResult({store:input.store,profile:input.profile,operation:mutation.operation,target:mutation.target,
-    payload:saved.command,requestId},saved,result,input.withdrawalId,handle,'REJECTED');
-  const pointer=parseCommandPointer({commandId:input.withdrawalId,statusUrl:`/v1/agent/commands/${input.withdrawalId}`});
-  if (!pointer) throw new MarketplaceApiError('COMMAND_PROTOCOL','The original withdrawal command pointer is invalid.');
-  try {
-    await input.api.resumeCommand(pointer);
-    throw new MarketplaceApiError('COMMAND_PROTOCOL','The original withdrawal command does not confirm its rejection.');
-  } catch (error) {
-    if (!(error instanceof MarketplaceApiError) || error.details?.terminal!==true
-      || error.details.commandId!==pointer.commandId || error.details.statusUrl!==pointer.statusUrl) throw error;
-  }
-  // Authority can change while the command status request is in flight.
-  validateWithdrawalResult({store:input.store,profile:input.profile,operation:mutation.operation,target:mutation.target,
-    payload:saved.command,requestId},saved,result,input.withdrawalId,handle,'REJECTED');
-  // Re-read after the authenticated status request so a concurrent recovery cannot be overwritten.
-  const current=input.store.getHandoff(input.profile.id,handle);
-  if (current.state!=='UNKNOWN' || current.privatePayload!==handoff.privatePayload) return;
-  input.store.setHandoffState(input.profile.id,handle,'COMPLETE',JSON.stringify({...saved,commandPointer:pointer,result}));
-  input.store.completeMutation(input.profile.id,requestId,mutation.requestHash,handle);
-}
-
-/** Command IDs are withdrawal IDs; owner-scoped reads must still match every signed term. */
-function validateWithdrawalResult(input:Pick<FreshProofMutationInput,'store'|'profile'|'operation'|'target'|'payload'|'requestId'>,
-  saved:Record<string,unknown>,value:unknown,withdrawalId:string,handle:string,state?:'REJECTED'):void {
-  const current=input.store.getProfile(input.profile.id);
-  if (current.authMode!=='controller-session' || (['origin','audience','accountId','agentId','identityId',
-    'controllerNetwork','controllerAddress','controllerIndex','authMode'] as const)
-    .some(key=>current[key]!==input.profile[key])) {
-    throw new MarketplaceApiError('COMMAND_PROTOCOL','The withdrawal profile authority changed during recovery.');
-  }
-  const request=parseApprovalRequest(saved.request);
-  const action=asRecord(request.action);
-  const command=asRecord(saved.command);
-  const context=asRecord(saved.context);
-  const result=asRecord(value);
-  if (request.profileId!==input.profile.id || request.handoffId!==handle || request.purpose!=='withdrawal creation'
-    || request.controller.network!==input.profile.controllerNetwork
-    || request.controller.address!==input.profile.controllerAddress || request.controller.index!==input.profile.controllerIndex
-    || request.accountId!==input.profile.accountId
-    || request.identityId!==input.profile.identityId || request.marketplaceOrigin!==input.profile.origin
-    || request.audience!==input.profile.audience || action.kind!=='withdrawal'
-    || saved.requestHash!==mutationHash({operation:input.operation,target:input.target,payload:input.payload,accountId:input.profile.accountId})
-    || mutationHash(command)!==mutationHash(input.payload) || mutationHash(action.command)!==mutationHash(command)
-    || command.idempotencyKey!==input.requestId || !uuid.safeParse(withdrawalId).success
-    || result.withdrawalId!==withdrawalId || result.requestId!==input.requestId
-    || result.asset!==command.asset || result.atomicAmount!==command.atomicAmount
-    || result.destinationId!==command.destinationId || result.destinationVersion!==command.expectedSelectionVersion
-    || typeof action.network!=='string' || typeof action.destinationAddress!=='string'
-    || (command.network!==undefined && command.network!==action.network)
-    || (state==='REJECTED' && saved.context===undefined)
-    || (saved.context!==undefined && (context.network!==action.network || context.address!==action.destinationAddress))
-    || result.network!==action.network || result.destinationAddress!==action.destinationAddress
-    || (state!==undefined && result.state!==state)) {
-    throw new MarketplaceApiError('COMMAND_PROTOCOL','The original withdrawal result does not match its saved owner and approved terms.');
   }
 }
 
@@ -282,13 +122,6 @@ function completeProtectedMutation(input:FreshProofMutationInput,handle:string,r
 }
 
 function protectedMutationRecovery(input:FreshProofMutationInput):Record<string,unknown> {
-  if(input.operation==='product-purchase') return {
-    reconciliationTool:'marketplace_purchases_list',releaseId:input.target,
-    next:'Inspect this account’s purchases for the exact original release and original purchase command. Keep the saved requestId and handoff; do not start another purchase while this signed submission is uncertain.'};
-  if(input.operation==='product-refund') return {
-    reconciliationTool:'marketplace_purchase_get',
-    purchaseId:input.target,
-    next:'Inspect this original order for status REFUNDED and its stable refundCommandId. Keep the saved requestId and handoff; do not start another refund while this signed submission is uncertain.'};
   if (input.operation.startsWith('credential-')) {
     const credential=asRecord(asRecord(input.payload).credential ?? {});
     const operation=input.operation.slice('credential-'.length).toUpperCase();
@@ -304,11 +137,7 @@ function protectedMutationRecovery(input:FreshProofMutationInput):Record<string,
     }
     return {reconciliationTool:'marketplace_credentials_list',...(target?{targetApiKeyId:target}:{}),...(name?{credentialName:name}:{}),next};
   }
-  if (input.operation.startsWith('withdrawal-')) return {
-    reconciliationTool:'marketplace_withdrawals_list',
-    next:'Inspect this account’s withdrawal list for the original action. Use marketplace_withdrawal_get with that existing withdrawal ID to reconcile a terminal rejection against this saved request. Do not create another request while its outcome is unknown.'};
-  return {reconciliationTool:'marketplace_payout_addresses_list',alsoReadTool:'marketplace_payout_selection_get',
-    next:'Inspect the payout-address list and current selection for the original action. Do not create another request while its outcome is unknown.'};
+  throw new ProfileError('INVALID_ACTION','Unsupported protected Marketplace operation.');
 }
 
 function approvalRequired(requestId:string,handle:string,request:MarketplaceProofApprovalRequest,path:string):Record<string,unknown> {
@@ -333,6 +162,6 @@ function parseApprovalRequest(value:unknown):MarketplaceProofApprovalRequest {
 
 function safeMutationResult(value:unknown):Record<string,unknown> {
   const record=asRecord(value);
-  const safe=Object.fromEntries(Object.entries(record).filter(([key])=>/^(?:apiKeyId|result|replayed|destinationId|selectionVersion|withdrawalId|asset|network|atomicAmount|destinationVersion|destinationAddress|state|createdAt|updatedAt)$/.test(key)));
+  const safe=Object.fromEntries(Object.entries(record).filter(([key])=>/^(?:apiKeyId|result|replayed)$/.test(key)));
   return redact(safe,true) as Record<string,unknown>;
 }

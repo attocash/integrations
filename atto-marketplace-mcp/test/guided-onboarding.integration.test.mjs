@@ -119,8 +119,7 @@ function terminalRun(env, args, steps, timeoutMs = 15_000) {
 }
 
 const step = (prompt, answer = '') => ({prompt, answer});
-const marketplaceApproval = () => [step('Allow Marketplace funding from this Atto wallet', 'yes'),
-  step('Allow external Atto transfers from this wallet', 'no'), step('Type APPROVE to save this Marketplace wallet access:', 'APPROVE')];
+const marketplaceApproval = () => [step('Allow external Atto transfers from this wallet', 'no'), step('Type APPROVE to save this Marketplace wallet access:', 'APPROVE')];
 const reuseChoices = () => [step('Account pool:'), step('Spending policy:')];
 function assertPrivateOutput(output) {
   for (const secret of [phrase, 'access-guided-fixture-secret', 'refresh-guided-fixture-secret']) assert.equal(output.includes(secret), false);
@@ -137,7 +136,7 @@ function json(response, status, value) {response.writeHead(status, {'content-typ
 function challenge(address, audience = 'marketplace') {
   const challengeId = '44444444-4444-4444-8444-444444444444';
   const issuedAt = new Date(Date.now() - 1000).toISOString(), expiresAt = new Date(Date.now() + 120_000).toISOString();
-  const binding = createHash('sha256').update(['signer-controller-enrollment-v1', accountId, identityId].join('\n')).digest('hex');
+  const binding = createHash('sha256').update(['marketplace-login-v1', accountId, identityId].join('\n')).digest('hex');
   return {challengeId, issuedAt, expiresAt, accountId, controllerId: identityId,
     message: ['Marketplace Agent Controller Proof v1', `Audience: ${audience}`, 'Network: live', `Address: ${address}`, 'Purpose: login',
       `Request ID: ${challengeId}`, `Binding Hash: ${binding}`, `Nonce: ${'a'.repeat(64)}`, `Issued At: ${issuedAt}`, `Expiration Time: ${expiresAt}`].join('\n')};
@@ -159,13 +158,13 @@ async function controlledTerminal(action) {
 }
 function answers(values) {return async () => {assert.ok(values.length, 'Unexpected onboarding prompt'); return values.shift();};}
 async function nanoWallet(f, name, origin = 'http://localhost:8080') {
-  const directory = join(f.root, name), handoffDirectory = join(f.root, name + '-handoffs');
+  const directory = join(f.root, name);
   const seedFile=join(f.root,name+'-seed.hex');
   await writeFile(seedFile,randomBytes(32).toString('hex')+'\n',{mode:0o600});
   const wallet = await provisionNanoWallet({seedFile,dataDir: directory, derivationIndex: 3, network: 'nano:dev', rpcUrl: 'http://localhost:17076',
-    origin, audience: 'marketplace', handoffDirectory, grants: {marketplaceFunding: true, externalTransfers: false, controllerPurposes: ['login']},
+    origin, audience: 'marketplace',  grants: { externalTransfers: false, controllerPurposes: ['login']},
     limits: {maxPaymentAtomic: '100', rolling24hAtomic: '1000'}, terminalConfirmed: true});
-  return {...wallet, directory, handoffDirectory};
+  return {...wallet, directory};
 }
 
 for (const production of [true, false]) {
@@ -210,7 +209,7 @@ test(`${production ? 'bare production' : 'custom override'} guided setup verifie
   assert.deepEqual(after,before);
   assert.equal(readWalletSelection(f.home).attoDirectory, f.wallet);
   assert.deepEqual(readWalletSelection(f.home).attoAccess, {address: before.identity.address, index: 0, network: 'atto:local',
-    fingerprint: before.identity.fingerprint, marketplaceFunding: true, externalTransfers: false});
+    fingerprint: before.identity.fingerprint,externalTransfers:true});
   assert.equal(host.env.MARKETPLACE_MCP_HOME, f.home);
   assert.equal(managedWalletEnvironment(f.home, {}).MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, f.wallet);
   const lookups = (await readFile(f.keyLog, 'utf8')).trim().split('\n');
@@ -226,7 +225,7 @@ test(`${production ? 'bare production' : 'custom override'} guided setup verifie
     assert.equal(status.isError, undefined);
     const saved = JSON.parse(status.content.find(value => value.type === 'text').text).result;
     assert.deepEqual(saved, {asset: 'ATTO', network: 'atto:local', address: before.identity.address, index: 0,
-      permissions: {marketplaceFunding: true, externalTransfers: false, receive: true}});
+      permissions:{externalTransfers:true,receive:true}});
   } finally {await client.close();}
   assert.deepEqual(await attoSnapshot(f), after);
 });
@@ -251,7 +250,6 @@ test('compact wallet approval never authorizes the later typed Marketplace login
   assert.equal(result.index,5);assert.deepEqual(result.output.filter(value=>value.testError),[{testError:'APPROVAL_DECLINED'}]);
   assert.deepEqual(requests,['/v1/agent/auth/challenges']);
   assert.deepEqual(await attoSnapshot(f),before);
-  assert.equal(readWalletSelection(f.home).attoAccess.marketplaceFunding,false);
   assert.equal(readWalletSelection(f.home).attoAccess.externalTransfers,false);
   const profiles=await MarketplaceProfileStore.open(f.home);
   try{assert.deepEqual(profiles.listProfileIds(),[]);assert.equal(profiles.getSetupState('main').state,'LOGIN_APPROVAL');}finally{profiles.close();}
@@ -274,7 +272,7 @@ test('interactive setup cancellation preserves shared ATTO authority and its exi
   const f = await fixture(t), before = await existingAtto(f);
   await mkdir(f.home, {mode: 0o700}); await saveWalletSelection(f.home, {attoDirectory: f.wallet});
   const selection = readWalletSelection(f.home);
-  const steps = [step('Configure an Atto wallet?'),step('Atto access:', '4'),
+  const steps = [step('Configure an Atto wallet?'),step('Atto access:','2'),
     step('Type APPROVE to save this Marketplace wallet access:', 'DECLINE')];
   // When the person follows the revised wallet prompts.
   const result = await terminalRun(f.env, ['setup', '--home', f.home, '--profile', 'cancelled', '--origin', 'http://localhost:8080', '--audience', 'marketplace'], steps);
@@ -325,11 +323,11 @@ test('standalone ATTO reuse saves its default CLI selection into a newly approve
   assert.equal(managedWalletEnvironment(f.home, {}).MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, f.wallet);
 });
 
-test('standalone Nano reuse creates the approved private home and preserves the existing handoff after restart', async t => {
+test('standalone Nano reuse creates the approved private home and preserves the existing native journal after restart', async t => {
   // Given the existing wallet and its saved authority.
   const f = await fixture(t), wallet = await nanoWallet(f, 'existing-nano');
   const configuration = await readFile(join(wallet.directory, 'wallet.json'));
-  const pendingFile = join(wallet.handoffDirectory, 'retained.request.json'); await writeFile(pendingFile, 'retained private handoff', {mode: 0o600});
+  const pendingFile = join(wallet.directory, 'retained-native-journal'); await writeFile(pendingFile, 'retained native journal', {mode: 0o600});
   // When the person follows the revised wallet prompts.
   const result = await controlledTerminal(() => runWalletWizard(['--home', f.home, '--asset', 'XNO'], {},
     answers(['reuse', wallet.directory, 'keep', 'APPROVE'])));
@@ -339,9 +337,8 @@ test('standalone Nano reuse creates the approved private home and preserves the 
   const restart = managedWalletEnvironment(f.home, {});
   assert.equal(restart.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR, wallet.directory);
   assert.equal(restart.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, wallet.directory);
-  assert.equal(restart.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, wallet.handoffDirectory);
   assert.deepEqual(await readFile(join(wallet.directory, 'wallet.json')), configuration);
-  assert.equal(await readFile(pendingFile, 'utf8'), 'retained private handoff');
+  assert.equal(await readFile(pendingFile, 'utf8'), 'retained native journal');
 });
 
 test('cancelled standalone Nano reuse leaves a new configuration home and selection absent', async t => {

@@ -4,7 +4,7 @@ Detailed behavior for the local [`@attocash/mcp` server](https://github.com/atto
 Start with the package README for setup and client configuration. The server
 publishes the exact input schema for each tool through MCP tool discovery.
 
-[Approvals](#approve-access-and-limit-changes) · [Marketplace top-ups](#marketplace-account-top-ups) ·
+[Approvals](#approve-access-and-limit-changes) · [Marketplace direct payments](#marketplace-direct-payments) ·
 [Personal names](#personal-names) · [Tools](#tools) · [Sessions](#session-behavior) ·
 [Diagnostics](#troubleshooting) · [Source builds](#install-from-source)
 
@@ -75,16 +75,7 @@ signatures for that key. Grant only keys approved for those purposes, and sign
 only challenges you trust. `message_verify` checks the same exact bytes with
 public data and does not read wallet credentials.
 
-The standard Atto MCP does not expose a tool that returns signed payment headers.
-Marketplace may launch a private Atto wallet child over stdio to sign an already-issued
-intent. The child binds the request to its configured Marketplace API URL and audience,
-the exact intent resource, network, amount, identifier, expiry, and x402 challenge;
-the challenge's canonical `payTo` is the destination and the signed block is checked
-against it. The Marketplace MCP creates and journals the intent, while the Marketplace backend
-checks that `payTo` against the saved intent before accepting payment. Keep the
-child's signature response on that private pipe. If the Marketplace MCP process is
-compromised, the wallet's locally approved source pool and spending limits still
-bound what it can sign.
+Marketplace MCP uses the local native wallet child to send directly under its independently approved external-transfer grant. The requirement UUID is the durable wallet request ID. The wallet journals the signed candidate before publishing and recovers the same candidate after uncertain responses. Marketplace receives only the SEND hash and a proof bound to the exact frozen requirement; its independent network verification determines payment status.
 
 Limits apply to all CLI and MCP sends in that profile, across every derived
 address and including ordinary payments to owned addresses. Internal transfers
@@ -96,39 +87,11 @@ changes do not consume a sending allowance. A policy with `perRequest: null` and
 proposal. These controls constrain MCP tools, not programs or shell commands
 running as the same OS user.
 
-## Marketplace account top-ups
+## Marketplace direct payments
 
-`marketplace_topup` and `marketplace_topup_status` fund the selected wallet's configured Marketplace ATTO account. Task,
-hiring, and Shop workflows use the separate
-[Marketplace MCP](https://github.com/attocash/integrations/tree/main/atto-marketplace-mcp).
+Use the separate Marketplace MCP package for named task, Shop, direct-payment evidence and own-publication-fee workflows. Standalone ATTO transfers still use the existing local send/spending journal. The Marketplace backend never signs or broadcasts customer payments.
 
-First use the CLI to connect the **same profile directory**
-selected for MCP. Run this in your own interactive terminal, using Marketplace's
-exact API URL, controller-proof audience, and a saved controller index:
-
-```sh
-atto --data-dir /absolute/path/to/mcp-wallet marketplace connect --api-url https://<marketplace-host>/v1/agent/topups --audience <agent-api-audience> --controller-index 0
-```
-
-This connection authenticates the account; it does not grant MCP spending access.
-Approve that access, the source pool, and amount limits through the normal local
-approval flow before funding. The wallet and Marketplace must use the same
-network. See the [CLI connection guide](https://github.com/attocash/integrations/tree/main/atto-cli#fund-a-marketplace-account)
-for browser-origin configuration and isolated LOCAL environments.
-
-Example tool calls:
-
-```jsonl
-{"name":"marketplace_topup","arguments":{"amount":"1","unit":"ATTO","requestId":"marketplace-funding-001"}}
-{"name":"marketplace_topup_status","arguments":{"requestId":"marketplace-funding-001"}}
-```
-
-Use `ATTO` or `RAW`; an omitted `index` selects from the approved pool. Top-ups
-share the profile's allowance with CLI and MCP sends. If the result is uncertain,
-query status and retry with the original request ID and terms. Recovery preserves
-the original intent and exact signed payment; pending reservations remain held.
-Public tool results contain status and native payment identifiers, with signed
-payloads kept private.
+The CLI retains local typed identity/credential approvals. Connect its identity context with `atto marketplace connect --api-url https://<api-origin>/v1/agent/payments --audience <exact-audience> --controller-index <index>` and only explicitly authorised browser origins. No Marketplace topup/status operation exists. Use the current [Marketplace MCP reference](marketplace-mcp-reference.md) for its tools.
 
 ## Personal names
 
@@ -188,7 +151,6 @@ for storage, backup, and reset details.
 | Bounded lists | `history_list`, `receivables_list` |
 | Address labels | `labels_set`, `labels_remove`, `labels_get`, `labels_list` |
 | Payments | `send`, `receive`, `receive_all` |
-| Marketplace account funding | `marketplace_topup`, `marketplace_topup_status` |
 | Message signatures | `message_sign`, `message_verify` |
 | Payment pool | `pool_get` |
 | Local payment journal | `journal_list`, `journal_get` |

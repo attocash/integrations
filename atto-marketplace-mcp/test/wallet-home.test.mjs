@@ -24,7 +24,6 @@ test('Marketplace MCP home selects dedicated native wallets without modifying ca
   assert.equal(selected.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, join(home, 'wallets/atto'));
   assert.equal(selected.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR, join(home, 'wallets/nano'));
   assert.equal(selected.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR,selected.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR);
-  assert.equal(selected.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, join(home, 'payment-handoffs'));
   assert.equal(selected.MARKETPLACE_MCP_HOME, home);
   assert.deepEqual(env, { PATH: '/usr/bin' });
   assert.notEqual(managedWalletEnvironment(join(parent, 'other-home'), env).MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR,
@@ -38,17 +37,15 @@ test('explicit existing wallet selections remain stable and relative paths fail 
   const home = join(parent, 'home');
   const handoffs = join(parent, 'selected-handoffs');
   const env = { MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: join(parent, 'explicit-atto'),
-    MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: join(parent, 'explicit-nano'), MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR: join(parent, 'old-handoffs') };
+    MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: join(parent, 'explicit-nano')};
   await mkdir(env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, {mode:0o700});
   await mkdir(env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR, {mode:0o700});
   // When
-  const selected = managedWalletEnvironment(home, env, handoffs);
+  const selected = managedWalletEnvironment(home, env);
   // Then
   assert.equal(selected.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR);
   assert.equal(selected.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR, env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR);
-  assert.equal(selected.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, handoffs);
-  for (const key of ['MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR', 'MARKETPLACE_MCP_NANO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR',
-    'MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR']) {
+  for (const key of ['MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR', 'MARKETPLACE_MCP_NANO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR']) {
     assert.throws(() => managedWalletEnvironment(home, { [key]: 'relative/wallet' }),
       error => error.code === 'WALLET_SETUP_REQUIRED');
   }

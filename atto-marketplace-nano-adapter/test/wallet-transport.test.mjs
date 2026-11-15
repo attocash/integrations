@@ -55,8 +55,7 @@ test('a provisioned wallet sends transfer and receive work only to its configure
   const seedFile = join(directory, 'seed.hex');
   writeFileSync(seedFile, seed.toString('hex') + '\n', { mode: 0o600 });
   await provisionNanoWallet({ dataDir: directory, seedFile, derivationIndex: 1, network: 'nano:dev',
-    rpcUrl: rpc.url, workUrl: work.url, origin: 'http://localhost:8080', audience: 'marketplace',
-    handoffDirectory: join(directory, 'handoffs'), grants: { externalTransfers: true, marketplaceFunding: true },
+    rpcUrl: rpc.url, workUrl: work.url, origin: 'http://localhost:8080', audience: 'marketplace', grants: { externalTransfers: true, },
     limits: { maxPaymentAtomic: '100', rolling24hAtomic: '100' }, terminalConfirmed: true });
   const wallet = NanoWallet.open({ dataDir: directory });
   try {

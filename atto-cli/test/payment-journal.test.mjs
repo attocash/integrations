@@ -294,7 +294,7 @@ function historicalPayment(kind, id, raw, status = 'reserved') {
     ...(status === 'unknown' || status === 'published' ? { hash: `${id}-hash`, blockJson: '{}',
       ...(status === 'published' ? { publishedAt: now } : {}) } : {}),
     external: { kind, version: 1, paymentIdentifier: `identifier-${id}`, network: 'atto:local',
-      intentId: '11111111-1111-4111-8111-111111111111', resourceUrl: 'http://localhost/v1/agent/topups',
+      intentId: '11111111-1111-4111-8111-111111111111', resourceUrl: 'http://localhost/v1/agent/payments',
       requirementHash: 'a'.repeat(64), intentExpiresAt: new Date(now + 60_000).toISOString(), marketState: 'PENDING',
       paymentState: null, nativeState: status === 'reserved' ? 'challenged' : 'unknown',
       ...(status !== 'reserved' ? { attemptedAt: now } : {}) } };
@@ -360,27 +360,6 @@ test('ordinary payment mutations preserve historical records without upgrading t
     assert.throws(() => ledger.externalStatus(record.id, { marketplaceState: 'ACCEPTED' }), { code: 'SEND_STATE' });
   }
   assert.equal(JSON.stringify(store.get('spending.records').slice(0, 2)), before);
-});
-
-test('historical payment accounting does not resume old Marketplace authorizations', async t => {
-  // Given old payment records and current private Marketplace wallet entrypoints.
-  const { store, ledger } = fixture(t);
-  store.set('spending.records', [historicalPayment('market-topup', 'historical-topup', '20'),
-    historicalPayment('market-intent', 'historical-intent', '30', 'unknown')]);
-  const { Payments } = await import(pathToFileURL(join(packageDirectory, 'dist/spending/payments.js')).href);
-  const payments = new Payments(store, ledger, { mcp: true }, undefined, undefined,
-    undefined, undefined, undefined, { apiUrl: 'http://localhost/v1/agent/topups', audience: 'marketplace' });
-  const before = JSON.stringify(store.get('spending.records'));
-
-  // When current recovery operations receive the old IDs.
-  const topup = payments.marketplaceTopUpStatus('historical-topup');
-  const intent = payments.marketplacePayIntentStatus('historical-intent');
-
-  // Then neither current entrypoint accepts the old authorization, and pending accounts remain fenced.
-  await assert.rejects(topup, { code: 'REQUEST_CONFLICT' });
-  await assert.rejects(intent, { code: 'REQUEST_CONFLICT' });
-  assert.throws(() => ledger.assertAccountAvailable(1), { code: 'ACCOUNT_RESERVED' });
-  assert.equal(JSON.stringify(store.get('spending.records')), before);
 });
 
 test('historical journal compatibility still rejects malformed and hybrid payment records', t => {

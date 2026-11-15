@@ -40,7 +40,7 @@
   },
   "scripts": {
     "prebuild": "node ../scripts/require-commons-message-verify.mjs",
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "precheck": "node ../scripts/require-commons-message-verify.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",

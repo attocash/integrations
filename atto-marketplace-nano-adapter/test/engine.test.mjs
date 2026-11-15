@@ -10,9 +10,10 @@ import { randomUUID } from 'node:crypto';
 import { NanoWallet, provisionNanoWallet, inspectNanoWallet, approveNanoWalletPolicy, verifyNanoMessage, derivePrivateKey, publicKey, addressFromPublicKey, addressPublicKey, NanoStateBlock, ZERO_HASH, upperHex, validWork } from '../dist/index.js';
 import { canonical, sha256 } from '../dist/configuration.js';
 import { NanoJournal } from '../dist/journal.js';
-import { parsePaymentRequest, validatePaymentResponse } from '../dist/handoff.js';
 import { NanoRpcClient, epochLink, DEV_GENESIS_ACCOUNT } from '../dist/rpc.js';
-import { hexBytes, sign } from '../dist/protocol.js';
+import { hexBytes, sign, offchainSign } from '../dist/protocol.js';
+import { relayEvidenceBinding, decodePaymentHeader } from '@attocash/cli/internal-marketplace';
+import { offer, terms, challenge, paymentId } from '../../test/support/relay.mjs';
 import { securePrivatePermissions } from '@attocash/cli/internal-marketplace';
 import { publishPrivate, readPrivate, processOwnerAlive } from '../dist/private-files.js';
 import * as nanoAdapter from '../dist/index.js';
@@ -25,7 +26,7 @@ function work(root, receive = false) {
             return nonce;
     }
 }
-async function fixture(t, { grants = { marketplaceFunding: true, externalTransfers: true, controllerPurposes: ['login'] }, limit = '100' } = {}) {
+async function fixture(t, { grants = { externalTransfers: true, controllerPurposes: ['login'] }, limit = '100' } = {}) {
     const dir = mkdtempSync(join(tmpdir(), 'nano-engine-'));
     chmodSync(dir, 0o700);
     const wallets = new Set(), children = new Set();
@@ -48,7 +49,7 @@ async function fixture(t, { grants = { marketplaceFunding: true, externalTransfe
     mkdirSync(handoff, { mode: 0o700 });
     const seedFile = join(dir, 'seed.hex');
     writeFileSync(seedFile, '01'.repeat(32) + '\n', { mode: 0o600 });
-    const setup = await provisionNanoWallet({ dataDir: dir, seedFile, derivationIndex: 1, network: 'nano:dev', rpcUrl: 'http://127.0.0.1:17076', origin: 'http://localhost:8080', audience: 'marketplace', handoffDirectory: handoff, grants, limits: { maxPaymentAtomic: limit, rolling24hAtomic: limit }, terminalConfirmed: true });
+    const setup = await provisionNanoWallet({ dataDir: dir, seedFile, derivationIndex: 1, network: 'nano:dev', rpcUrl: 'http://127.0.0.1:17076', origin: 'http://localhost:8080', audience: 'marketplace', grants, limits: { maxPaymentAtomic: limit, rolling24hAtomic: limit }, terminalConfirmed: true });
     const key = derivePrivateKey(Buffer.from('01'.repeat(32), 'hex'), 1), source = setup.address, destination = addressFromPublicKey(publicKey(derivePrivateKey(Buffer.from('02'.repeat(32), 'hex'), 1)));
     let account = { frontier: 'A'.repeat(64), confirmedFrontier: 'A'.repeat(64), balance: 1000n, confirmedBalance: 1000n, representative: source, confirmedRepresentative: source, epoch: 2 };
     const blocks = new Map();
@@ -124,26 +125,14 @@ async function fixture(t, { grants = { marketplaceFunding: true, externalTransfe
 function transfer(f, amount = '40', id = randomUUID()) {
     return { network: 'nano:dev', destination: f.destination, amountAtomic: amount, requestId: id };
 }
-function payment(f, amount = '40', extensions = { 'payment-identifier': { schema: { type: 'object' }, info: { required: true } } }) {
-    const requestId = randomUUID(), intentId = randomUUID(), handoffId = randomUUID().replaceAll('-', '');
-    const resourceUrl = `http://localhost:8080/v1/agent/topups/${intentId}`;
-    const challenge = { x402Version: 2, resource: { url: resourceUrl }, accepts: [{ scheme: 'exact', network: 'nano:dev', asset: 'XNO', amount, payTo: f.destination, maxTimeoutSeconds: 300, extra: { assetTransferMethod: 'native-state', paymentFlow: 'upfront' } }], extensions };
-    const encoded = Buffer.from(JSON.stringify(challenge));
-    const raw = { version: 1, type: 'marketplace-x402-payment-request', handoffId, origin: 'http://localhost:8080', audience: 'marketplace', accountId: randomUUID(), asset: 'XNO', network: 'nano:dev', amountAtomic: amount, requestId, paymentIdentifier: requestId, intentId, resourceUrl, expiresAt: '2026-11-02T12:05:00Z', paymentRequired: encoded.toString('base64'), paymentRequiredSha256: sha256(encoded) };
-    raw.requestSha256 = sha256(canonical(raw));
-    writeFileSync(join(f.handoff, `${handoffId}.request.json`), JSON.stringify(raw), { mode: 0o600 });
-    return raw;
-}
-test('external permission is separate, default denied, and denial signs or publishes nothing', async (t) => {
-    // Given funding is approved while external transfers are denied.
-    const f = await fixture(t, { grants: { marketplaceFunding: true, externalTransfers: false, controllerPurposes: [] } }), wallet = f.open();
-    t.after(() => wallet.close());
-    // When the wallet receives an external transfer and a funding request.
-    await assert.rejects(wallet.call('transfer.send', transfer(f)), { code: 'PERMISSION_DENIED' });
-    // Then only the separately approved funding candidate is prepared.
-    assert.equal(f.published.length, 0);
-    const request = payment(f);
-    assert.equal((await wallet.call('payment.prepare', { handoffId: request.handoffId })).state, 'PREPARED');
+test('external transfer permission defaults denied and retired funding operations are unavailable', async t => {
+    // Given no native transfer authority.
+    const f=await fixture(t,{grants:{externalTransfers:false,controllerPurposes:[]}}),wallet=f.open();
+    // When / Then no signature or publication can be produced.
+    await assert.rejects(wallet.call('transfer.send',transfer(f)),{code:'PERMISSION_DENIED'});
+    for(const operation of ['funding.prepare','funding.status'])
+        await assert.rejects(wallet.call(operation,{}),{code:'UNSUPPORTED_OPERATION'});
+    assert.equal(f.published.length,0);
 });
 test('exact transfer retry and restart preserve one signed candidate and reject changed idempotency terms', async (t) => {
     // Given one exact transfer has a stable economic request ID.
@@ -193,17 +182,13 @@ test('accepted SEND with lost RPC response resolves after restart without a repl
     assert.equal((await wallet.call('transfer.status', { requestId: args.requestId })).state, 'CONFIRMED');
     assert.equal(f.published.length, 1);
 });
-test('confirmed spends reserve the combined rolling cap across transfer and Marketplace funding', async (t) => {
-    // Given a confirmed external transfer consumes part of the shared cap.
-    const f = await fixture(t, { limit: '60' }), wallet = f.open();
-    t.after(() => wallet.close());
-    // When Marketplace funding crosses the same rolling allowance.
-    await wallet.call('transfer.send', transfer(f, '40'));
-    const request = payment(f, '21');
-    // Then one extra unit is rejected and the exact remaining allowance succeeds.
-    await assert.rejects(wallet.call('payment.prepare', { handoffId: request.handoffId }), { code: 'DAILY_LIMIT' });
-    const exact = payment(f, '20');
-    assert.equal((await wallet.call('payment.prepare', { handoffId: exact.handoffId })).state, 'PREPARED');
+test('confirmed direct spends share the exact rolling cap', async t => {
+    // Given a confirmed direct SEND consumes part of the same native wallet limit.
+    const f=await fixture(t,{limit:'60'}),wallet=f.open();
+    await wallet.call('transfer.send',transfer(f,'40'));
+    // When / Then exceeding the remaining cap fails, and its exact remainder succeeds.
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'21')),{code:'DAILY_LIMIT'});
+    assert.equal((await wallet.call('transfer.send',transfer(f,'20'))).state,'CONFIRMED');
 });
 test('concurrent authorization holds one source lane and only one candidate reaches publication', async (t) => {
     // Given work generation holds an active authorization open.
@@ -220,22 +205,7 @@ test('concurrent authorization holds one source lane and only one candidate reac
     await first;
     assert.equal(f.published.length, 1);
 });
-test('funding persists validated private response before exposing it and exact retry keeps its bytes', async (t) => {
-    // Given a valid exact Marketplace handoff requires a payer response.
-    const f = await fixture(t), request = payment(f), wallet = f.open();
-    t.after(() => wallet.close());
-    // When the wallet prepares and retries the same handoff.
-    const first = await wallet.call('payment.prepare', { handoffId: request.handoffId }), path = join(f.handoff, `${request.handoffId}.response.json`), bytes = readFileSync(path);
-    // Then durable journal bytes precede and match the private response file.
-    assert.equal(first.state, 'PREPARED');
-    const journal = new NanoJournal(f.dir), record = journal.find(`payment:${request.handoffId}`);
-    journal.close();
-    assert.equal(record.blockHash, first.sendHash);
-    assert.equal(record.responseJson, bytes.toString().trim());
-    await wallet.call('payment.prepare', { handoffId: request.handoffId });
-    assert.deepEqual(readFileSync(path), bytes);
-    assert.equal(f.published.length, 0);
-});
+
 test('private files reject symlinks, broad permissions, duplicate response replacement and malformed config', async t => {
     // Given private response files contain exact create-only bytes.
     const f = await fixture(t), path = join(f.dir, 'private.json');
@@ -263,10 +233,10 @@ test('private files reject symlinks, broad permissions, duplicate response repla
 
 test('terminal policy update preserves keys and journal while explicit external grant changes authority', async (t) => {
     // Given the profile denies external spending and already owns a seed.
-    const f = await fixture(t, { grants: { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] } });
+    const f = await fixture(t, { grants: { externalTransfers: false, controllerPurposes: [] } });
     const seed = readFileSync(join(f.dir, 'seed.hex'));
     // When a terminal approval grants bounded external spending.
-    await approveNanoWalletPolicy({ dataDir: f.dir, grants: { marketplaceFunding: false, externalTransfers: true, controllerPurposes: [] }, limits: { maxPaymentAtomic: '50', rolling24hAtomic: '50' }, terminalConfirmed: true });
+    await approveNanoWalletPolicy({ dataDir: f.dir, grants: { externalTransfers: true, controllerPurposes: [] }, limits: { maxPaymentAtomic: '50', rolling24hAtomic: '50' }, terminalConfirmed: true });
     // Then the original key persists and the explicitly approved transfer succeeds.
     assert.deepEqual(readFileSync(join(f.dir, 'seed.hex')), seed);
     const wallet = f.open();
@@ -302,7 +272,7 @@ for (const mode of ['transient', 'changed', 'exhausted']) {
             };
             syncBuiltinESMExports();
         `, {mode:0o600});
-        const grants = {marketplaceFunding:false,externalTransfers:false,controllerPurposes:['login']};
+        const grants = {externalTransfers:false,controllerPurposes:['login']};
         const limits = {maxPaymentAtomic:'100',rolling24hAtomic:'100'};
         const childCode = `
             import {approveNanoWalletPolicy} from ${JSON.stringify(new URL('../dist/index.js', import.meta.url).href)};
@@ -394,7 +364,7 @@ test('revoking permission during work generation prevents a signature, clears un
     // When a terminal update revokes its grant before work returns.
     const first = wallet.call('transfer.send', transfer(f));
     await new Promise(r => setImmediate(r));
-    await approveNanoWalletPolicy({ dataDir: f.dir, grants: { marketplaceFunding: true, externalTransfers: false, controllerPurposes: [] }, limits: { maxPaymentAtomic: '100', rolling24hAtomic: '100' }, terminalConfirmed: true });
+    await approveNanoWalletPolicy({ dataDir: f.dir, grants: { externalTransfers: false, controllerPurposes: [] }, limits: { maxPaymentAtomic: '100', rolling24hAtomic: '100' }, terminalConfirmed: true });
     release();
     // Then no candidate is signed or published and the unsigned reservation is cleared.
     await assert.rejects(first, { code: 'PERMISSION_DENIED' });
@@ -425,7 +395,7 @@ test('the native adapter leaves typed approval files and consent to Marketplace'
 
 test('the native typed signer requires local terminal consent before key access', async t => {
     // Given a configured native wallet and a valid native controller frame.
-    const f = await fixture(t), request = terminalProof(f, 'product purchase');
+    const f = await fixture(t), request = terminalProof(f, 'API-key creation');
     const descriptors = [process.stdin, process.stderr].map(stream => Object.getOwnPropertyDescriptor(stream, 'isTTY'));
     try {
         for (const stream of [process.stdin, process.stderr]) Object.defineProperty(stream, 'isTTY', { configurable: true, value: false });
@@ -440,13 +410,13 @@ test('the native typed signer requires local terminal consent before key access'
 
 test('the native typed signer accepts reviewed user frames and keeps headless purposes restricted', async t => {
     // Given a local terminal and wallet with no recurring controller signing grants.
-    const f = await fixture(t, { grants: { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] } });
+    const f = await fixture(t, { grants: { externalTransfers: false, controllerPurposes: [] } });
     const descriptors = [process.stdin, process.stderr].map(stream => Object.getOwnPropertyDescriptor(stream, 'isTTY'));
     const wallet = f.open();
     t.after(() => wallet.close());
     try {
         for (const stream of [process.stdin, process.stderr]) Object.defineProperty(stream, 'isTTY', { configurable: true, value: true });
-        const request = terminalProof(f, 'product purchase');
+        const request = terminalProof(f, 'API-key creation');
         // When Marketplace's terminal boundary delegates its already reviewed exact frame.
         const signature = await signMarketplaceNanoController({ dataDir: f.dir, request, terminalConfirmed: true });
         // Then only that exact native frame verifies, and headless signing gains no new authority.
@@ -458,7 +428,7 @@ test('the native typed signer accepts reviewed user frames and keeps headless pu
             terminalProof(f, 'administrator public moderation'),
             terminalProof(f, 'message signing'),
             { ...request, message: 'ab'.repeat(32) },
-            { ...request, message: request.message.replace('Purpose: product purchase', 'Purpose: login') },
+            { ...request, message: request.message.replace('Purpose: API-key creation', 'Purpose: login') },
             { ...request, origin: 'https://foreign.example' },
             { ...request, network: 'nano:mainnet' },
             { ...request, index: 2 },
@@ -507,7 +477,7 @@ test('signed journal candidates cannot be rewritten or deleted, and malformed sa
     assert.throws(() => journal.db.prepare('UPDATE operations SET amount=? WHERE id=?').run('1', id), /immutable wallet terms/);
     assert.throws(() => journal.db.prepare('DELETE FROM operations WHERE id=?').run(id), /retain signed candidate/);
     const prior = journal.find(id), badId = randomUUID();
-    journal.db.prepare(`INSERT INTO operations(id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner,epoch,previous,previousBalance,representative,blockJson,blockHash,responseJson,deadline,confirmedAt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(`transfer:${badId}`, prior.kind, 'wrong-digest', prior.requestJson, `transfer:${badId}`, prior.source, prior.network, prior.amount, prior.destination, prior.createdAt, 'CONFIRMED', prior.owner, prior.epoch, prior.previous, prior.previousBalance, prior.representative, prior.blockJson, prior.blockHash, null, null, now);
+    journal.db.prepare(`INSERT INTO operations(id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner,epoch,previous,previousBalance,representative,blockJson,blockHash,confirmedAt) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(`transfer:${badId}`, prior.kind, 'wrong-digest', prior.requestJson, `transfer:${badId}`, prior.source, prior.network, prior.amount, prior.destination, prior.createdAt, 'CONFIRMED', prior.owner, prior.epoch, prior.previous, prior.previousBalance, prior.representative, prior.blockJson, prior.blockHash, now);
     journal.close();
     // Then status refuses malformed persisted ownership without producing native effects.
     const published = f.published.length;
@@ -516,7 +486,7 @@ test('signed journal candidates cannot be rewritten or deleted, and malformed sa
 });
 test('independent processes serialize live preparation, reclaim a killed unsigned attempt, and recover one durable signed candidate', { timeout: process.platform === 'win32' ? 300000 : 10000 }, async (t) => {
     // Given two independent processes share one owner-only profile and SQLite account lane.
-    const f = await fixture(t), request = payment(f), moduleUrl = new URL('../dist/index.js', import.meta.url).href;
+    const f = await fixture(t), request = transfer(f), moduleUrl = new URL('../dist/index.js', import.meta.url).href;
     const childCode = `
       import {NanoWallet,validWork} from ${JSON.stringify(moduleUrl)};
       const [dataDir,source,mode,operation,argText]=process.argv.slice(1),args=JSON.parse(argText);
@@ -526,7 +496,7 @@ test('independent processes serialize live preparation, reclaim a killed unsigne
       const wallet=NanoWallet.open({dataDir,rpc,now:()=>${now}});
       try{console.log(JSON.stringify(await wallet.call(operation,args)));}catch(error){console.log(JSON.stringify({errorCode:error.code}));}finally{wallet.close();}
     `;
-    const args = ['--input-type=module', '-e', childCode, f.dir, f.source, 'hold', 'payment.prepare', JSON.stringify({ handoffId: request.handoffId })];
+    const args = ['--input-type=module', '-e', childCode, f.dir, f.source, 'hold', 'transfer.send', JSON.stringify(request)];
     const held = f.trackChild(spawn(process.execPath, args, { stdio: ['ignore', 'pipe', 'pipe'] }));
     t.after(() => { if (!held.killed)
         held.kill('SIGKILL'); });
@@ -541,15 +511,15 @@ test('independent processes serialize live preparation, reclaim a killed unsigne
     assert.equal(run('transfer.send', transfer(f)).errorCode, 'PAYMENT_IN_PROGRESS');
     held.kill('SIGKILL');
     await once(held, 'exit');
-    const recovered = run('payment.prepare', { handoffId: request.handoffId });
+    const recovered = run('transfer.send', request);
     // Then a fresh process reclaims only the unsigned attempt and future processes reuse its exact saved signature.
-    assert.equal(recovered.state, 'PREPARED');
-    assert.equal(run('payment.prepare', { handoffId: request.handoffId }).sendHash, recovered.sendHash);
+    assert.equal(recovered.state, 'UNKNOWN');
+    assert.equal(run('transfer.send', request).sendHash, recovered.sendHash);
     assert.equal(run('transfer.send', transfer(f)).errorCode, 'SOURCE_FENCED');
 });
 
 test('pending Nano payments are discoverable without sending authority and amounts stay exact',async t=>{
-    const f=await fixture(t,{grants:{marketplaceFunding:false,externalTransfers:false,controllerPurposes:[]}});
+    const f=await fixture(t,{grants:{externalTransfers:false,controllerPurposes:[]}});
     let observed;
     f.rpc.receivable=async(address,limit)=>{observed={address,limit};return [{hash:'A'.repeat(64),amount:900719925474099312345n,source:f.destination}];};
     const wallet=f.open();t.after(()=>wallet.close());
@@ -578,15 +548,15 @@ function fundingSend(f) {
     f.blocks.set(send.hash, { block: send, blockAccount: source, subtype: 'send', confirmed: true });
     return send;
 }
-for (const kind of ['transfer', 'payment']) {
+for (const kind of ['transfer']) {
     test(`${kind} confirmation accepts another valid work nonce after lost acknowledgement and retains original bytes`, async t => {
         const f = await fixture(t); let wallet = f.open();
-        const request = kind === 'transfer' ? transfer(f) : payment(f);
-        const args = kind === 'transfer' ? request : { handoffId: request.handoffId };
+        const request = transfer(f);
+        const args = request;
         f.mode = 'lost-after-confirm';
-        const first = await wallet.call(kind === 'transfer' ? 'transfer.send' : 'payment.prepare', args);
+        const first = await wallet.call('transfer.send', args);
         assert.equal(first.state, kind === 'transfer' ? 'UNKNOWN' : 'PREPARED');
-        const id = `${kind}:${kind === 'transfer' ? request.requestId : request.handoffId}`;
+        const id = `${kind}:${request.requestId}`;
         const journal = new NanoJournal(f.dir), originalJson = journal.find(id).blockJson;
         journal.close();
         const original = NanoStateBlock.parse(JSON.parse(originalJson)), observed = alternateWork(original, { epoch: 0, belowEpoch: 2 });
@@ -599,19 +569,19 @@ for (const kind of ['transfer', 'payment']) {
         f.blocks.set(observed.hash, { block: observed, blockAccount: f.source, subtype: 'send', confirmed: true });
         f.account = { ...f.account, frontier: observed.hash, confirmedFrontier: observed.hash, balance: observed.balance, confirmedBalance: observed.balance };
         wallet.close(); wallet = f.open(); t.after(() => wallet.close());
-        assert.equal((await wallet.call(`${kind}.status`, kind === 'transfer' ? { requestId: request.requestId } : args)).state, 'CONFIRMED');
-        assert.equal(f.published.length, kind === 'transfer' ? 1 : 0);
+        assert.equal((await wallet.call(`${kind}.status`, { requestId: request.requestId })).state, 'CONFIRMED');
+        assert.equal(f.published.length, 1);
         const after = new NanoJournal(f.dir); assert.equal(after.find(id).blockJson, originalJson); after.close();
         f.mode = 'confirm';
         assert.equal((await wallet.call('transfer.send', transfer(f, '1'))).state, 'CONFIRMED');
     });
     test(`${kind} reconciliation rejects invalid work and changes to signed identity, account and subtype`, async t => {
         const f = await fixture(t), wallet = f.open(); t.after(() => wallet.close());
-        const request = kind === 'transfer' ? transfer(f) : payment(f);
-        const args = kind === 'transfer' ? request : { handoffId: request.handoffId };
+        const request = transfer(f);
+        const args = request;
         f.mode = 'throw';
-        const first = await wallet.call(kind === 'transfer' ? 'transfer.send' : 'payment.prepare', args);
-        const id = `${kind}:${kind === 'transfer' ? request.requestId : request.handoffId}`;
+        const first = await wallet.call('transfer.send', args);
+        const id = `${kind}:${request.requestId}`;
         const journal = new NanoJournal(f.dir), row = journal.find(id); journal.close();
         const original = NanoStateBlock.parse(JSON.parse(row.blockJson));
         const evidence = { block: original, blockAccount: f.source, subtype: 'send', confirmed: true };
@@ -626,12 +596,12 @@ for (const kind of ['transfer', 'payment']) {
         ];
         for (const mutation of mutations) {
             f.blocks.set(first.sendHash, { ...evidence, ...mutation });
-            await assert.rejects(wallet.call(`${kind}.status`, kind === 'transfer' ? { requestId: request.requestId } : args), { code: 'RPC_CONFLICT' });
+            await assert.rejects(wallet.call(`${kind}.status`, { requestId: request.requestId }), { code: 'RPC_CONFLICT' });
         }
         f.blocks.set(first.sendHash, { ...evidence, block: alternateWork(original, { epoch: 0, belowEpoch: 2 }), confirmed: false });
-        await assert.rejects(wallet.call(`${kind}.status`, kind === 'transfer' ? { requestId: request.requestId } : args), { code: 'RPC_CONFLICT' });
+        await assert.rejects(wallet.call(`${kind}.status`, { requestId: request.requestId }), { code: 'RPC_CONFLICT' });
         f.blocks.set(first.sendHash, { ...evidence, block: alternateWork(original), confirmed: false });
-        assert.notEqual((await wallet.call(`${kind}.status`, kind === 'transfer' ? { requestId: request.requestId } : args)).state, 'CONFIRMED');
+        assert.notEqual((await wallet.call(`${kind}.status`, { requestId: request.requestId })).state, 'CONFIRMED');
         await assert.rejects(wallet.call('transfer.send', transfer(f, '1')), { code: 'SOURCE_FENCED' });
     });
 }
@@ -765,17 +735,16 @@ for (const opened of [true, false]) {
 }
 
 
-test('receive requires funding or external-transfer approval and does not debit spending limits', async t => {
+test('receive requires explicit external-transfer approval and does not debit spending limits', async t => {
     for (const grants of [
-        { marketplaceFunding: false, externalTransfers: false, controllerPurposes: ['login'] },
-        { marketplaceFunding: true, externalTransfers: false, controllerPurposes: [] },
-        { marketplaceFunding: false, externalTransfers: true, controllerPurposes: [] },
+        { externalTransfers: false, controllerPurposes: ['login'] },
+        { externalTransfers: true, controllerPurposes: [] },
     ]) {
         const f = await fixture(t, { grants, limit: '0' }), send = fundingSend(f), wallet = f.open();
         t.after(() => wallet.close());
         f.rpc.receivableExists = async hash => hash === send.hash;
         const args = { network: 'nano:dev', hash: send.hash };
-        if (!grants.marketplaceFunding && !grants.externalTransfers) {
+        if (!grants.externalTransfers) {
             await assert.rejects(wallet.call('receive', args), { code: 'PERMISSION_DENIED' });
             assert.equal(f.pinCount, 0);
             assert.equal(f.published.length, 0);
@@ -796,7 +765,7 @@ test('receive rechecks local authority after asynchronous work and retains signe
     f.rpc.generateOpenWork = async root => {
         const result = await generate(root);
         await approveNanoWalletPolicy({ dataDir: f.dir,
-            grants: { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] },
+            grants: { externalTransfers: false, controllerPurposes: [] },
             limits: { maxPaymentAtomic: '100', rolling24hAtomic: '100' }, terminalConfirmed: true });
         return result;
     };
@@ -807,14 +776,14 @@ test('receive rechecks local authority after asynchronous work and retains signe
     assert.equal(journal.find(`receive:${send.hash}`), undefined);
     journal.close();
     await approveNanoWalletPolicy({ dataDir: f.dir,
-        grants: { marketplaceFunding: true, externalTransfers: false, controllerPurposes: [] },
+        grants: { externalTransfers: true, controllerPurposes: [] },
         limits: { maxPaymentAtomic: '100', rolling24hAtomic: '100' }, terminalConfirmed: true });
     f.rpc.generateOpenWork = generate;
     f.mode = 'throw';
     const first = await wallet.call('receive', args);
     assert.equal(first.state, 'UNKNOWN');
     await approveNanoWalletPolicy({ dataDir: f.dir,
-        grants: { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] },
+        grants: { externalTransfers: false, controllerPurposes: [] },
         limits: { maxPaymentAtomic: '100', rolling24hAtomic: '100' }, terminalConfirmed: true });
     f.mode = 'confirm';
     const replay = await wallet.call('receive', args);
@@ -887,7 +856,7 @@ test('configured native reads do not unlock keys while signing and explicit insp
     await assert.rejects(inspectNanoWallet(f.dir), { code: 'PRIVATE_FILE' });
     await assert.rejects(provisionNanoWallet({ dataDir: join(f.dir, 'unprovisioned'), seedFile, derivationIndex: 1,
         network: 'nano:dev', rpcUrl: 'http://127.0.0.1:17076', origin: 'http://localhost:8080', audience: 'marketplace',
-        handoffDirectory: join(f.dir, 'unprovisioned-handoff'), terminalConfirmed: true }), { code: 'PRIVATE_FILE' });
+        terminalConfirmed: true }), { code: 'PRIVATE_FILE' });
     const journal = new NanoJournal(f.dir);
     assert.equal(journal.db.prepare('SELECT COUNT(*) AS count FROM operations').get().count, 1);
     assert.equal(sha256(JSON.stringify(journal.db.prepare('SELECT * FROM operations ORDER BY id').all())), candidateDigest);
@@ -899,123 +868,100 @@ test('configured native reads do not unlock keys while signing and explicit insp
     assert.equal((await wallet.call('transfer.send', transfer(f, '1'))).state, 'CONFIRMED');
 });
 
-test('funding echoes every offered extension schema and info and recovers the exact response', async t => {
-    // Given server metadata in both the payment identifier and another extension.
-    const f = await fixture(t), extensions = {
-        'payment-identifier': { schema: { type: 'object', properties: { id: { type: 'string' } } }, info: { required: true, merchantOrder: 'order-123' } },
-        'merchant-data': { schema: { type: 'object' }, info: { nested: { account: 'merchant-123' } } }
-    };
-    const request = payment(f, '40', extensions);
-    let wallet = f.open();
-    // When the exact payment is prepared, then no offered information is deleted or overwritten.
-    await wallet.call('payment.prepare', { handoffId: request.handoffId });
-    const path = join(f.handoff, `${request.handoffId}.response.json`), bytes = readFileSync(path);
-    const response = JSON.parse(bytes), envelope = JSON.parse(Buffer.from(response.paymentSignature, 'base64'));
-    assert.deepEqual(envelope.extensions, { ...extensions, 'payment-identifier': { ...extensions['payment-identifier'],
-        info: { ...extensions['payment-identifier'].info, id: request.paymentIdentifier } } });
-    // When the wallet restarts and recovers the same handoff, then its exact original bytes remain intact.
-    wallet.close();
-    wallet = f.open();
-    t.after(() => wallet.close());
-    await wallet.call('payment.prepare', { handoffId: request.handoffId });
-    assert.deepEqual(readFileSync(path), bytes);
-    assert.equal(f.published.length, 0);
-});
-
-test('funding refuses to overwrite a server-offered payment identifier', async t => {
-    // Given the offered metadata conflicts with the operation identifier.
-    const f = await fixture(t), request = payment(f, '40', { 'payment-identifier': {
-        schema: { type: 'object' }, info: { required: true, id: 'different-server-identifier' }
-    } }), wallet = f.open();
-    t.after(() => wallet.close());
-    // When preparation validates the challenge, then the conflict fails before publication or response creation.
-    await assert.rejects(wallet.call('payment.prepare', { handoffId: request.handoffId }), { code: 'INVALID_REQUEST' });
-    assert.throws(() => readFileSync(join(f.handoff, `${request.handoffId}.response.json`)), { code: 'ENOENT' });
-    assert.equal(f.published.length, 0);
-});
-
-test('funding recovery rejects removed or changed offered metadata', async t => {
-    // Given a valid response containing all server-offered extension metadata.
-    const f = await fixture(t), extensions = { 'payment-identifier': { schema: { type: 'object' },
-        info: { required: true, merchantOrder: 'order-123' } }, 'merchant-data': { schema: {}, info: { order: 123 } } };
-    const raw = payment(f, '40', extensions), wallet = f.open();
-    t.after(() => wallet.close());
-    await wallet.call('payment.prepare', { handoffId: raw.handoffId });
-    const response = JSON.parse(readFileSync(join(f.handoff, `${raw.handoffId}.response.json`)));
-    const original = JSON.parse(Buffer.from(response.paymentSignature, 'base64'));
-    const request = parsePaymentRequest(raw, wallet.configuration, now, true, true);
-    assert.equal(validatePaymentResponse(response, request, wallet.configuration, 1000n, 2).hash, response.sendHash);
-    // When metadata is removed or changed without changing the signed SEND.
-    for (const change of [
-        envelope => { delete envelope.extensions['merchant-data']; },
-        envelope => { delete envelope.extensions['payment-identifier'].info.merchantOrder; },
-        envelope => { envelope.extensions['payment-identifier'].info.merchantOrder = 'changed-order'; },
-        envelope => { envelope.extensions['merchant-data'].schema = { type: 'array' }; },
-    ]) {
-        const envelope = structuredClone(original);
-        change(envelope);
-        const altered = { ...response, paymentSignature: Buffer.from(JSON.stringify(envelope)).toString('base64') };
-        // Then recovery rejects the mismatch instead of returning a stripped or modified response.
-        assert.throws(() => validatePaymentResponse(altered, request, wallet.configuration, 1000n, 2), { code: 'JOURNAL_CONFLICT' });
-    }
-});
-
-test('account-bound draft funding retains one durable candidate across polling budget and intent expiry', async t => {
-    const f = await fixture(t), raw = payment(f), challenge = JSON.parse(Buffer.from(raw.paymentRequired, 'base64'));
-    challenge.accepts[0].maxTimeoutSeconds = 1;
-    challenge.extensions['marketplace-account-binding'] = { schema: { type: 'object' }, info: {
-        required: true, version: 1, domain: 'marketplace.nano.exact.state.v1', accountId: raw.accountId,
-        intentId: raw.intentId, paymentIdentifier: raw.paymentIdentifier, intentExpiresAt: raw.expiresAt
-    } };
-    const challengeBytes = Buffer.from(JSON.stringify(challenge));
-    raw.paymentRequired = challengeBytes.toString('base64'); raw.paymentRequiredSha256 = sha256(challengeBytes);
-    delete raw.requestSha256; raw.requestSha256 = sha256(canonical(raw));
-    writeFileSync(join(f.handoff, `${raw.handoffId}.request.json`), JSON.stringify(raw), { mode: 0o600 });
-    let wallet = f.open();
-    const first = await wallet.call('payment.prepare', { handoffId: raw.handoffId });
-    const path = join(f.handoff, `${raw.handoffId}.response.json`), bytes = readFileSync(path);
-    const response = JSON.parse(bytes), envelope = JSON.parse(Buffer.from(response.paymentSignature, 'base64'));
-    assert.deepEqual(Object.keys(envelope.payload), ['block']);
-    assert.equal(envelope.payload.block.link_as_account, f.destination);
-    assert.equal(response.signedDeadline, raw.expiresAt);
-    assert.match(envelope.extensions['marketplace-account-binding'].info.bindingSignature, /^[A-F0-9]{128}$/);
-    wallet.close();
-    // The facilitator's confirmation budget does not invalidate a still-authorized saved handoff.
-    wallet = f.open(now + 2000);
-    assert.equal((await wallet.call('payment.prepare', { handoffId: raw.handoffId })).state, 'PREPARED');
-    assert.deepEqual(readFileSync(path), bytes); wallet.close();
-    // Intent expiry leaves the signed candidate fenced and recoverable with its original identity.
-    wallet = f.open(now + 360000);
-    t.after(() => wallet.close());
-    const expired = await wallet.call('payment.prepare', { handoffId: raw.handoffId });
-    assert.equal(expired.state, 'UNKNOWN'); assert.equal(expired.sendHash, first.sendHash);
-    assert.deepEqual(readFileSync(path), bytes);
-    await assert.rejects(wallet.call('transfer.send', transfer(f, '1')), { code: 'SOURCE_FENCED' });
-    const journal = new NanoJournal(f.dir), record = journal.find(`payment:${raw.handoffId}`); journal.close();
-    assert.equal(record.responseJson, bytes.toString().trim());
-    assert.equal(record.blockHash, first.sendHash); assert.equal(record.deadline, raw.expiresAt);
-    assert.equal(f.published.length, 0);
-});
 
 
-test('fixture cleanup closes restarted wallets before removing exact signed recovery files', { timeout: process.platform === 'win32' ? 180000 : 10000 }, async t => {
-    // Given a subtest owns a wallet with an exact persisted signed response.
+
+
+test('fixture cleanup closes restarted wallets before removing exact signed recovery files', {timeout:process.platform==='win32'?180000:10000},async t=>{
+    // Given a child fixture with an uncertain direct SEND.
     let directory;
-    await t.test('owned wallet lifecycle', async child => {
-        const f = await fixture(child), request = payment(f);
-        directory = f.dir;
-        let wallet = f.open();
-        await wallet.call('payment.prepare', { handoffId: request.handoffId });
-        const path = join(f.handoff, `${request.handoffId}.response.json`), bytes = readFileSync(path);
-        // When manual closure and restart reuse the original signed candidate.
-        wallet.close();
-        wallet.close();
-        wallet = f.open();
-        await wallet.call('payment.prepare', { handoffId: request.handoffId });
-        // Then the exact bytes survive and fixture cleanup owns the still-open restarted wallet.
-        assert.deepEqual(readFileSync(path), bytes);
-        child.after(() => wallet.close());
+    await t.test('owned wallet lifecycle',async child=>{
+        const f=await fixture(child),request=transfer(f);directory=f.dir;f.mode='throw';
+        let wallet=f.open();const first=await wallet.call('transfer.send',request);
+        const journal=new NanoJournal(f.dir),bytes=journal.find(`transfer:${request.requestId}`).blockJson;journal.close();
+        // When it restarts, only its original candidate may be retried.
+        wallet.close();wallet.close();wallet=f.open();
+        const retry=await wallet.call('transfer.send',request);
+        const after=new NanoJournal(f.dir);assert.equal(after.find(`transfer:${request.requestId}`).blockJson,bytes);after.close();
+        assert.equal(retry.sendHash,first.sendHash);child.after(()=>wallet.close());
     });
-    // Child cleanup completed within the bound, before its later close hook ran.
-    assert.equal(existsSync(directory), false);
+    // Then cleanup owns the restarted wallet and completes removal.
+    assert.equal(existsSync(directory),false);
+});
+
+
+test('x402 relay preparation and original proof survive restart without Nano publication or a second allowance',async t=>{
+    // Given immutable seller terms and the selected native wallet's existing transfer authority.
+    const f=await fixture(t),p=terms('XNO',f.source,f.destination),request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:offer(p,'http://localhost:8080')};
+    let wallet=f.open();
+    // When the wallet prepares its candidate and durably retains the exact final header.
+    const prepared=await wallet.call('payment.prepare',request),c=challenge(p,prepared.hash,relayEvidenceBinding);
+    const proof={challengeId:c.challengeId,message:c.message,signature:upperHex(offchainSign(f.key,c.message))};
+    const authorized=await wallet.call('payment.authorize',{requestId:paymentId,proof:{challengeId:proof.challengeId,message:proof.message}});
+    wallet.close();wallet=f.open(now+172800000);
+    const recovered=await wallet.call('payment.status',{requestId:paymentId});
+    // Then Market can recover the unchanged candidate while status and generic sends cannot publish or replace it.
+    assert.equal(f.published.length,0);assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,authorized.paymentSignature);
+    const payload=decodePaymentHeader(recovered.paymentSignature);
+    assert.equal(payload.payload.block.link_as_account,f.destination);assert.equal(payload.payload.block.balance,'960');
+    assert.deepEqual(payload.extensions['marketplace-binding'].proof,proof);
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'40',paymentId)),{code:'HANDLE_REUSE'});
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'1')),{code:'SOURCE_FENCED'});
+    assert.equal((await wallet.call('payment.prepare',request)).paymentSignature,recovered.paymentSignature);
+    assert.equal(f.published.length,0);
+    const journal=new NanoJournal(f.dir),row=journal.find(`transfer:${paymentId}`);journal.close();
+    // Given Market later publishes that exact saved SEND and the native chain confirms it.
+    await f.rpc.process(NanoStateBlock.parse(JSON.parse(row.blockJson)),'send');
+    // When original status is read, then canonical SEND confirmation releases the lane without recipient RECEIVE.
+    const nextTerms={...p,paymentId:randomUUID(),amountAtomic:'1'};
+    const next=await wallet.call('payment.prepare',{...request,requestId:nextTerms.paymentId,terms:nextTerms,paymentRequired:offer(nextTerms,request.origin)});
+    assert.notEqual(next.hash,prepared.hash);
+    const confirmed=await wallet.call('payment.status',{requestId:paymentId});
+    assert.equal(confirmed.state,'CONFIRMED');assert.equal(f.published.length,1);
+    assert.equal(confirmed.paymentSignature,recovered.paymentSignature);
+});
+
+test('x402 relay refuses a changed offer and proof before native publication',async t=>{
+    // Given a locally prepared SEND for one exact requirement.
+    const f=await fixture(t),wallet=f.open(),p=terms('XNO',f.source,f.destination),request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:offer(p,'http://localhost:8080')};
+    const prepared=await wallet.call('payment.prepare',request),c=challenge(p,'f'.repeat(64),relayEvidenceBinding);
+    // When another native hash or changed amount is offered under the original operation ID.
+    // Then no candidate or wallet proof can be replaced and the node receives no SEND.
+    await assert.rejects(wallet.call('payment.authorize',{requestId:paymentId,proof:{challengeId:c.challengeId,message:c.message,signature:upperHex(offchainSign(f.key,c.message))}}));
+    await assert.rejects(wallet.call('payment.prepare',{...request,terms:{...p,amountAtomic:'41'}}));
+    assert.equal((await wallet.call('payment.status',{requestId:paymentId})).hash,prepared.hash);
+    assert.equal(f.published.length,0);
+});
+
+test('a killed unsigned Nano relay refreshes only its expired offer while a live signer and retained candidate stay fenced', {timeout:20000},async t=>{
+    // Given a real process holding the original source lane before work or a signed candidate exists.
+    const f=await fixture(t),p=terms('XNO',f.source,f.destination),request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:offer(p,'http://localhost:8080')};
+    const childCode=`
+      import {NanoWallet} from ${JSON.stringify(new URL('../dist/index.js',import.meta.url).href)};
+      const [dataDir,source,requestText]=process.argv.slice(1),snapshot={frontier:'A'.repeat(64),confirmedFrontier:'A'.repeat(64),balance:1000n,confirmedBalance:1000n,representative:source,confirmedRepresentative:source,epoch:2};
+      const rpc={requirePinnedNetwork:async()=>{},accountSnapshot:async()=>snapshot,verifyFrontierState:async()=>{},generateWork:async()=>{console.log('WORK_PENDING');await new Promise(r=>setTimeout(r,60000));}};
+      const wallet=NanoWallet.open({dataDir,rpc});try{await wallet.call('payment.prepare',JSON.parse(requestText));}finally{wallet.close();}
+    `;
+    const held=f.trackChild(spawn(process.execPath,['--input-type=module','-e',childCode,f.dir,f.source,JSON.stringify(request)],{stdio:['ignore','pipe','pipe']}));
+    held.stderr.resume();const [pending]=await once(held.stdout,'data');assert.match(String(pending),/WORK_PENDING/);
+    const beforeJournal=new NanoJournal(f.dir),original=beforeJournal.find(`transfer:${paymentId}`);beforeJournal.close();
+    assert.equal(original.blockHash,null);assert.equal(original.blockJson,null);
+    const realNow=Date.now,advanced=realNow()+400000;Date.now=()=>advanced;
+    try {
+        const wallet=f.open(),fresh={...request,paymentRequired:offer(p,request.origin,advanced)};
+        // When refresh races the live signer, then its live ownership wins and no window is replaced.
+        await assert.rejects(wallet.call('payment.prepare',fresh),{code:'PAYMENT_IN_PROGRESS'});
+        const still=new NanoJournal(f.dir);assert.equal(still.find(original.id).requestJson,original.requestJson);still.close();
+        const exited=once(held,'exit');held.kill('SIGKILL');await exited;
+        // When the original process is proven dead, its unsigned reservation can adopt the fresh backend window.
+        const recovered=await wallet.call('payment.prepare',fresh),afterJournal=new NanoJournal(f.dir),after=afterJournal.find(original.id);
+        // Then identity, original reservation time and amount remain; exactly one complete native candidate is retained.
+        assert.equal(after.createdAt,original.createdAt);assert.equal(after.amount,original.amount);assert.equal(after.uniqueId,original.uniqueId);
+        assert.notEqual(after.owner,original.owner);assert.equal(JSON.parse(after.requestJson).relay.paymentRequired,fresh.paymentRequired);
+        assert.equal(after.blockHash,recovered.hash);assert.equal(f.published.length,0);
+        const future={...fresh,paymentRequired:offer(p,request.origin,advanced+400000)};
+        await assert.rejects(wallet.call('payment.prepare',future),{code:'HANDLE_REUSE'});
+        assert.throws(()=>afterJournal.db.prepare('UPDATE operations SET owner=? WHERE id=?').run('replacement',original.id),/immutable wallet terms/);
+        assert.equal(afterJournal.find(original.id).blockJson,after.blockJson);afterJournal.close();
+    } finally {Date.now=realNow;}
 });

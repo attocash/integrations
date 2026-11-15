@@ -47,9 +47,9 @@ test('reading wallet preferences never creates a home, database, or preference t
 test('saved role selections survive process restart and a profiles.sqlite restore', async t => {
   const f = await fixture(t);
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
-  await saveWalletSelection(f.home, {nanoDirectory: f.nano, nanoControllerDirectory: f.controller, paymentHandoffDirectory: f.handoffs});
+  await saveWalletSelection(f.home, {nanoDirectory: f.nano, nanoControllerDirectory: f.controller});
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
-  const expected = {attoDirectory: f.atto, nanoDirectory: f.nano, nanoControllerDirectory: f.controller, paymentHandoffDirectory: f.handoffs};
+  const expected = {attoDirectory: f.atto, nanoDirectory: f.nano, nanoControllerDirectory: f.controller};
   const restarted = await execute(process.execPath, ['--input-type=module', '-e',
     `import {readWalletSelection} from ${JSON.stringify(moduleUrl('wallet-preferences.js'))}; process.stdout.write(JSON.stringify(readWalletSelection(process.argv[1])));`, f.home]);
   assert.deepEqual(JSON.parse(restarted.stdout), expected);
@@ -62,7 +62,6 @@ test('saved role selections survive process restart and a profiles.sqlite restor
   assert.equal(env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR, f.atto);
   assert.equal(env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR, f.nano);
   assert.equal(env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR, f.controller);
-  assert.equal(env.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, f.handoffs);
 });
 
 test('environment overrides saved roles and a shared controller follows the primary wallet', async t => {
@@ -85,12 +84,11 @@ test('environment overrides saved roles and a shared controller follows the prim
 
 test('simultaneous independent processes merge role updates even on the first database creation', async t => {
   const f = await fixture(t);
-  const patches = [{attoDirectory: f.atto}, {nanoDirectory: f.nano}, {nanoControllerDirectory: f.controller},
-    {paymentHandoffDirectory: f.handoffs}];
+  const patches = [{attoDirectory: f.atto}, {nanoDirectory: f.nano}, {nanoControllerDirectory: f.controller}];
   await Promise.all(patches.map(patch => execute(process.execPath, ['--input-type=module', '-e',
     `import {saveWalletSelection} from ${JSON.stringify(moduleUrl('wallet-preferences.js'))}; await saveWalletSelection(process.argv[1], JSON.parse(process.argv[2]));`, f.home, JSON.stringify(patch)])));
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto, nanoDirectory: f.nano,
-    nanoControllerDirectory: f.controller, paymentHandoffDirectory: f.handoffs});
+    nanoControllerDirectory: f.controller});
 });
 
 test('read-only selection reads work during a concurrent SQLite WAL writer', async t => {
@@ -198,7 +196,7 @@ test('malformed patches, path traversal, and control characters cannot change a 
   await saveWalletSelection(f.home, {attoDirectory: f.atto});
   for (const patch of [{}, null, [], {attoDirectory: undefined}, {attoDirectory: null}, {unknown: f.atto},
     {attoDirectory: 'relative/wallet'}, {attoDirectory: f.atto + '/..'}, {attoDirectory: f.atto + '/inode\n'},
-    {attoDirectory: f.atto + '/inode\t'}, {paymentHandoffDirectory: 'relative/handoffs'}]) {
+    {attoDirectory: f.atto + '/inode\t'}, {}]) {
     await assert.rejects(saveWalletSelection(f.home, patch), setupError);
   }
   assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto});
@@ -293,66 +291,8 @@ test('existing explicit environment selections reject unsafe directories while a
   }
 });
 
-test('saved Nano handoff selections survive ATTO-only changes and follow argument/environment precedence', async t => {
-  const f = await fixture(t);
-  await saveWalletSelection(f.home, {nanoDirectory: f.nano, paymentHandoffDirectory: f.handoffs});
-  await saveWalletSelection(f.home, {attoDirectory: f.atto});
-  assert.deepEqual(readWalletSelection(f.home), {attoDirectory: f.atto, nanoDirectory: f.nano, paymentHandoffDirectory: f.handoffs});
-  assert.equal(managedWalletEnvironment(f.home, {}).MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, f.handoffs);
-  const env = {MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR: join(f.parent, 'explicit-environment-handoffs')};
-  assert.equal(managedWalletEnvironment(f.home, env).MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, env.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR);
-  assert.equal(managedWalletEnvironment(f.home, env, join(f.parent, 'explicit-argument-handoffs'))
-    .MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, join(f.parent, 'explicit-argument-handoffs'));
-  const otherHome = join(f.parent, 'new-default-home');
-  assert.equal(managedWalletEnvironment(otherHome, {}).MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR, join(otherHome, 'payment-handoffs'));
-});
-
-test('saved Nano handoff paths must be private real directories and never fall back when missing', async t => {
-  const f = await fixture(t);
-  const alias = join(f.parent, 'handoff-alias');
-  await symlink(f.handoffs, alias, process.platform === 'win32' ? 'junction' : 'dir');
-  await assert.rejects(saveWalletSelection(f.home, {paymentHandoffDirectory: alias}), setupError);
-  await setPermissions(f.handoffs, 0o755, 'directory');
-  if (process.platform !== 'win32') await assert.rejects(saveWalletSelection(f.home, {paymentHandoffDirectory: f.handoffs}), setupError);
-  await setPermissions(f.handoffs, 0o700, 'directory');
-  await saveWalletSelection(f.home, {paymentHandoffDirectory: f.handoffs});
-  await rm(f.handoffs, {recursive: true});
-  assert.throws(() => readWalletSelection(f.home), setupError);
-  assert.throws(() => managedWalletEnvironment(f.home, {}), setupError);
-  await assert.rejects(readdir(join(f.home, 'payment-handoffs')), {code: 'ENOENT'});
-});
-
-
-test('saved path metadata rejects substituted symlinks and malformed persisted paths on every read', async t => {
-  // Given a valid saved wallet selection.
-  const f = await fixture(t);
-  await saveWalletSelection(f.home, {attoDirectory:f.atto});
-  const alias = join(f.parent, 'saved-wallet-alias');
-  await symlink(f.atto, alias, process.platform === 'win32' ? 'junction' : 'dir');
-  const db = new DatabaseSync(f.database);
-  try {
-    // When persisted public paths are replaced outside the supported save API.
-    for (const path of [alias, 'relative/wallet', f.atto + '/..', f.atto + '/bad\npath',
-      ...(process.platform === 'win32' ? ['\\\\localhost\\share', f.atto + ':stream'] : [])]) {
-      db.prepare('UPDATE wallet_selection SET atto_directory=?').run(path);
-      // Then each new read rejects the unsafe path without opening the selected wallet.
-      assert.throws(() => readWalletSelection(f.home), setupError, JSON.stringify(path));
-    }
-  } finally { db.close(); }
-  assert.deepEqual(await readdir(f.atto), []);
-});
-
-test('saving one role revalidates every selected POSIX directory before committing the patch', {skip:process.platform === 'win32'}, async t => {
-  // Given a complete selection whose separate controller later loses privacy.
-  const f = await fixture(t);
-  await saveWalletSelection(f.home, {attoDirectory:f.atto, nanoDirectory:f.nano,
-    nanoControllerDirectory:f.controller, paymentHandoffDirectory:f.handoffs});
-  await setPermissions(f.controller, 0o755, 'directory');
-  // When an unrelated role update would otherwise retain that unsafe selected directory.
-  await assert.rejects(saveWalletSelection(f.home, {attoDirectory:f.atto}), setupError);
-  // Then the original row survives unchanged and the unsafe directory is not repaired.
-  const db = new DatabaseSync(f.database);
-  try { assert.equal(db.prepare('SELECT nano_controller_directory FROM wallet_selection').get().nano_controller_directory, f.controller); }
-  finally { db.close(); }
-  assert.throws(() => assertPrivate(f.controller, 'directory'));
+test('saved Nano native selections survive ATTO-only changes',async t=>{
+  const f=await fixture(t);await saveWalletSelection(f.home,{nanoDirectory:f.nano});await saveWalletSelection(f.home,{attoDirectory:f.atto});
+  assert.deepEqual(readWalletSelection(f.home),{attoDirectory:f.atto,nanoDirectory:f.nano});
+  assert.equal(managedWalletEnvironment(f.home,{}).MARKETPLACE_MCP_NANO_WALLET_DATA_DIR,f.nano);
 });

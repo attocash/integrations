@@ -5,10 +5,11 @@ import { randomUUID } from 'node:crypto';
 import { canonical, sha256 } from './configuration.js';
 import { privateFiles, processIdentity, processOwnerAlive, writePrivateNew } from './private-files.js';
 import { fail } from './errors.js';
+import { parseJsonObject, validateRelayOfferRefresh, type RelayRequest } from '@attocash/cli/internal-marketplace';
 export type OperationState = 'PREPARING' | 'PREPARED' | 'UNKNOWN' | 'CONFIRMED' | 'COMPETING';
 export interface JournalRecord {
     id: string;
-    kind: 'payment' | 'transfer' | 'receive';
+    kind: 'transfer' | 'receive';
     digest: string;
     requestJson: string;
     uniqueId: string;
@@ -25,11 +26,9 @@ export interface JournalRecord {
     representative: string | null;
     blockJson: string | null;
     blockHash: string | null;
-    responseJson: string | null;
-    deadline: string | null;
     confirmedAt: number | null;
 }
-const columns = 'id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner,epoch,previous,previousBalance,representative,blockJson,blockHash,responseJson,deadline,confirmedAt';
+const columns = 'id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner,epoch,previous,previousBalance,representative,blockJson,blockHash,confirmedAt';
 /** Validate retained rollback/WAL artifacts before SQLite can consume or delete
  * them. A concurrent transaction may remove an already checked sidecar. */
 function privateJournalFiles(path: string): void {
@@ -57,24 +56,37 @@ export class NanoJournal {
         this.db = new DatabaseSync(path);
         try {
             this.db.exec(`PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;
+      BEGIN IMMEDIATE;
       CREATE TABLE IF NOT EXISTS operations (
         id TEXT PRIMARY KEY,kind TEXT NOT NULL,digest TEXT NOT NULL,requestJson TEXT NOT NULL,uniqueId TEXT NOT NULL UNIQUE,
         source TEXT NOT NULL,network TEXT NOT NULL,amount TEXT NOT NULL,destination TEXT NOT NULL,createdAt INTEGER NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('PREPARING','PREPARED','UNKNOWN','CONFIRMED','COMPETING')),owner TEXT NOT NULL,
-        epoch INTEGER,previous TEXT,previousBalance TEXT,representative TEXT,blockJson TEXT,blockHash TEXT,responseJson TEXT,deadline TEXT,confirmedAt INTEGER);
+        epoch INTEGER,previous TEXT,previousBalance TEXT,representative TEXT,blockJson TEXT,blockHash TEXT,confirmedAt INTEGER);
       CREATE UNIQUE INDEX IF NOT EXISTS source_lane ON operations(source) WHERE state IN ('PREPARING','PREPARED','UNKNOWN');
-      CREATE TRIGGER IF NOT EXISTS frozen_terms BEFORE UPDATE ON operations
-        WHEN NEW.id<>OLD.id OR NEW.kind<>OLD.kind OR NEW.digest<>OLD.digest OR NEW.requestJson<>OLD.requestJson
+      DROP TRIGGER IF EXISTS frozen_terms;
+      CREATE TRIGGER frozen_terms BEFORE UPDATE ON operations
+        WHEN NEW.id<>OLD.id OR NEW.kind<>OLD.kind
         OR NEW.uniqueId<>OLD.uniqueId OR NEW.source<>OLD.source OR NEW.network<>OLD.network OR NEW.amount<>OLD.amount
-        OR NEW.destination<>OLD.destination OR NEW.createdAt<>OLD.createdAt OR NEW.owner<>OLD.owner
+        OR NEW.destination<>OLD.destination OR NEW.createdAt<>OLD.createdAt
+        OR ((NEW.digest<>OLD.digest OR NEW.requestJson<>OLD.requestJson OR NEW.owner<>OLD.owner) AND NOT (
+          OLD.kind='transfer' AND OLD.state='PREPARING' AND NEW.state='PREPARING'
+          AND OLD.blockHash IS NULL AND OLD.blockJson IS NULL AND OLD.epoch IS NULL AND OLD.previous IS NULL
+          AND OLD.previousBalance IS NULL AND OLD.representative IS NULL
+          AND json_type(OLD.requestJson,'$.relay')='object' AND json_type(NEW.requestJson,'$.relay')='object'
+          AND json_remove(OLD.requestJson,'$.relay.paymentRequired')=json_remove(NEW.requestJson,'$.relay.paymentRequired')))
         BEGIN SELECT RAISE(ABORT,'immutable wallet terms'); END;
       CREATE TRIGGER IF NOT EXISTS frozen_candidate BEFORE UPDATE ON operations WHEN OLD.blockHash IS NOT NULL AND
         (NEW.blockHash IS NOT OLD.blockHash OR NEW.blockJson IS NOT OLD.blockJson OR NEW.previous IS NOT OLD.previous
-        OR NEW.previousBalance IS NOT OLD.previousBalance OR NEW.representative IS NOT OLD.representative OR NEW.epoch IS NOT OLD.epoch
-        OR NEW.responseJson IS NOT OLD.responseJson OR NEW.deadline IS NOT OLD.deadline)
+        OR NEW.previousBalance IS NOT OLD.previousBalance OR NEW.representative IS NOT OLD.representative OR NEW.epoch IS NOT OLD.epoch )
         BEGIN SELECT RAISE(ABORT,'immutable signed candidate'); END;
       CREATE TRIGGER IF NOT EXISTS retain_signed BEFORE DELETE ON operations WHEN OLD.blockHash IS NOT NULL
-        BEGIN SELECT RAISE(ABORT,'retain signed candidate'); END;`);
+        BEGIN SELECT RAISE(ABORT,'retain signed candidate'); END;
+      CREATE TABLE IF NOT EXISTS relay_headers (id TEXT PRIMARY KEY REFERENCES operations(id), header TEXT NOT NULL);
+      CREATE TRIGGER IF NOT EXISTS frozen_relay_header BEFORE UPDATE ON relay_headers
+        BEGIN SELECT RAISE(ABORT,'immutable relay authorization'); END;
+      CREATE TRIGGER IF NOT EXISTS retain_relay_header BEFORE DELETE ON relay_headers
+        BEGIN SELECT RAISE(ABORT,'retain relay authorization'); END;
+      COMMIT;`);
             if (process.platform !== 'win32') privateJournalFiles(path);
         } catch (error) {
             this.db.close();
@@ -91,7 +103,7 @@ export class NanoJournal {
         });
     }
     private reservedSpend(source: string, network: string, now: number): bigint {
-        const rows = this.db.prepare(`SELECT amount FROM operations WHERE source=? AND network=? AND kind IN ('payment','transfer') AND
+        const rows = this.db.prepare(`SELECT amount FROM operations WHERE source=? AND network=? AND kind='transfer' AND
         (state IN ('PREPARING','PREPARED','UNKNOWN') OR (state='CONFIRMED' AND confirmedAt>=?))`).all(source, network, now - 86400000) as {
             amount: string;
         }[];
@@ -116,11 +128,24 @@ export class NanoJournal {
     find(id: string): JournalRecord | undefined {
         return this.db.prepare(`SELECT ${columns} FROM operations WHERE id=?`).get(id) as unknown as JournalRecord | undefined;
     }
+    pendingForSource(source: string): JournalRecord | undefined {
+        return this.db.prepare(`SELECT ${columns} FROM operations WHERE source=? AND state IN ('PREPARING','PREPARED','UNKNOWN')`).get(source) as unknown as JournalRecord | undefined;
+    }
+    relayHeader(id: string): string | undefined {
+        return (this.db.prepare('SELECT header FROM relay_headers WHERE id=?').get(id) as {header:string}|undefined)?.header;
+    }
+    authorizeRelay(id: string, header: string): void {
+        this.transaction(() => {
+            const record = this.find(id), existing = this.relayHeader(id);
+            if (!record?.blockHash || header.length > 90_000 || (existing !== undefined && existing !== header)) fail('JOURNAL_CONFLICT');
+            if (!existing) this.db.prepare('INSERT INTO relay_headers(id,header) VALUES(?,?)').run(id, header);
+        });
+    }
     private ownerAlive(owner: string): boolean {
         return processOwnerAlive(owner);
     }
     private requireUnsigned(record: JournalRecord): void {
-        for (const key of ['epoch', 'previous', 'previousBalance', 'representative', 'blockJson', 'blockHash', 'responseJson', 'deadline'] as const) {
+        for (const key of ['epoch', 'previous', 'previousBalance', 'representative', 'blockJson', 'blockHash'] as const) {
             if (record[key] !== null)
                 fail('JOURNAL_CONFLICT', 'An interrupted preparation contains unexpected signed candidate fields.');
         }
@@ -129,6 +154,22 @@ export class NanoJournal {
         return this.transaction(() => {
             const prior = this.find(input.id);
             if (prior) {
+                const oldTerms = parseJsonObject(prior.requestJson), nextTerms = parseJsonObject(input.requestJson);
+                const relay = oldTerms.relay as RelayRequest | undefined;
+                if (relay && prior.state === 'PREPARING') {
+                    this.requireUnsigned(prior);
+                    if (this.ownerAlive(prior.owner)) fail('PAYMENT_IN_PROGRESS');
+                    if (this.relayHeader(prior.id)) fail('JOURNAL_CONFLICT');
+                    for (const key of ['id','kind','uniqueId','source','network','amount','destination'] as const) {
+                        if (prior[key] !== input[key]) fail('HANDLE_REUSE');
+                    }
+                    const nextRelay = nextTerms.relay as RelayRequest;
+                    if (relay.paymentRequired !== nextRelay?.paymentRequired) validateRelayOfferRefresh(relay, nextRelay);
+                    else this.requireTerms(prior, input);
+                    if (sha256(prior.requestJson) !== prior.digest || sha256(input.requestJson) !== input.digest) fail('JOURNAL_CONFLICT');
+                    this.db.prepare(`UPDATE operations SET owner=?,requestJson=?,digest=? WHERE id=? AND state='PREPARING' AND blockHash IS NULL`).run(this.token,input.requestJson,input.digest,input.id);
+                    return this.find(input.id)!;
+                }
                 this.requireTerms(prior, input);
                 if (prior.state !== 'PREPARING')
                     return prior;
@@ -159,9 +200,9 @@ export class NanoJournal {
             if (record[key] !== input[key])
                 fail('HANDLE_REUSE', 'This Nano operation identity is already bound to different terms.');
     }
-    save(id: string, candidate: Pick<JournalRecord, 'epoch' | 'previous' | 'previousBalance' | 'representative' | 'blockJson' | 'blockHash' | 'responseJson' | 'deadline'>): JournalRecord {
+    save(id: string, candidate: Pick<JournalRecord, 'epoch' | 'previous' | 'previousBalance' | 'representative' | 'blockJson' | 'blockHash'>): JournalRecord {
         return this.transaction(() => {
-            const result = this.db.prepare(`UPDATE operations SET state='PREPARED',epoch=?,previous=?,previousBalance=?,representative=?,blockJson=?,blockHash=?,responseJson=?,deadline=? WHERE id=? AND state='PREPARING' AND owner=? AND blockHash IS NULL`).run(candidate.epoch, candidate.previous, candidate.previousBalance, candidate.representative, candidate.blockJson, candidate.blockHash, candidate.responseJson, candidate.deadline, id, this.token);
+            const result = this.db.prepare(`UPDATE operations SET state='PREPARED',epoch=?,previous=?,previousBalance=?,representative=?,blockJson=?,blockHash=? WHERE id=? AND state='PREPARING' AND owner=? AND blockHash IS NULL`).run(candidate.epoch, candidate.previous, candidate.previousBalance, candidate.representative, candidate.blockJson, candidate.blockHash, id, this.token);
             if (result.changes !== 1)
                 fail('JOURNAL_CONFLICT');
             return this.find(id)!;

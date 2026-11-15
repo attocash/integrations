@@ -14,8 +14,6 @@ const PRIVATE_FILE_MODE = 0o600;
 const USER_APPROVAL_PURPOSES = new Set([
   'login', 'link authorizer', 'link new identity', 'unlink',
   'API-key creation', 'API-key rotation', 'API-key revocation',
-  'payout address enrollment', 'payout address selection', 'payout address disablement',
-  'withdrawal creation', 'product purchase', 'product refund',
 ]);
 
 export interface MarketplaceProofApprovalRequest {

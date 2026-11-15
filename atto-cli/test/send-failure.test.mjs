@@ -3,12 +3,14 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import { DatabaseSync } from 'node:sqlite';
+import { setTimeout as delay } from 'node:timers/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { interruptCli, sigintHarness } from './support/signals.mjs';
-import { AttoBlock, AttoMnemonic, AttoPublicKey, AttoTransaction, AttoWork } from '@attocash/commons-core';
+import { AttoAccount, AttoBlock, AttoMnemonic, AttoPublicKey, AttoTransaction, AttoWork, attoAccountChange } from '@attocash/commons-core';
 import { AttoNodeClientAsyncBuilder } from '@attocash/commons-node-remote';
 const applicationUrl = process.env.ATTO_TEST_CLI_PACKAGE_DIR
   ? pathToFileURL(join(process.env.ATTO_TEST_CLI_PACKAGE_DIR, 'dist/application/app.js'))
@@ -62,7 +64,7 @@ async function fixture(t, mode, sendRetry) {
     lastTransactionTimestamp: 1704616009211, representativeAlgorithm: 'V1', representativePublicKey: sender.publicKey,
   };
   const request = { destination: recipient.address, amount: '10', unit: 'RAW', requestId: 'journal-payment' };
-  const state = { mode, requests: [], workJournal: [], publicationJournal: [], published: [], showPublished: false, serverError: undefined };
+  const state = { mode, requests: [], workJournal: [], publicationJournal: [], offered: [], published: [], showPublished: false, serverError: undefined };
   const http = createServer((req, res) => {
     state.requests.push({ method: req.method, path: req.url });
     const handle = async () => {
@@ -90,16 +92,28 @@ async function fixture(t, mode, sendRetry) {
         state.workJournal.push(structuredClone(record));
         if (state.mode === 'work-failure') { res.statusCode = 503; return res.end(); }
         if (state.mode === 'work-client-failure') { res.statusCode = 403; return res.end(); }
-        const block = AttoBlock.fromJson(record.blockJson);
+        if (state.mode === 'hold-work') return;
+        const input = JSON.parse(body);
+        const current = AttoAccount.fromJson(JSON.stringify(account));
+        const block = attoAccountChange(current, current.representativeAddress, new Date(input.timestamp).toISOString()).block;
         // Commons may prefetch work for the next block. It is unrelated to this
         // send and is rejected immediately rather than computed by the fixture.
         if (JSON.parse(body).target !== block.previous.toString()) { res.statusCode = 503; return res.end(); }
         return res.end(JSON.stringify({ work: validWork(block).toString() }));
       }
       if (req.method === 'POST' && req.url === '/transactions/stream') {
-        state.publicationJournal.push(structuredClone(app.ledger.get(request.requestId)));
+        // Read a separate SQLite connection at the actual HTTP boundary: no in-memory journal substitute.
+        const db = new DatabaseSync(join(directory, 'state.sqlite'), { readOnly: true });
+        let durable;
+        try { durable = JSON.parse(db.prepare('SELECT value FROM settings WHERE key = ?').get('spending.records').value).find(value => value.id === request.requestId); }
+        finally { db.close(); }
+        state.publicationJournal.push(durable);
         const transaction = AttoTransaction.fromJson(body);
         assert.equal(await transaction.isValid(), true, 'Publication must carry an actual valid Commons signature and work.');
+        assert.equal(durable.transactionJson, body, 'The exact offered signature/work/block must be committed before HTTP.');
+        assert.equal(durable.hash, transaction.hash.toString());
+        state.offered.push(transaction);
+        if (state.mode === 'before-forward') return;
         state.published.push(transaction);
         if (state.mode === 'success') return res.end(`${transaction.toJson()}\n`);
         if (state.mode === 'publish-client-failure') { res.statusCode = 422; return res.end(); }
@@ -137,7 +151,7 @@ async function fixture(t, mode, sendRetry) {
   await app.call('wallet_configure', { network: 'LOCAL', nodeUrl: url, workerUrl: url, representative: sender.address, autoReceive: false });
   app.ledger.setPolicy({ perRequest: null, rolling: [{ days: 1, amount: '100', unit: 'RAW' }] });
   return {
-    get app() { return app; }, directory, request, state,
+    get app() { return app; }, phrase: () => phrase, directory, request, state,
     async reopen() { await app.close(); app = new AttoApplication({ directory, secrets, sendRetry }); return app; },
   };
 }
@@ -163,25 +177,21 @@ for (const mode of ['open-failure', 'time-failure']) {
   });
 }
 
-test('worker failure after signing retains the hash and reservation across retries and application restart', { timeout: 10_000 }, async t => {
+test('work failure before candidate persistence is never recorded as signed or offered for publication', { timeout: 10_000 }, async t => {
+  // Given a wallet whose worker fails before a complete native candidate exists.
   const f = await fixture(t, 'work-failure');
-  await assert.rejects(f.app.call('send', f.request), { code: 'PUBLICATION_UNCERTAIN' });
-  assert.equal(f.state.workJournal.length, 1);
-  assert.equal(f.state.workJournal[0].status, 'signed');
+  // When work fails and the wallet is reopened.
+  await assert.rejects(f.app.call('send', f.request));
   const original = f.app.ledger.get(f.request.requestId);
-  assert.equal(original.status, 'unknown');
-  assert.match(original.hash, /^[A-F0-9]{64}$/);
-  assert.equal(AttoBlock.fromJson(original.blockJson).hash.toString(), original.hash);
-  assert.equal(f.state.published.length, 0);
   await f.reopen();
-  const allowance = await f.app.call('limits_get');
-  assert.equal(allowance.pendingRaw, '10');
-  assert.equal(allowance.rolling[0].remainingRaw, '90');
-  await assert.rejects(f.app.call('send', f.request), { code: 'PUBLICATION_UNCERTAIN' });
-  assert.equal(f.app.ledger.get(f.request.requestId).hash, original.hash);
-  assert.equal(f.state.workJournal.length, 1, 'Same-ID retries must not sign or request work again.');
-  assert.equal(f.state.published.length, 0);
-  await assert.rejects(f.app.call('send', { ...f.request, requestId: 'over-budget', amount: '100' }), { code: 'SPENDING_LIMIT' });
+  // Then there is no misleading signed hash and no publication or uncertain debit.
+  assert.equal(f.state.workJournal[0].status, 'reserved');
+  assert.equal(original.status, 'failed');
+  assert.equal(original.hash, undefined);
+  assert.equal(original.transactionJson, undefined);
+  assert.equal(f.state.offered.length, 0);
+  assert.equal((await f.app.call('limits_get')).pendingRaw, '0');
+  await assert.rejects(f.app.call('send', f.request), { code: 'REQUEST_FAILED' });
 });
 
 for (const mode of ['account-failure', 'open-failure', 'time-failure', 'work-failure', 'publish-failure', 'publish-disconnect']) {
@@ -216,7 +226,7 @@ for (const mode of ['account-client-failure', 'open-client-failure', 'time-clien
       return true;
     });
     assert.ok(f.state.published.length <= 1);
-    if (mode === 'publish-client-failure' || mode === 'work-client-failure') {
+    if (mode === 'publish-client-failure') {
       assert.equal(f.app.ledger.get(f.request.requestId).status, 'unknown');
       assert.equal(f.app.ledger.usage().pendingRaw, '10');
     }
@@ -303,33 +313,144 @@ for (const json of [false, true]) {
   }
 }
 
-test('an uncertain publication reconciles its captured valid transaction without sending again', { timeout: 20_000 }, async t => {
+test('explicit replay retains exact bytes through repeated uncertainty and canonical confirmation completes without duplicate publication', { timeout: 20_000 }, async t => {
+  // Given an unresolved, fully retained valid transaction and the original request metadata.
   const f = await fixture(t, 'publish-failure');
   await assert.rejects(f.app.call('send', f.request), { code: 'PUBLICATION_UNCERTAIN' });
-  assert.equal(f.state.published.length, 1);
-  const published = f.state.published[0];
-  assert.equal(await published.isValid(), true);
-  assert.equal(f.state.publicationJournal[0].status, 'signed');
-  assert.equal(f.state.publicationJournal[0].hash, published.hash.toString());
+  const original = f.app.ledger.get(f.request.requestId);
   const initialWorkRequests = f.state.workJournal.length;
-  const pending = await f.app.call('limits_get');
-  assert.equal(pending.pendingRaw, '10');
-  assert.equal(pending.rolling[0].remainingRaw, '90');
+  // When observation, restart and an explicit original-request retry occur before confirmation is visible.
+  await f.reopen();
+  assert.equal((await f.app.call('limits_get')).pendingRaw, '10');
+  assert.equal(f.state.offered.length, 1, 'Limits/reconciliation never publish.');
   await assert.rejects(f.app.call('send', f.request), { code: 'PUBLICATION_UNCERTAIN' });
-  assert.equal(f.state.published.length, 1);
+  assert.equal(f.state.offered.length, 2);
+  assert.equal(f.app.ledger.get(f.request.requestId).transactionJson, original.transactionJson);
   await f.reopen();
   f.state.showPublished = true;
   const resolved = await f.app.call('send', f.request);
+  // Then the one reservation completes from canonical proof, without new work or another publication.
   assert.equal(resolved.status, 'published');
-  assert.equal(resolved.hash, published.hash.toString());
+  assert.equal(resolved.hash, original.hash);
   assert.equal(resolved.requestId, f.request.requestId);
-  assert.equal(f.app.ledger.get(f.request.requestId).status, 'published');
-  const settled = await f.app.call('limits_get');
-  assert.equal(settled.pendingRaw, '0');
-  assert.equal(settled.rolling[0].publishedRaw, '10');
-  assert.equal(settled.rolling[0].remainingRaw, '90');
+  assert.equal((await f.app.call('limits_get')).rolling[0].publishedRaw, '10');
   assert.deepEqual(await f.app.call('send', f.request), resolved);
   await assert.rejects(f.app.call('send', { ...f.request, amount: '11' }), { code: 'REQUEST_CONFLICT' });
-  assert.equal(f.state.workJournal.length, initialWorkRequests, 'Retries must not request further work.');
-  assert.equal(f.state.published.length, 1, 'Reconciliation must never perform a second publication.');
+  assert.equal(f.state.workJournal.length, initialWorkRequests);
+  assert.deepEqual(f.state.offered.map(value => value.toJson()), [original.transactionJson, original.transactionJson]);
+});
+
+async function until(predicate) {
+  const deadline = Date.now() + 5000;
+  while (!predicate()) { assert.ok(Date.now() < deadline, 'Expected the held native boundary.'); await delay(10); }
+}
+function childSend(t, f) {
+  const harness = `
+    const { OsSecretStore } = await import(process.env.ATTO_TEST_SECRETS_MODULE);
+    OsSecretStore.prototype.get = async () => process.env.ATTO_TEST_PHRASE;
+    process.argv = [process.execPath, 'atto', '--data-dir', process.env.ATTO_TEST_DIRECTORY, '--json', 'send',
+      process.env.ATTO_TEST_DESTINATION, '10', '--unit', 'RAW', '--request-id', 'journal-payment'];
+    await import(process.env.ATTO_TEST_MAIN);
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', harness], {
+    stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NO_UPDATE_NOTIFIER: '1',
+      ATTO_TEST_SECRETS_MODULE: new URL('../storage/secrets.js', applicationUrl).href,
+      ATTO_TEST_MAIN: new URL('../cli/main.js', applicationUrl).href,
+      ATTO_TEST_PHRASE: f.phrase(), ATTO_TEST_DIRECTORY: f.directory, ATTO_TEST_DESTINATION: f.request.destination },
+  });
+  child.stdout.resume(); child.stderr.resume();
+  t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+  return child;
+}
+
+for (const boundary of ['before-forward', 'hold-work']) {
+  test(`process death at ${boundary} resumes the original request safely`, { timeout: 20_000 }, async t => {
+    // Given an actual CLI process held at either the pre-persistence work boundary or pre-forward HTTP boundary.
+    const f = await fixture(t, boundary);
+    const child = childSend(t, f);
+    await until(() => boundary === 'before-forward' ? f.state.offered.length === 1 : f.state.workJournal.length === 1);
+    const original = f.app.ledger.get(f.request.requestId);
+    // When the process dies and a new session retries the exact original request/settings.
+    const closed = once(child, 'close'); child.kill('SIGKILL'); await closed;
+    f.state.mode = 'success';
+    await f.reopen();
+    const result = await f.app.call('send', f.request);
+    // Then exactly one native SEND is forwarded and the durable operation/budget remains singular.
+    assert.equal(result.requestId, original.id);
+    assert.equal(f.state.published.length, 1);
+    assert.equal(f.app.ledger.journalList().items.length, 1);
+    assert.equal((await f.app.call('limits_get')).rolling[0].publishedRaw, '10');
+    if (boundary === 'before-forward') {
+      assert.equal(result.hash, original.hash);
+      assert.equal(f.state.published[0].toJson(), original.transactionJson);
+      assert.deepEqual(f.state.offered.map(value => value.toJson()), [original.transactionJson, original.transactionJson]);
+      assert.equal(f.state.workJournal.length, 1);
+    } else {
+      assert.equal(original.status, 'reserved'); assert.equal(original.hash, undefined);
+      assert.equal(original.transactionJson, undefined);
+    }
+  });
+}
+
+test('candidate persistence failure prevents every native publication', async t => {
+  // Given a concrete storage failure at the new candidate commit.
+  const f = await fixture(t, 'success');
+  const set = f.app.store.set.bind(f.app.store);
+  f.app.store.set = (key, value) => {
+    if (key === 'spending.records' && value.some(record => record.transactionJson)) throw new Error('Synthetic candidate commit failure');
+    return set(key, value);
+  };
+  // When signing/work finish but SQLite cannot retain the complete candidate.
+  await assert.rejects(f.app.call('send', f.request), /Synthetic candidate commit failure/);
+  f.app.store.set = set;
+  // Then HTTP never receives a candidate and no unsigned signed state is left behind.
+  assert.equal(f.state.offered.length, 0);
+  assert.equal(f.app.ledger.get(f.request.requestId).hash, undefined);
+});
+
+for (const mutation of ['signature', 'work', 'block', 'binding', 'metadata', 'oversized']) {
+  test(`a corrupt retained ${mutation} fails closed without new work, publication or allowance release`, async t => {
+    // Given an uncertain native candidate and corrupted persisted recovery material.
+    const f = await fixture(t, 'publish-failure');
+    await assert.rejects(f.app.call('send', f.request), { code: 'PUBLICATION_UNCERTAIN' });
+    const records = f.app.store.get('spending.records');
+    const saved = structuredClone(records[0]);
+    const candidate = JSON.parse(records[0].transactionJson);
+    if (mutation === 'signature') candidate.signature = '00'.repeat(64);
+    if (mutation === 'work') candidate.work = '00'.repeat(8);
+    if (['signature', 'work'].includes(mutation)) records[0].transactionJson = JSON.stringify(candidate);
+    if (mutation === 'block') records[0].blockJson = records[0].blockJson.replace('10', '11');
+    if (mutation === 'binding') records[0].candidateBinding = 'f'.repeat(64);
+    if (mutation === 'metadata') records[0].metadata = { altered: true };
+    if (mutation === 'oversized') records[0].transactionJson = 'x'.repeat(65_537);
+    f.app.store.set('spending.records', records);
+    const work = f.state.workJournal.length;
+    // When explicit recovery is requested.
+    await assert.rejects(f.app.call('send', f.request));
+    // Then neither observation nor retry can send a substitute or free the operation.
+    assert.equal(f.state.offered.length, 1); assert.equal(f.state.workJournal.length, work);
+    assert.notEqual(f.app.store.get('spending.records')[0].status, 'failed');
+    f.app.store.set('spending.records', [saved]);
+    assert.equal(f.app.ledger.usage().pendingRaw, '10');
+  });
+}
+
+test('historical block-only candidates remain fenced and canonically recoverable with an explicit replay limitation', async t => {
+  // Given an actual uncertain transaction represented in the released block-only journal format.
+  const f = await fixture(t, 'publish-failure');
+  await assert.rejects(f.app.call('send', f.request), { code: 'PUBLICATION_UNCERTAIN' });
+  const records = f.app.store.get('spending.records');
+  delete records[0].transactionJson; delete records[0].candidateBinding;
+  f.app.store.set('spending.records', records);
+  await f.reopen();
+  // When the original request cannot yet obtain canonical proof.
+  await assert.rejects(f.app.call('send', f.request), error => error.code === 'PUBLICATION_UNCERTAIN' && /historical journal lacks.*signed transaction and work/.test(error.message));
+  // Then it retains its old shape, account and amount fence; later canonical proof can complete it.
+  assert.equal(f.app.ledger.get(f.request.requestId).transactionJson, undefined);
+  assert.equal(f.app.ledger.usage().pendingRaw, '10');
+  assert.throws(() => f.app.ledger.assertAccountAvailable(records[0].index), { code: 'ACCOUNT_RESERVED' });
+  assert.equal(f.state.offered.length, 1);
+  f.state.showPublished = true;
+  assert.equal((await f.app.call('send', f.request)).status, 'published');
+  assert.equal(f.state.offered.length, 1);
 });

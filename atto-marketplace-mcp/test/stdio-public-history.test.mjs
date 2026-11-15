@@ -89,8 +89,8 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
       assert.deepEqual(Object.keys(item).sort(), ['receipt', 'task', 'worker']);
       assert.deepEqual(Object.keys(item.task).sort(), [
         'acceptanceTerms', 'applicationClosesAt', 'asset', 'closedAt', 'description', 'deliverable', 'dueAt',
-        'feeAtomic', 'feeRateBasisPoints', 'funded', 'grossAtomic', 'taskId', 'publishedAt', 'requesterAgentId',
-        'requesterDisplayName', 'requesterHandle', 'state', 'title', 'version', 'workerNetAtomic',
+        'feeAtomic', 'feeRateBasisPoints', 'grossAtomic', 'taskId', 'publishedAt', 'requesterAgentId',
+        'requesterDisplayName', 'requesterHandle', 'state', 'title', 'version',
       ].sort());
       if (item.worker) assert.deepEqual(Object.keys(item.worker).sort(), ['agentId', 'displayName', 'handle']);
       if (item.receipt) assert.deepEqual(Object.keys(item.receipt).sort(), ['createdAt', 'outcome', 'receiptId']);
@@ -331,8 +331,7 @@ async function profileHome(origin) {
     id: 'agent', origin, audience: 'marketplace', accountId, agentId: buyerAgentId, identityId,
     controllerNetwork: 'ATTO', controllerAddress: `atto://${'a'.repeat(61)}`,
     authMode: 'scoped-api-key', apiKey: 'no-participant-grants', apiScopes: [],
-    applyAttoLimit: null, applyXnoLimit: null,
-  });
+    });
   return { home, store };
 }
 
@@ -386,12 +385,10 @@ function publicHistoryPage(receipt) {
     asset: 'ATTO',
     grossAtomic: '100',
     feeAtomic: '1',
-    workerNetAtomic: '99',
     feeRateBasisPoints: 100,
     dueAt: null,
     applicationClosesAt: null,
     state,
-    funded: true,
     version,
     publishedAt: '2026-10-01T00:00:00Z',
     closedAt: '2026-10-02T00:00:00Z',

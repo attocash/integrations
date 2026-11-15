@@ -60,7 +60,7 @@ function interaction(steps){
   },done:()=>assert.equal(steps.length,0,'Expected every workflow decision to be reached')};
 }
 
-for(const [choice,funding,transfers] of [['',false,false],['2',true,false],['3',false,true],['4',true,true]]){
+for(const [choice,transfers] of [['',false],['2',true]]){
   test(`compact Atto purpose choice ${choice||'default'} preserves native limits, pool, signing authority, proposal and journal`,async t=>terminal(async()=>{
     // Given a selected bounded shared wallet with no Marketplace grants or generic signing.
     const f=await fixture(t),before=await f.snapshot(),journal=await f.journal();
@@ -70,7 +70,7 @@ for(const [choice,funding,transfers] of [['',false,false],['2',true,false],['3',
     // Then grants remain separately selectable and no native proposal or payment state changes.
     script.done();assert.equal(script.questions.length,2);assert.equal(wallet.index,0);
     assert.deepEqual(readWalletSelection(f.home).attoAccess,{address:before.address,index:0,network:'atto:local',fingerprint:before.fingerprint,
-      marketplaceFunding:funding,externalTransfers:transfers});
+      externalTransfers:transfers});
     assert.deepEqual(await f.snapshot(),before);assert.deepEqual(await f.journal(),journal);
   }));
 }
@@ -80,7 +80,7 @@ test('compact wallet review shows exact source, shared limits and separate purpo
   let before;
   const output=await terminal(async()=>{
     const f=await fixture(t);before=await f.snapshot();
-    const script=interaction([[/^Atto access:/,'4'],[/^Type APPROVE to save/,'APPROVE']]);
+    const script=interaction([[/^Atto access:/,'2'],[/^Type APPROVE to save/,'APPROVE']]);
     // When the selected purposes are reviewed.
     await setupAttoWalletInteractive({...f,prompt:script.prompt});script.done();
   });
@@ -88,7 +88,7 @@ test('compact wallet review shows exact source, shared limits and separate purpo
   assert.ok(output.stderr.includes(before.address));
   assert.match(output.stderr,/Account index: 0 \| Network: atto:local/);
   assert.match(output.stderr,/100 ATTO.*1000 ATTO/);
-  assert.match(output.stderr,/Marketplace funding: allowed \| External transfers: allowed/);
+  assert.match(output.stderr,/External transfers: allowed/);
   assert.match(output.stderr,/Login proof requires a separate approval/);
   for(const value of [before.fingerprint,before.settings.nodeUrl,before.settings.workerUrl,phrase])assert.equal(output.stderr.includes(value),false);
   assert.doesNotMatch(output.stderr,/"policy"|"pool"|messageSigningIndexes|walletFingerprint/);
@@ -97,7 +97,7 @@ test('compact wallet review shows exact source, shared limits and separate purpo
 test('denying compact wallet approval saves no Marketplace grants or pointer',async t=>terminal(async()=>{
   // Given native authority and no previous Marketplace wallet selection.
   const f=await fixture(t),before=await f.snapshot();
-  const script=interaction([[/^Atto access:/,'4'],[/^Type APPROVE to save/,'NO']]);
+  const script=interaction([[/^Atto access:/,'2'],[/^Type APPROVE to save/,'NO']]);
   // When final wallet approval is declined.
   await assert.rejects(setupAttoWalletInteractive({...f,prompt:script.prompt}),{code:'APPROVAL_DECLINED'});
   // Then native authority and the absent Marketplace selection are preserved.
@@ -112,14 +112,13 @@ test('login-only compact reuse needs no native spend authority or configuration 
   await setupAttoWalletInteractive({...f,prompt:script.prompt});
   // Then it requires only two wallet prompts and preserves read-only native authority.
   script.done();assert.deepEqual(await f.snapshot(),before);assert.equal(script.questions.length,2);
-  assert.equal(readWalletSelection(f.home).attoAccess.marketplaceFunding,false);
   assert.equal(readWalletSelection(f.home).attoAccess.externalTransfers,false);
 }));
 
 for(const [name,configuration] of [
   ['read-only',{access:'read-only'}],['unbounded',{policy:{perRequest:null,rolling:[]}}],['outside the native pool',{pool:[1]}],
 ]){
-  test(`compact funding choice with ${name} authority offers login-only without expanding native permissions`,async t=>terminal(async()=>{
+  test(`compact transfer choice with ${name} authority offers login-only without expanding native permissions`,async t=>terminal(async()=>{
     // Given native authority that cannot fund the selected Marketplace source.
     const f=await fixture(t,configuration),before=await f.snapshot();
     const script=interaction([[/^Atto access:/,'2'],[/^Continue:.*Login only.*Advanced native configuration/,''],[/^Type APPROVE to save/,'APPROVE']]);
@@ -127,7 +126,6 @@ for(const [name,configuration] of [
     await setupAttoWalletInteractive({...f,prompt:script.prompt});
     // Then no pool, limit, signing permission or native proposal was upgraded.
     script.done();assert.deepEqual(await f.snapshot(),before);
-    assert.equal(readWalletSelection(f.home).attoAccess.marketplaceFunding,false);
     assert.equal(readWalletSelection(f.home).attoAccess.externalTransfers,false);
   }));
 }
@@ -135,14 +133,14 @@ for(const [name,policy] of [
   ['per-payment only',{perRequest:{amount:'100',unit:'ATTO'},rolling:[]}],
   ['rolling only',{perRequest:null,rolling:[{days:1,amount:'1000',unit:'ATTO'}]}],
 ]){
-  test(`compact funding accepts existing ${name} bounded native spend`,async t=>terminal(async()=>{
+  test(`compact transfer accepts existing ${name} bounded native spend`,async t=>terminal(async()=>{
     // Given an existing native policy bounded by one of the CLI-supported limit types.
     const f=await fixture(t,{policy}),before=await f.snapshot();
     const script=interaction([[/^Atto access:/,'2'],[/^Type APPROVE to save/,'APPROVE']]);
-    // When Marketplace funding is selected under that unchanged shared policy.
+    // When External transfer access is selected under that unchanged shared policy.
     await setupAttoWalletInteractive({...f,prompt:script.prompt});
-    // Then the native bound is retained and the narrower funding purpose is usable.
-    script.done();assert.deepEqual(await f.snapshot(),before);assert.equal(readWalletSelection(f.home).attoAccess.marketplaceFunding,true);
+    // Then the native bound is retained and the native transfer permission is usable.
+    script.done();assert.deepEqual(await f.snapshot(),before);assert.equal(readWalletSelection(f.home).attoAccess.externalTransfers,true);
   }));
 }
 
@@ -150,8 +148,8 @@ test('matching saved identity, account and network reuse the saved index and pur
   // Given a previously approved nonzero account in the same shared wallet.
   const f=await fixture(t),snapshot=await inspectMarketplaceWalletSetup({directory:f.directory,index:1});
   await saveWalletSelection(f.home,{attoDirectory:f.directory,attoAccess:{address:snapshot.address,index:1,network:snapshot.network,
-    fingerprint:snapshot.fingerprint,marketplaceFunding:false,externalTransfers:true}});
-  const script=interaction([[/^Atto access:.*default 3/,''],[/^Type APPROVE to save/,'APPROVE']]);
+    fingerprint:snapshot.fingerprint,externalTransfers:true}});
+  const script=interaction([[/^Atto access:.*default 2/,''],[/^Type APPROVE to save/,'APPROVE']]);
   // When compact setup resumes with only the saved path and access binding.
   const wallet=await setupAttoWalletInteractive({home:f.home,env:{},prompt:script.prompt});
   // Then no repeated wallet, path, index or REUSE questions precede approval.
@@ -163,7 +161,7 @@ for(const changed of ['fingerprint','network','directory']){
   test(`saved grants default to login only after ${changed} changes`,async t=>terminal(async()=>{
     // Given old Marketplace grants whose exact wallet binding no longer matches.
     const f=await fixture(t),snapshot=await f.snapshot();
-    const access={address:snapshot.address,index:0,network:snapshot.network,fingerprint:snapshot.fingerprint,marketplaceFunding:true,externalTransfers:true};
+    const access={address:snapshot.address,index:0,network:snapshot.network,fingerprint:snapshot.fingerprint,externalTransfers:true};
     let selectedDirectory=f.directory;
     if(changed==='fingerprint')access.fingerprint='a'.repeat(64);
     if(changed==='network')access.network='atto:beta';
@@ -173,7 +171,6 @@ for(const changed of ['fingerprint','network','directory']){
     // When the explicitly selected current wallet is approved.
     await setupAttoWalletInteractive({...f,prompt:script.prompt});
     // Then old grants do not carry across identity, path or network changes.
-    script.done();assert.equal(readWalletSelection(f.home).attoAccess.marketplaceFunding,false);
     assert.equal(readWalletSelection(f.home).attoAccess.externalTransfers,false);
   }));
 }
@@ -228,7 +225,7 @@ test('--advanced remains reachable from standalone wallet setup before compact p
 test('missing native authority can enter advanced setup only through an explicit choice',async t=>terminal(async()=>{
   // Given a selected read-only native wallet.
   const f=await fixture(t,{access:'read-only'}),before=await f.snapshot();
-  const script=interaction([[/^Atto access:/,'4'],[/^Continue:/,'2'],[/^Type REUSE/,'NO']]);
+  const script=interaction([[/^Atto access:/,'2'],[/^Continue:/,'2'],[/^Type REUSE/,'NO']]);
   // When the user explicitly chooses advanced native setup and then cancels it.
   await assert.rejects(setupAttoWalletInteractive({...f,prompt:script.prompt}),{code:'CANCELLED'});
   // Then entering the advanced path has not upgraded authority or saved purpose grants.

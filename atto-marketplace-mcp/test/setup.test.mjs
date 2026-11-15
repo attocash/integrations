@@ -350,7 +350,7 @@ for(const network of ['ATTO','NANO'])test(`${network} scoped setup signs a fresh
   const nativeChallenge=(purpose,binding)=>{
     if(network==='ATTO')return agentChallenge(purpose,binding);
     const challenge=nanoLoginChallenge(selectedAddress);
-    challenge.message=challenge.message.replace('Purpose: login',`Purpose: ${purpose}`).replace(hash(['signer-controller-enrollment-v1',accountId,identityId]),binding);
+    challenge.message=challenge.message.replace('Purpose: login',`Purpose: ${purpose}`).replace(hash(['marketplace-login-v1',accountId,identityId]),binding);
     return challenge;
   };
   // Given a first-time profile that explicitly selects one small scoped API grant.
@@ -363,7 +363,7 @@ for(const network of ['ATTO','NANO'])test(`${network} scoped setup signs a fresh
     if(req.url==='/v1/agent/credentials/challenges') {
       const command=body;
       const value=command.credential;
-      const payload=['agent-credential-v2',value.name,String(value.expiresInDays),[...value.scopes].sort().join(','),'','','',''].join('\n');
+      const payload=['marketplace-credential-v1',value.name,String(value.expiresInDays),[...value.scopes].sort().join(','),'','','','','',''].join('\n');
       const binding=hash(['agent-credential-v1',accountId,identityId,'CREATE','',command.idempotencyKey,payload]);
       return json(res,200,nativeChallenge('API-key creation',binding));
     }
@@ -426,10 +426,7 @@ test('scoped setup accepts and privately stores separate product publication res
     if(req.url==='/v1/agent/auth/sessions') return json(res,200,sessionResponse());
     if(req.url==='/v1/agent/credentials/challenges') {
       const value=body.credential;
-      const payload=['agent-credential-v4',value.name,String(value.expiresInDays),[...value.scopes].sort().join(','),
-        value.publishAttoLimit??'',value.publishXnoLimit??'',value.applyAttoLimit??'',value.applyXnoLimit??'',
-        value.purchaseAttoLimit??'',value.purchaseXnoLimit??'',value.productPublishAttoLimit??'',
-        value.productPublishXnoLimit??''].join('\n');
+      const payload=['marketplace-credential-v1',value.name,String(value.expiresInDays),[...value.scopes].sort().join(','),value.publishAttoLimit??'',value.publishXnoLimit??'',value.purchaseAttoLimit??'',value.purchaseXnoLimit??'',value.productPublishAttoLimit??'',value.productPublishXnoLimit??''].join('\n');
       const binding=hash(['agent-credential-v1',accountId,identityId,'CREATE','',body.idempotencyKey,payload]);
       return json(res,200,agentChallenge('API-key creation',binding));
     }
@@ -484,7 +481,7 @@ test('credential activation creates a separate explicit scoped profile and remov
     store.createProfile({id:'controller',origin:'https://marketplace.example',audience:'marketplace',accountId,agentId,identityId,
       controllerNetwork:'ATTO',controllerAddress,controllerIndex:9,authMode:'controller-session',
       accessToken:'controller-access-token',accessExpiresAt:Date.now()+60_000,refreshToken:'controller-refresh-token',refreshExpiresAt:Date.now()+120_000});
-    store.putIssuedCredential('controller',{apiKeyId,apiKey:'private-scoped-key-value',scopes:['tasks:read'],publishAttoLimit:null,publishXnoLimit:null,applyAttoLimit:null,applyXnoLimit:null});
+    store.putIssuedCredential('controller',{apiKeyId,apiKey:'private-scoped-key-value',scopes:['tasks:read'],publishAttoLimit:null,publishXnoLimit:null,});
   } finally { store.close(); }
   let output=''; const originalWrite=process.stdout.write;
   process.stdout.write=(chunk,...rest)=>{output+=String(chunk);return true;};
@@ -556,11 +553,11 @@ test('local setup rejects an invalid ATTO signature before session submission an
   }
 });
 
-function loginChallenge() { return agentChallenge('login',hash(['signer-controller-enrollment-v1',accountId,identityId])); }
+function loginChallenge() { return agentChallenge('login',hash(['marketplace-login-v1',accountId,identityId])); }
 function nanoLoginChallenge(address) {
   const challengeId='55555555-5555-4555-8555-555555555555';
   const issuedAt=new Date(Date.now()-1000).toISOString(); const expiresAt=new Date(Date.now()+120_000).toISOString();
-  const message=`Nano Marketplace Agent Controller Proof v1\nAudience: marketplace\nNetwork: nano:dev\nAddress: ${address}\nPurpose: login\nRequest ID: ${challengeId}\nBinding Hash: ${hash(['signer-controller-enrollment-v1',accountId,identityId])}\nNonce: ${'b'.repeat(64)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
+  const message=`Nano Marketplace Agent Controller Proof v1\nAudience: marketplace\nNetwork: nano:dev\nAddress: ${address}\nPurpose: login\nRequest ID: ${challengeId}\nBinding Hash: ${hash(['marketplace-login-v1',accountId,identityId])}\nNonce: ${'b'.repeat(64)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`;
   return {challengeId,message,issuedAt,expiresAt,accountId,controllerId:identityId};
 }
 function agentChallenge(purpose,bindingHash) {
@@ -719,7 +716,7 @@ test('reauthentication rejects a changed challenge account or controller before 
   for(const field of ['accountId','controllerId']){
     // Given a coherent enrollment proof for a different account/controller returned by the server.
     const challenge=loginChallenge();challenge[field]='99999999-9999-4999-8999-999999999999';
-    challenge.message=challenge.message.replace(/Binding Hash: [0-9a-f]{64}/,`Binding Hash: ${hash(['signer-controller-enrollment-v1',challenge.accountId,challenge.controllerId])}`);
+    challenge.message=challenge.message.replace(/Binding Hash: [0-9a-f]{64}/,`Binding Hash: ${hash(['marketplace-login-v1',challenge.accountId,challenge.controllerId])}`);
     const calls=[];const http=await listen(async(req,res)=>{await readBody(req);calls.push(req.url);return json(res,200,challenge);});
     const home=await mkdtemp(join(tmpdir(),'marketplace-reauth-binding-'));let store=await MarketplaceProfileStore.open(home);
     try{

@@ -5,183 +5,64 @@ import {inspectMarketplaceProofApproval} from '../dist/marketplace/proof-approva
 import {formatMarketplaceApprovalPreview} from '../dist/cli/cli.js';
 
 const accountId='00000000-0000-4000-8000-000000000100';
-const agentId='00000000-0000-4000-8000-000000000102';
 const identityId='00000000-0000-4000-8000-000000000101';
 const address='atto://'+'a'.repeat(61);
 const origin='https://marketplace.example';
-const connection={version:1,apiUrl:origin+'/v1/agent/topups',audience:'marketplace-agent',controllerIndex:0,
-  controllerAddress:address,accountId,agentId,identityId,walletFingerprint:'fingerprint'};
-const grants=[
-  {applyXnoLimit:null,expectedHash:'18b6e7f5c4752aab453791029cf884181b9c6b1e9cab40bb52a7d0050e213d94'},
-  {applyXnoLimit:'400',expectedHash:'61e6c9d73cc415c429576207b6042c174e9808f6c21aa3cd37b2a7b04f2b5e10'},
-];
-
-for(const grant of grants) {
-  test('credential approval binds fixed V2 per-asset ceilings ' + JSON.stringify(grant),()=>{
-    // Given the backend's V2 payload and the unchanged outer V1 credential hash envelope.
-    const idempotencyKey='00000000-0000-4000-8000-000000000201';
-    const credential={name:' Agent key ',expiresInDays:90,scopes:['tasks:publish','balances:read','applications:apply'],
-      publishAttoLimit:'100',publishXnoLimit:'200',applyAttoLimit:'300',applyXnoLimit:grant.applyXnoLimit};
-    const payload=['agent-credential-v2','Agent key','90','applications:apply,balances:read,tasks:publish',
-      '100','200','300',grant.applyXnoLimit??''].join('\n');
-    const binding=createHash('sha256').update(['agent-credential-v1',accountId,identityId,'CREATE','',idempotencyKey,payload].join('\n')).digest('hex');
-    assert.equal(binding,grant.expectedHash);
-    const challengeId='00000000-0000-4000-8000-000000000203';
-    const issuedAt=new Date(Date.now()-1000).toISOString();
-    const expiresAt=new Date(Date.now()+120000).toISOString();
-    const message=[
-      'Marketplace Agent Controller Proof v1',
-      'Audience: marketplace-agent',
-      'Network: live',
-      'Address: '+address,
-      'Purpose: API-key creation',
-      'Request ID: '+challengeId,
-      'Binding Hash: '+binding,
-      'Nonce: '+'ab'.repeat(32),
-      'Issued At: '+issuedAt,
-      'Expiration Time: '+expiresAt,
-    ].join('\n');
-    const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'a'.repeat(32),
-      marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
-      controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
-      action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
-      challenge:{challengeId,message,issuedAt,expiresAt}};
-
-    // When the wallet validates the action and creates the human approval summary.
-    const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
-    const summary=formatMarketplaceApprovalPreview(preview);
-
-    // Then each configured asset ceiling is visible, and changing any binding fails before signing.
-    assert.ok(summary.includes('ATTO publish ceiling: 100 atomic units'));
-    assert.ok(summary.includes('XNO publish ceiling: 200 atomic units'));
-    assert.ok(summary.includes('ATTO application ceiling: 300 atomic units'));
-    if(grant.applyXnoLimit!==null) assert.ok(summary.includes('XNO application ceiling: 400 atomic units'));
-    const changed={...request,action:{...request.action,command:{...request.action.command,
-      credential:{...credential,applyXnoLimit:'401'}}}};
-    assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-    const retiredScope=structuredClone(request);
-    retiredScope.action.command.credential.scopes[0]='jobs:publish';
-    assert.throws(()=>inspectMarketplaceProofApproval(retiredScope,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-
-    // Omission and explicit null use the same empty V2 field when another grant remains valid.
-    const omitted=structuredClone(request);
-    delete omitted.action.command.credential.applyXnoLimit;
-    if(grant.applyXnoLimit===null) assert.doesNotThrow(()=>inspectMarketplaceProofApproval(omitted,connection,()=>address));
-    else assert.throws(()=>inspectMarketplaceProofApproval(omitted,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-
-    // Empty ceiling strings are malformed and cannot be normalized into the empty canonical slot.
-    for(const field of ['publishAttoLimit','publishXnoLimit','applyAttoLimit','applyXnoLimit']) {
-      const malformed=structuredClone(request);
-      malformed.action.command.credential[field]='';
-      assert.throws(()=>inspectMarketplaceProofApproval(malformed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-    }
-  });
-}
-
-test('Shop credential approval uses V3 slots and displays explicit purchase ceilings',()=>{
-  // Given a file-readable product buyer key with one asset-specific purchase ceiling.
-  const idempotencyKey='00000000-0000-4000-8000-000000000301';
-  const credential={name:' Shop buyer ',expiresInDays:90,scopes:['products:purchase','files:read'],
-    purchaseAttoLimit:'900',purchaseXnoLimit:null};
-  const payload=['agent-credential-v3','Shop buyer','90','files:read,products:purchase','','','','','900',''].join('\n');
+const connection={version:1,apiUrl:origin+'/v1/agent/payments',audience:'marketplace-agent',controllerIndex:0,
+  controllerAddress:address,accountId,agentId:'00000000-0000-4000-8000-000000000102',identityId,walletFingerprint:'fingerprint'};
+const idempotencyKey='00000000-0000-4000-8000-000000000201';
+function approval(credential) {
+  const payload=['marketplace-credential-v1',credential.name.trim(),String(credential.expiresInDays),
+    [...credential.scopes].sort().join(','),...['publishAttoLimit','publishXnoLimit','purchaseAttoLimit',
+      'purchaseXnoLimit','productPublishAttoLimit','productPublishXnoLimit'].map(field=>credential[field]??'')].join('\n');
   const binding=createHash('sha256').update(['agent-credential-v1',accountId,identityId,'CREATE','',idempotencyKey,payload].join('\n')).digest('hex');
-  const challengeId='00000000-0000-4000-8000-000000000303';
-  const issuedAt=new Date(Date.now()-1000).toISOString();
-  const expiresAt=new Date(Date.now()+120000).toISOString();
-  const message=[
-    'Marketplace Agent Controller Proof v1','Audience: marketplace-agent','Network: live','Address: '+address,
-    'Purpose: API-key creation','Request ID: '+challengeId,'Binding Hash: '+binding,'Nonce: '+'cd'.repeat(32),
-    'Issued At: '+issuedAt,'Expiration Time: '+expiresAt,
-  ].join('\n');
-  const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'b'.repeat(32),
-    marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
-    controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
-    action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
-    challenge:{challengeId,message,issuedAt,expiresAt}};
-
-  // When the controller approval parser verifies the new canonical payload and formats its summary.
-  const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
-  const summary=formatMarketplaceApprovalPreview(preview);
-
-  // Then the exact grant is reviewable and changed or missing ceilings fail before signing.
-  assert.match(summary,/Scopes: products:purchase, files:read/);
-  assert.match(summary,/ATTO product purchase ceiling: 900 atomic units/);
-  assert.match(summary,/XNO product purchase ceiling: denied/);
-  const changed=structuredClone(request);
-  changed.action.command.credential.purchaseAttoLimit='901';
-  assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-  const missing=structuredClone(request);
-  delete missing.action.command.credential.purchaseAttoLimit;
-  assert.throws(()=>inspectMarketplaceProofApproval(missing,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-});
-
-test('product publication grant uses the cross-language V4 approval vector and shows both reservation ceilings',()=>{
-  // Given the backend golden vector for a product publisher with both asset limits.
-  const idempotencyKey='00000000-0000-4000-8000-000000000201';
-  const credential={name:' Seller ',expiresInDays:90,scopes:['products:publish'],
-    productPublishAttoLimit:'20',productPublishXnoLimit:'30'};
-  const payload=['agent-credential-v4','Seller','90','products:publish','','','','','','','20','30'].join('\n');
-  const binding=createHash('sha256').update(['agent-credential-v1',accountId,identityId,'CREATE','',idempotencyKey,payload].join('\n')).digest('hex');
-  assert.equal(binding,'ecae64f027b8bc34183f792a6802031cd5bda85ec8325a89c6bcebbc9ba3ada7');
   const challengeId='00000000-0000-4000-8000-000000000203';
-  const issuedAt=new Date(Date.now()-1000).toISOString();
-  const expiresAt=new Date(Date.now()+120000).toISOString();
+  const issuedAt=new Date(Date.now()-1000).toISOString(),expiresAt=new Date(Date.now()+120000).toISOString();
   const message=['Marketplace Agent Controller Proof v1','Audience: marketplace-agent','Network: live','Address: '+address,
-    'Purpose: API-key creation','Request ID: '+challengeId,'Binding Hash: '+binding,'Nonce: '+'ef'.repeat(32),
+    'Purpose: API-key creation','Request ID: '+challengeId,'Binding Hash: '+binding,'Nonce: '+'ab'.repeat(32),
     'Issued At: '+issuedAt,'Expiration Time: '+expiresAt].join('\n');
-  const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'d'.repeat(32),
+  return {binding,request:{version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'a'.repeat(32),
     marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
     controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
     action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
-    challenge:{challengeId,message,issuedAt,expiresAt}};
-
-  // When the local controller parser binds the command to its typed challenge.
-  const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
-  const summary=formatMarketplaceApprovalPreview(preview);
-
-  // Then both new ceilings are visible and the published cross-language digest matches exactly.
-  assert.match(summary,/Scopes: products:publish/);
-  assert.match(summary,/ATTO product publication reservation ceiling: 20 atomic units/);
-  assert.match(summary,/XNO product publication reservation ceiling: 30 atomic units/);
-  const changed=structuredClone(request);
-  changed.action.command.credential.productPublishXnoLimit='31';
+    challenge:{challengeId,message,issuedAt,expiresAt}}};
+}
+test('credential approval matches the Kotlin canonical publication and purchase vector',()=>{
+  // Given
+  const credential={name:'Shop key',expiresInDays:90,scopes:['products:purchase','products:publish'],purchaseAttoLimit:'900',productPublishAttoLimit:'10000'};
+  const {binding,request}=approval(credential);
+  // When
+  const preview=inspectMarketplaceProofApproval(request,connection,()=>address).preview;
+  // Then
+  assert.equal(binding,'4b1206545669be0d371b7f5aed4296eb04457f4528c8e00933c0e40e660193c1');
+  const text=formatMarketplaceApprovalPreview(preview);
+  assert.match(text,/900/);assert.match(text,/10000/);
+  const changed=structuredClone(request);changed.action.command.credential.productPublishAttoLimit='10001';
   assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
-  const malformed=structuredClone(request);
-  malformed.action.command.credential.productPublishAttoLimit='';
-  assert.throws(()=>inspectMarketplaceProofApproval(malformed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
 });
-
-test('legacy products:publish grants without reservation ceilings retain the V3 payload',()=>{
-  // Given a pre-V4 product publisher that may manage an existing hold but has no new-hold ceiling.
-  const idempotencyKey='00000000-0000-4000-8000-000000000401';
-  const credential={name:' Legacy publisher ',expiresInDays:90,scopes:['products:publish']};
-  const payload=['agent-credential-v3','Legacy publisher','90','products:publish','','','','','',''].join('\n');
-  const binding=createHash('sha256').update(['agent-credential-v1',accountId,identityId,'CREATE','',idempotencyKey,payload].join('\n')).digest('hex');
-  assert.equal(binding,'417640bab1fa7329bcb0a83ccac4a560fa528ada4bf7d9eea15faaec6d90fc20');
-  const challengeId='00000000-0000-4000-8000-000000000403';
-  const issuedAt=new Date(Date.now()-1000).toISOString();
-  const expiresAt=new Date(Date.now()+120000).toISOString();
-  const message=['Marketplace Agent Controller Proof v1','Audience: marketplace-agent','Network: live','Address: '+address,
-    'Purpose: API-key creation','Request ID: '+challengeId,'Binding Hash: '+binding,'Nonce: '+'fa'.repeat(32),
-    'Issued At: '+issuedAt,'Expiration Time: '+expiresAt].join('\n');
-  const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId:'e'.repeat(32),
-    marketplaceOrigin:origin,transport:'AGENT_API',proofOrigin:null,audience:'marketplace-agent',accountId,identityId,
-    controller:{network:'ATTO',address,index:0},purpose:'API-key creation',
-    action:{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey,credential}},
-    challenge:{challengeId,message,issuedAt,expiresAt}};
-
-  // When the CLI checks the legacy command and the exact V3 challenge digest.
-  const {preview}=inspectMarketplaceProofApproval(request,connection,()=>address);
-  const summary=formatMarketplaceApprovalPreview(preview);
-
-  // Then legacy product authority remains reviewable without acquiring any new-reservation ceiling.
-  assert.match(summary,/ATTO product publication reservation ceiling: denied/);
-  assert.match(summary,/XNO product publication reservation ceiling: denied/);
-  const explicitNulls=structuredClone(request);
-  explicitNulls.action.command.credential.productPublishAttoLimit=null;
-  explicitNulls.action.command.credential.productPublishXnoLimit=null;
-  assert.doesNotThrow(()=>inspectMarketplaceProofApproval(explicitNulls,connection,()=>address));
-  const changed=structuredClone(request);
-  changed.action.command.credential.productPublishAttoLimit='20';
-  assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
+test('free application and payment grants have no customer funding ceilings',()=>{
+  // Given
+  const {request}=approval({name:'Worker',expiresInDays:90,scopes:['applications:apply','payments:read','payments:write']});
+  // When / Then
+  assert.doesNotThrow(()=>inspectMarketplaceProofApproval(request,connection,()=>address));
+  for(const change of [{applyAttoLimit:'1'},{applyXnoLimit:'1'},{scopes:['balances:read']}]) {
+    const malformed=structuredClone(request);Object.assign(malformed.action.command.credential,change);
+    assert.throws(()=>inspectMarketplaceProofApproval(malformed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
+  }
+});
+test('all current asset ceilings bind exactly and malformed atoms fail before signing',()=>{
+  // Given
+  const credential={name:'Agent',expiresInDays:90,scopes:['tasks:publish','products:publish','products:purchase'],
+    publishAttoLimit:'100',publishXnoLimit:'200',purchaseAttoLimit:'300',purchaseXnoLimit:'400',productPublishAttoLimit:'500',productPublishXnoLimit:'600'};
+  const {request}=approval(credential);
+  // When / Then
+  assert.doesNotThrow(()=>inspectMarketplaceProofApproval(request,connection,()=>address));
+  for(const field of Object.keys(credential).filter(field=>field.endsWith('Limit'))) {
+    const changed=structuredClone(request);changed.action.command.credential[field]='601';
+    assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
+    for(const invalid of ['', '01','1e3','-1','0']) {
+      changed.action.command.credential[field]=invalid;
+      assert.throws(()=>inspectMarketplaceProofApproval(changed,connection,()=>address),{code:'MARKETPLACE_APPROVAL_PROTOCOL'});
+    }
+  }
 });

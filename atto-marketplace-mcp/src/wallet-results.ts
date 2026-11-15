@@ -6,7 +6,7 @@ const atomic = z.string().regex(/^(0|[1-9][0-9]{0,64})$/);
 const positiveAtomic = z.string().regex(/^[1-9][0-9]{0,64}$/);
 const hash = z.string().regex(/^[a-fA-F0-9]{64}$/).transform(value => value.toUpperCase());
 const index = z.number().int().min(0).max(0xffff_ffff);
-const permissions = z.strictObject({marketplaceFunding:z.boolean(),externalTransfers:z.boolean(),receive:z.boolean()});
+const permissions = z.strictObject({externalTransfers:z.boolean(),receive:z.boolean()});
 const identitySchema = z.strictObject({asset:z.enum(['ATTO','XNO']),network:z.string(),address:z.string(),index,permissions});
 export type WalletIdentity = z.infer<typeof identitySchema>;
 export type NativeWalletOperation = 'identity.list' | 'balance.get' | 'transfer.send' | 'transfer.status' | 'receive' | 'receivable.list';
@@ -46,7 +46,7 @@ export function publicWalletIdentity(value: WalletIdentity): WalletIdentity {
   address(parsed.address, parsed.asset);
   if (parsed.asset === 'ATTO' ? !/^atto:(live|beta|dev|local)$/.test(parsed.network) || parsed.index > 0x7fff_ffff
     : !/^nano:(mainnet|beta|dev)$/.test(parsed.network)) invalid();
-  same(parsed.permissions.receive, parsed.permissions.marketplaceFunding || parsed.permissions.externalTransfers);
+  same(parsed.permissions.receive, parsed.permissions.externalTransfers);
   return parsed;
 }
 

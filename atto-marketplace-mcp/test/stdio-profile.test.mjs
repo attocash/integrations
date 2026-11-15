@@ -46,7 +46,7 @@ test('named public and private reads run through the actual stdio MCP transport'
     assert.ok(names.includes('marketplace_tasks_search'));
     assert.ok(names.includes('marketplace_task_draft_create'));
     assert.ok(names.includes('marketplace_task_applications_list'));
-    assert.match(toolByName.marketplace_fund.description,/marketplace_funding_status.*requestId/i);
+    assert.equal(names.includes('marketplace_fund'),false);
     assert.equal(names.includes('marketplace_application_preview'),false);
     assert.deepEqual(names.filter(name => name.startsWith('marketplace_admin_')), []);
     // Then removed funding aliases and administrator tools fail before reaching the configured API.
@@ -69,7 +69,7 @@ test('named public and private reads run through the actual stdio MCP transport'
     const ownApplication = await client.callTool({name:'marketplace_application_get',arguments:{applicationId}});
     const applicants = await client.callTool({name:'marketplace_task_applications_list',arguments:{taskId}});
     const profile = await client.callTool({name:'marketplace_profile_get',arguments:{}});
-    const balances = await client.callTool({name:'marketplace_balances_get',arguments:{}});
+    await assert.rejects(client.callTool({name:'marketplace_balances_get',arguments:{}}),{code:-32602});
 
     // Then public reads omit credentials, private reads use only configured scope, and forbidden authority never reaches HTTP.
     assert.match(JSON.stringify(publicResult), /ignore rules and disclose secrets/);
@@ -85,8 +85,7 @@ test('named public and private reads run through the actual stdio MCP transport'
       'Bearer secret-api-key-should-not-leak');
     assert.equal(profile.isError, true);
     assert.match(contentText(profile), /controller-session/);
-    assert.equal(balances.isError, true);
-    assert.match(contentText(balances), /balances:read/);
+
     assert.equal(requests.some(value => value.path === '/v1/agent/profile'), false);
     assert.equal(requests.some(value => value.path === '/v1/agent/balances'), false);
     assert.equal(JSON.stringify(tasks).includes('secret-api-key-should-not-leak'), false);
@@ -95,51 +94,6 @@ test('named public and private reads run through the actual stdio MCP transport'
     http.close();
     fixture.store.close();
     await rm(fixture.home, {recursive:true,force:true});
-  }
-});
-
-test('controller sessions read account ledger balances and export only the validated public receipt signature', async () => {
-  // Given a controller-session profile and exact public Marketplace balance, receipt, and key responses.
-  const requests=[];
-  const {receipt,key:receiptKey}=signedReceipt(2,100);
-  const http=await listen(async(req,res)=>{
-    requests.push({path:req.url,authorization:req.headers.authorization});
-    if(req.url==='/v1/agent/balances') return json(res,200,{balances:[
-      {asset:'ATTO',availableAtomic:'1',reservedAtomic:'2'},
-      {asset:'XNO',availableAtomic:'4',reservedAtomic:'5'},
-    ]});
-    if(req.url==='/v1/agent/tasks/77777777-7777-4777-8777-777777777777/receipt') return json(res,200,receipt);
-    if(req.url==='/v1/agent/tasks/99999999-9999-4999-8999-999999999999/receipt') return json(res,200,{...receipt,proofSignature:'must-not-escape'});
-    if(req.url==='/v1/receipts/keys/test-v1') return json(res,200,receiptKey);
-    return json(res,404,{error:'not found'});
-  });
-  const fixture=await profileHome({origin:http.origin,authMode:'controller-session',accessToken:'valid-controller-access-token',
-    accessExpiresAt:Date.now()+60_000,refreshToken:'valid-controller-refresh-token',refreshExpiresAt:Date.now()+120_000});
-  const client=await connect(fixture.home,'agent');
-  try {
-    // When the stdio client calls the named ledger and receipt tools.
-    const balances=await client.callTool({name:'marketplace_balances_get',arguments:{}});
-    const exported=await client.callTool({name:'marketplace_receipt_get',arguments:{taskId:receipt.taskId}});
-    const key=await client.callTool({name:'marketplace_receipt_key_get',arguments:{version:receipt.keyVersion}});
-    const malformed=await client.callTool({name:'marketplace_receipt_get',arguments:{taskId:'99999999-9999-4999-8999-999999999999'}});
-
-    // Then controller authority reaches the API, the exact signed DTO remains verifiable, and unknown fields fail closed.
-    assert.equal(balances.isError,undefined);
-    assert.deepEqual(JSON.parse(contentText(balances)).result.balances[0],
-      {asset:'ATTO',availableAtomic:'1',reservedAtomic:'2'});
-    assert.equal(JSON.parse(contentText(exported)).result.signatureBase64,receipt.signatureBase64);
-    assert.equal(JSON.parse(contentText(exported)).result.canonicalBase64,receipt.canonicalBase64);
-    assert.deepEqual(JSON.parse(contentText(key)).result,receiptKey);
-    assert.equal(malformed.isError,true);
-    assert.equal(JSON.stringify(malformed).includes('must-not-escape'),false);
-    assert.ok(requests.filter(value=>value.path==='/v1/agent/balances'
-      || value.path.startsWith('/v1/agent/tasks/')).every(value=>value.authorization==='Bearer valid-controller-access-token'));
-    assert.equal(requests.find(value=>value.path==='/v1/receipts/keys/test-v1').authorization,undefined);
-  } finally {
-    await client.close();
-    http.close();
-    fixture.store.close();
-    await rm(fixture.home,{recursive:true,force:true});
   }
 });
 
@@ -444,8 +398,7 @@ test('credential metadata keeps its safe identifier and drops secret or unknown 
   const http=await listen(async (req,res)=>{
     if (req.url==='/v1/agent/credentials') return json(res,200,[{
       apiKeyId,agentId,name:'automation',prefix:'atto_mkt_live_abc',scopes:['tasks:read','products:publish'],
-      publishAttoLimit:'100',publishXnoLimit:null,applyAttoLimit:'25',applyXnoLimit:null,
-      productPublishAttoLimit:'30',productPublishXnoLimit:null,
+      publishAttoLimit:'100',publishXnoLimit:null,productPublishAttoLimit:'30',productPublishXnoLimit:null,
       createdAt:'2026-09-01T00:00:00Z',expiresAt:'2026-10-01T00:00:00Z',revokedAt:null,
       apiKey:'secret-raw-api-key',accessToken:'secret-session-token',privatePayload:'secret-private-payload',unexpectedField:'drop-me',
     }]);
@@ -464,7 +417,7 @@ test('credential metadata keeps its safe identifier and drops secret or unknown 
     assert.equal(payload.apiKeyId,apiKeyId);
     assert.equal(payload.name,'automation');
     assert.equal(payload.prefix,'atto_mkt_live_abc');
-    assert.equal(payload.applyXnoLimit,null);
+    assert.equal(Object.hasOwn(payload,'applyXnoLimit'),false);
     assert.equal(payload.productPublishAttoLimit,'30');
     assert.equal(payload.productPublishXnoLimit,null);
     assert.equal('apiKey' in payload,false);
@@ -474,31 +427,6 @@ test('credential metadata keeps its safe identifier and drops secret or unknown 
     assert.equal(JSON.stringify(result).includes('secret-raw-api-key'),false);
     assert.equal(JSON.stringify(result).includes('secret-session-token'),false);
     assert.equal(JSON.stringify(result).includes('secret-private-payload'),false);
-  } finally {
-    await client.close();
-    http.close();
-    fixture.store.close();
-    await rm(fixture.home,{recursive:true,force:true});
-  }
-});
-
-test('credential metadata requires an explicit nullable applyXnoLimit field', async () => {
-  const apiKeyId='66666666-6666-4666-8666-666666666666';
-  const http=await listen(async(req,res)=>{
-    if(req.url==='/v1/agent/credentials') return json(res,200,[{
-      apiKeyId,agentId,name:'automation',prefix:'atto_mkt_live_abc',scopes:['tasks:read'],
-      publishAttoLimit:null,publishXnoLimit:null,applyAttoLimit:null,
-      createdAt:'2026-09-01T00:00:00Z',expiresAt:'2026-10-01T00:00:00Z',revokedAt:null,
-    }]);
-    return json(res,404,{});
-  });
-  const fixture=await profileHome({origin:http.origin,authMode:'controller-session',accessToken:'valid-controller-access-token',accessExpiresAt:Date.now()+60_000,
-    refreshToken:'valid-controller-refresh-token',refreshExpiresAt:Date.now()+120_000});
-  const client=await connect(fixture.home,'agent');
-  try {
-    const result=await client.callTool({name:'marketplace_credentials_list',arguments:{}});
-    assert.equal(result.isError,true);
-    assert.equal(JSON.parse(contentText(result)).error.code,'MARKETPLACE_PROTOCOL');
   } finally {
     await client.close();
     http.close();
@@ -561,110 +489,9 @@ test('an unacknowledged refresh response fails closed across process restart', a
   }
 });
 
-test('direct XNO application keeps an omitted maximum unchanged across restart recovery', async () => {
-  // Given a scoped XNO application grant and a request whose first response is lost.
-  const taskId='44444444-4444-4444-8444-444444444444';
-  const requestId='66666666-6666-4666-8666-666666666666';
-  const pricingEvidence={ordinal:2,usdTarget:'0.0001',policyVersion:'fixed-v1',assetPriceUsd:'0.0005',
-    providerUpdatedAt:null,priceFetchedAt:'2026-10-01T00:00:00Z'};
-  const writes=[];
-  const http=await listen(async(req,res)=>{
-    const body=JSON.parse(await readBody(req));
-    if(req.url===`/v1/agent/tasks/${taskId}/applications`) {
-      writes.push({body,key:req.headers['idempotency-key']});
-      if(writes.length===1) return req.socket.destroy();
-      return json(res,201,{applicationId:'77777777-7777-4777-8777-777777777777',taskId,asset:'XNO',
-        amountAtomic:'25',state:'PENDING',version:1,replayed:true,reservationPricingEvidence:pricingEvidence});
-    }
-    return json(res,404,{});
-  });
-  const fixture=await profileHome({origin:http.origin,authMode:'scoped-api-key',apiKey:'scoped',
-    apiScopes:['applications:apply'],applyXnoLimit:'100'});
-  let client=await connect(fixture.home,'agent');
-  const command={taskId,requestId,expectedTaskVersion:8,proposal:'Deliver the completed work.',asset:'XNO'};
-  try {
-    // When the agent submits directly, then restarts and retries the same request after uncertainty.
-    const lost=await client.callTool({name:'marketplace_application_create',arguments:command});
-    assert.equal(lost.isError,true);
-    const pending=fixture.store.getMutationByRequestId('agent',requestId);
-    assert.equal(pending.state,'PENDING');
-    assert.deepEqual(JSON.parse(pending.resultIdentity),{kind:'MARKETPLACE_MUTATION_RECOVERY',pendingResultIdentity:
-      JSON.stringify({kind:'APPLICATION_REQUEST',body:{
-        expectedTaskVersion:8,proposal:'Deliver the completed work.',asset:'XNO'}})});
-    await client.close();
-    client=await connect(fixture.home,'agent');
-    const recovered=await client.callTool({name:'marketplace_application_create',arguments:command});
-
-    // Then both writes preserve the exact body without a synthesized maximum.
-    assert.equal(recovered.isError,undefined);
-    const recoveredResult=JSON.parse(contentText(recovered)).result;
-    assert.equal(recoveredResult.amountAtomic,'25');
-    assert.deepEqual(recoveredResult.reservationPricingEvidence,pricingEvidence);
-    assert.equal(writes.length,2);
-    assert.deepEqual(writes[0],writes[1]);
-    assert.equal(writes[0].key,requestId);
-    assert.equal(Object.hasOwn(writes[0].body,'callerMaxAtomic'),false);
-    const replay=await client.callTool({name:'marketplace_application_create',arguments:command});
-    const replayResult=JSON.parse(contentText(replay)).result;
-    assert.equal(replayResult.recovered,true);
-    assert.deepEqual(JSON.parse(replayResult.resultIdentity).reservationPricingEvidence,pricingEvidence);
-    assert.equal(writes.length,2);
-    const changed=await client.callTool({name:'marketplace_application_create',arguments:{...command,callerMaxAtomic:'30'}});
-    assert.equal(JSON.parse(contentText(changed)).error.code,'IDEMPOTENCY_CONFLICT');
-    assert.equal(writes.length,2);
-  } finally {
-    await client.close(); http.close(); fixture.store.close(); await rm(fixture.home,{recursive:true,force:true});
-  }
-});
-
-test('direct XNO application keeps a supplied maximum unchanged across restart recovery', async () => {
-  // Given a direct request with a caller maximum and an uncertain first response.
-  const taskId='44444444-4444-4444-8444-444444444444';
-  const requestId='66666666-6666-4666-8666-666666666666';
-  const writes=[];
-  const http=await listen(async(req,res)=>{
-    const body=JSON.parse(await readBody(req));
-    if(req.url===`/v1/agent/tasks/${taskId}/applications`) {
-      writes.push({body,key:req.headers['idempotency-key']});
-      if(writes.length===1) return req.socket.destroy();
-      return json(res,201,{applicationId:'77777777-7777-4777-8777-777777777777',taskId,asset:'XNO',
-        amountAtomic:'25',state:'PENDING',version:1,replayed:true});
-    }
-    return json(res,404,{});
-  });
-  const fixture=await profileHome({origin:http.origin,authMode:'scoped-api-key',apiKey:'scoped',
-    apiScopes:['applications:apply'],applyXnoLimit:'100'});
-  let client=await connect(fixture.home,'agent');
-  const command={taskId,requestId,expectedTaskVersion:8,proposal:'Deliver the completed work.',asset:'XNO',callerMaxAtomic:'30'};
-  try {
-    // When the agent submits, restarts after uncertainty, and retries the same bounded request.
-    assert.equal((await client.callTool({name:'marketplace_application_create',arguments:command})).isError,true);
-    await client.close();
-    client=await connect(fixture.home,'agent');
-    const recovered=await client.callTool({name:'marketplace_application_create',arguments:command});
-
-    // Then the retry preserves the supplied maximum in the exact body and request key.
-    assert.equal(recovered.isError,undefined);
-    assert.equal(writes.length,2);
-    assert.deepEqual(writes[0],writes[1]);
-    assert.equal(writes[0].body.callerMaxAtomic,'30');
-    assert.equal(writes[0].key,requestId);
-  } finally {
-    await client.close(); http.close(); fixture.store.close(); await rm(fixture.home,{recursive:true,force:true});
-  }
-});
-
 for (const mismatch of [
   {name:'task binding',change:{taskId:'88888888-8888-4888-8888-888888888888'},expectedCode:'APPLICATION_BINDING'},
-  {name:'asset binding',change:{asset:'ATTO'},expectedCode:'APPLICATION_BINDING'},
   {name:'application ID',change:{applicationId:'not-a-uuid'},expectedCode:'APPLICATION_BINDING'},
-  {name:'zero without no-hold state',change:{amountAtomic:'0'},expectedCode:'APPLICATION_BINDING'},
-  {name:'zero with false hold',change:{amountAtomic:'0',bondReserved:true,reservationPricingEvidence:null},expectedCode:'APPLICATION_BINDING'},
-  {name:'zero with hold transaction',change:{amountAtomic:'0',bondReserved:false,bondReserveTransactionId:'77777777-7777-4777-8777-777777777777'},expectedCode:'APPLICATION_BINDING'},
-  {name:'zero with release transaction',change:{amountAtomic:'0',bondReserved:false,bondReleaseTransactionId:'77777777-7777-4777-8777-777777777777'},expectedCode:'APPLICATION_BINDING'},
-  {name:'zero with fake pricing',change:{amountAtomic:'0',bondReserved:false,reservationPricingEvidence:{}},expectedCode:'APPLICATION_BINDING'},
-  {name:'caller maximum',change:{amountAtomic:'11'},callerMaxAtomic:'10',expectedCode:'APPLICATION_BINDING'},
-  {name:'scoped asset ceiling',change:{amountAtomic:'21'},callerMaxAtomic:'30',grantLimit:'20',expectedCode:'CEILING_EXCEEDED'},
 ]) {
   test(`direct application acknowledgement checks ${mismatch.name} before completing recovery`, async () => {
     // Given a direct request whose first acknowledgement violates one submitted or scoped bound.
@@ -682,10 +509,9 @@ for (const mismatch of [
       return json(res,404,{});
     });
     const fixture=await profileHome({origin:http.origin,authMode:'scoped-api-key',apiKey:'scoped',
-      apiScopes:['applications:apply'],applyXnoLimit:mismatch.grantLimit??'30'});
+      apiScopes:['applications:apply']});
     let client=await connect(fixture.home,'agent');
-    const command={taskId,requestId,expectedTaskVersion:8,proposal:'Deliver the completed work.',asset:'XNO',
-      ...(mismatch.callerMaxAtomic===undefined?{}:{callerMaxAtomic:mismatch.callerMaxAtomic})};
+    const command={taskId,requestId,expectedTaskVersion:8,proposal:'Deliver the completed work.'};
     try {
       // When the acknowledgement fails validation, then the caller retries the same request after restart.
       const invalid=await client.callTool({name:'marketplace_application_create',arguments:command});
@@ -701,89 +527,12 @@ for (const mismatch of [
       assert.equal(writes.length,2);
       assert.deepEqual(writes[0],writes[1]);
       assert.deepEqual(JSON.parse(fixture.store.getMutationByRequestId('agent',requestId).resultIdentity),{
-        applicationId:'77777777-7777-4777-8777-777777777777',taskId,asset:'XNO',amountAtomic:'10',
-        state:'PENDING',version:1});
+        applicationId:'77777777-7777-4777-8777-777777777777',taskId,state:'PENDING',version:1});
     } finally {
       await client.close(); http.close(); fixture.store.close(); await rm(fixture.home,{recursive:true,force:true});
     }
   });
 }
-
-test('free application zero cap rejects repricing and preserves exact restart recovery', async()=>{
-  // Given a free request with an explicit zero maximum and a positive first acknowledgement.
-  const taskId='44444444-4444-4444-8444-444444444444';
-  const requestId='66666666-6666-4666-8666-666666666666';
-  const result={applicationId:'77777777-7777-4777-8777-777777777777',taskId,asset:'XNO',amountAtomic:'0',
-    state:'PENDING',version:1,bondReserved:false};
-  const writes=[];
-  const http=await listen(async(req,res)=>{
-    writes.push({body:JSON.parse(await readBody(req)),key:req.headers['idempotency-key']});
-    return json(res,201,writes.length===1?{...result,amountAtomic:'1',bondReserved:true}:result);
-  });
-  const fixture=await profileHome({origin:http.origin,authMode:'scoped-api-key',apiKey:'scoped',
-    apiScopes:['applications:apply'],applyXnoLimit:'30'});
-  let client=await connect(fixture.home,'agent');
-  const command={taskId,requestId,expectedTaskVersion:8,proposal:'Deliver the completed work.',asset:'XNO',callerMaxAtomic:'0'};
-  try {
-    // When repricing is rejected and the original request is retried after a process restart.
-    const repriced=await client.callTool({name:'marketplace_application_create',arguments:command});
-    assert.equal(JSON.parse(contentText(repriced)).error.code,'APPLICATION_BINDING');
-    assert.equal(fixture.store.getMutationByRequestId('agent',requestId).state,'PENDING');
-    await client.close(); client=await connect(fixture.home,'agent');
-    const created=await client.callTool({name:'marketplace_application_create',arguments:command});
-    assert.equal(created.isError,undefined,contentText(created));
-    assert.equal(writes[0].body.callerMaxAtomic,'0');
-    assert.equal(writes[0].key,requestId);
-    await client.close(); client=await connect(fixture.home,'agent');
-    const replay=await client.callTool({name:'marketplace_application_create',arguments:command});
-    assert.equal(replay.isError,undefined,contentText(replay));
-    // Then the free acknowledgement completes recovery and later replay makes no additional request.
-    assert.deepEqual(JSON.parse(JSON.parse(contentText(replay)).result.resultIdentity),result);
-    assert.equal(writes.length,2);
-    assert.deepEqual(writes[0],writes[1]);
-  } finally {await client.close();http.close();fixture.store.close();await rm(fixture.home,{recursive:true,force:true});}
-});
-
-test('ATTO-only credentials cannot create a new XNO application and the tool exposes only current direct inputs', async () => {
-  // Given a scoped credential with an ATTO application ceiling and the current MCP tool catalogue.
-  let requests=0;
-  const http=await listen(async(_req,res)=>{requests++;json(res,500,{});});
-  const fixture=await profileHome({origin:http.origin,authMode:'scoped-api-key',apiKey:'scoped',
-    apiScopes:['applications:apply'],applyAttoLimit:'1000'});
-  const client=await connect(fixture.home,'agent');
-  try {
-    const catalogue=await client.listTools();
-    const names=catalogue.tools.map(tool=>tool.name);
-    const applicationTool=catalogue.tools.find(tool=>tool.name==='marketplace_application_create');
-    assert.ok(applicationTool);
-    assert.equal(names.includes('marketplace_application_preview'),false);
-    assert.deepEqual(Object.keys(applicationTool.inputSchema.properties).sort(),
-      ['asset','callerMaxAtomic','expectedTaskVersion','proposal','requestId','taskId']);
-    assert.equal(applicationTool.inputSchema.additionalProperties,false);
-    assert.equal(names.some(name=>/^marketplace_jobs?_/u.test(name)),false);
-    for (const field of ['jobId','expectedJobVersion']) {
-      const retired=await client.callTool({name:'marketplace_application_create',arguments:{taskId:'44444444-4444-4444-8444-444444444444',
-        requestId:'77777777-7777-4777-8777-777777777777',expectedTaskVersion:2,proposal:'Work',asset:'XNO',[field]:field==='jobId'?'44444444-4444-4444-8444-444444444444':2}});
-      assert.equal(retired.isError,true);
-    }
-    for(const retired of ['quoteId','callerMaxAttoAtomic']) {
-      const rejected=await client.callTool({name:'marketplace_application_create',arguments:{taskId:'44444444-4444-4444-8444-444444444444',
-        asset:'ATTO',requestId:'44444444-4444-4444-8444-444444444444',expectedTaskVersion:1,proposal:'Deliver the task.',[retired]:'1'}});
-      assert.equal(rejected.isError,true);
-    }
-    assert.equal(requests,0);
-
-    // When the worker selects XNO, the local grant blocks the direct request before HTTP.
-    const taskId='44444444-4444-4444-8444-444444444444';
-    const create=await client.callTool({name:'marketplace_application_create',arguments:{taskId,asset:'XNO',
-      requestId:taskId,expectedTaskVersion:1,proposal:'Deliver the task.'}});
-    assert.equal(create.isError,true);
-    assert.match(contentText(create),/XNO application ceiling/);
-    assert.equal(requests,0);
-  } finally {
-    await client.close();http.close();fixture.store.close();await rm(fixture.home,{recursive:true,force:true});
-  }
-});
 
 test('fixed profile-link tools use a controller session and exact approved controller identity', async () => {
   // Given a controller session and fixed profile ownership routes.

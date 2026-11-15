@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
+import { once } from 'node:events';
 import test from 'node:test';
 import { setTimeout as delay } from 'node:timers/promises';
 import { pathToFileURL } from 'node:url';
@@ -15,45 +16,6 @@ const applicationUrl = process.env.ATTO_TEST_CLI_PACKAGE_DIR
   : new URL('../dist/application/app.js', import.meta.url);
 const { AttoApplication } = await import(applicationUrl.href);
 const { MarketData } = await import(new URL('../pricing/market.js', applicationUrl).href);
-
-const internalMarketplaceConfig = { apiUrl: 'http://127.0.0.1:43210/v1/agent/topups', audience: 'marketplace-test' };
-const internalMarketplaceIntentId = '00000000-0000-4000-8000-000000000079';
-
-function marketplaceIntentRequest(app, requestId = 'marketplace-intent-existing-01', amountAtomic = '2', options = {}) {
-  const { payToIndex = 1, index, intentId = internalMarketplaceIntentId } = options;
-  const resourceUrl = `${internalMarketplaceConfig.apiUrl}/${intentId}`;
-  const requirement = {
-    x402Version: 2,
-    resource: { url: resourceUrl },
-    accepts: [{ scheme: 'exact', network: 'atto:local', amount: amountAtomic, asset: 'atto',
-      payTo: app.store.get('addresses').find(value => value.index === payToIndex).address,
-      maxTimeoutSeconds: 300, extra: { assetTransferMethod: 'native', paymentFlow: 'authorization' } }],
-    extensions: { 'payment-identifier': { schema: { type: 'object', properties: { id: { type: 'string' } } }, info: { required: true } } },
-  };
-  return {
-    requestId, intentId, amountAtomic, paymentIdentifier: requestId,
-    paymentRequired: Buffer.from(JSON.stringify(requirement), 'utf8').toString('base64'),
-    apiUrl: internalMarketplaceConfig.apiUrl, audience: internalMarketplaceConfig.audience, resourceUrl,
-    expiresAt: new Date(Date.now() + 300_000).toISOString(),
-    ...(index === undefined ? {} : { index }),
-  };
-}
-
-async function publishCompetingSend(t, f) {
-  const directory = await mkdtemp(join(tmpdir(), 'atto marketplace-intent conflict-'));
-  const phrase = f.mnemonic();
-  const app = new AttoApplication({ directory, secrets: { get: async () => phrase, set: async () => undefined } });
-  t.after(async () => {
-    await app.close();
-    await rm(directory, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
-  });
-  await app.createWallet(phrase);
-  await app.call('address_derive', { index: 1 });
-  await app.call('wallet_configure', { network: 'LOCAL', nodeUrl: f.url, workerUrl: f.url,
-    representative: f.addresses[0].address, autoReceive: false });
-  return app.call('send', { destination: f.recipient.address, amount: '1', unit: 'RAW',
-    requestId: 'marketplace-intent-canonical-conflict', index: 0 });
-}
 
 for (const mode of ['transient', 'persistent', 'unexpected']) {
   test(`payment fixture cleanup handles ${mode} file-removal errors`, { timeout: 30_000 }, async () => {
@@ -116,143 +78,6 @@ test('a confirmed payment stays published when speculative persistence fails', a
   assert.equal(result.status, 'published');
   assert.equal((await f.app.call('journal_get', { requestId: 'preparation-storage-failure' })).record.status, 'published');
   assert.equal(f.state.publications.length, 1);
-});
-
-test('private Marketplace child signs one exact existing intent and recovers the same signature after restart', { timeout: 30_000 }, async t => {
-  // Given an approved LOCAL wallet and an exact existing-intent challenge bound to its private Marketplace child.
-  const f = await fixture(t, [10], undefined, '100', undefined, { internalMarketplacePayment: internalMarketplaceConfig });
-  const request = marketplaceIntentRequest(f.app);
-  await f.reopen('mcp');
-
-  // When Marketplace checks recovery before the wallet has seen this request.
-  const firstUseStatus = await f.app.call('marketplace_pay_intent_status', { requestId: request.requestId });
-
-  // Then a missing local record is a normal first-use result, so Marketplace can request a signature.
-  assert.deepEqual(firstUseStatus, { requestId: request.requestId, paymentState: 'NOT_FOUND' });
-
-  // When the private child signs the request and the same request is retried.
-  const first = await f.app.call('marketplace_pay_intent', request);
-  const retry = await f.app.call('marketplace_pay_intent', request);
-
-  // Then the wallet saves one exact signature, reserves its source, and never submits or publishes it.
-  assert.equal(first.paymentState, 'READY');
-  assert.equal(first.requestId, request.requestId);
-  assert.equal(first.intentId, request.intentId);
-  assert.equal(first.paymentIdentifier, request.requestId);
-  assert.equal(typeof first.paymentSignature, 'string');
-  assert.equal(retry.paymentSignature, first.paymentSignature);
-  assert.equal(retry.hash, first.hash);
-  assert.equal(f.app.ledger.get(request.requestId).status, 'signed');
-  assert.equal(f.app.ledger.get(request.requestId).external.kind, 'marketplace-intent');
-  assert.equal(f.app.ledger.get(request.requestId).external.paymentState, 'PREPARED');
-  assert.equal(f.app.ledger.usage().pendingRaw, request.amountAtomic);
-  assert.equal(f.state.publicationAttempts.length, 0);
-  assert.doesNotMatch(JSON.stringify((await f.app.call('journal_get', { requestId: request.requestId })).record), /paymentSignature|transactionJson/);
-
-  // When the child restarts and Marketplace asks for the persisted request status.
-  await f.reopen('mcp');
-  const recovered = await f.app.call('marketplace_pay_intent_status', { requestId: request.requestId });
-
-  // Then recovery returns the byte-identical signature and rejects a challenge from another origin.
-  assert.equal(recovered.paymentSignature, first.paymentSignature);
-  assert.equal(recovered.hash, first.hash);
-  assert.equal(recovered.nativeState, 'unknown');
-  assert.equal(f.app.ledger.usage().pendingRaw, request.amountAtomic);
-  await assert.rejects(f.app.call('marketplace_pay_intent', { ...request, apiUrl: 'https://attacker.example/v1/agent/topups' }), { code: 'MARKETPLACE_CONFIGURATION' });
-  await assert.rejects(f.app.call('marketplace_pay_intent', { ...request, resourceUrl: `${request.apiUrl}/another-intent` }), { code: 'MARKETPLACE_RESOURCE_MISMATCH' });
-  await assert.rejects(f.app.call('marketplace_pay_intent', { ...request, expiresAt: new Date(Date.now() - 1000).toISOString() }), { code: 'MARKETPLACE_CHALLENGE_EXPIRED' });
-  const changed = JSON.parse(Buffer.from(request.paymentRequired, 'base64').toString('utf8'));
-  changed.accepts[0].payTo = f.addresses[0].address;
-  await assert.rejects(f.app.call('marketplace_pay_intent', { ...request,
-    paymentRequired: Buffer.from(JSON.stringify(changed), 'utf8').toString('base64') }), { code: 'REQUEST_CONFLICT' });
-  assert.equal((await f.app.call('marketplace_pay_intent_status', { requestId: request.requestId })).paymentSignature, first.paymentSignature);
-  assert.equal(f.state.publicationAttempts.length, 0);
-});
-
-test('native publication releases a saved Marketplace-intent reservation before another payment attempt', { timeout: 30_000 }, async t => {
-  // Given an approved private Marketplace wallet with two source accounts and one signed existing intent.
-  const f = await fixture(t, [10, 10], undefined, '100', undefined, { internalMarketplacePayment: internalMarketplaceConfig });
-  await f.reopen('mcp');
-  const original = marketplaceIntentRequest(f.app, 'marketplace-intent-published-01', '2', { payToIndex: 2, index: 0 });
-  const prepared = await f.app.call('marketplace_pay_intent', original);
-  const transactionJson = f.app.ledger.externalSecretsFor(original.requestId).transactionJson;
-  const transaction = AttoTransaction.fromJson(transactionJson);
-  f.observeCanonical(transaction);
-
-  // When a new payment starts, the wallet reconciles the older signed transaction with native evidence.
-  const next = marketplaceIntentRequest(f.app, 'marketplace-intent-published-02', '2', { payToIndex: 2, index: 1 });
-  const nextPayment = await f.app.call('marketplace_pay_intent', next);
-
-  // Then the first transfer moves from reserved to published usage and the next approved source can sign.
-  const completed = f.app.ledger.get(original.requestId);
-  assert.equal(completed.status, 'published');
-  assert.equal(completed.external.nativeState, 'confirmed');
-  assert.equal(f.app.ledger.usage().pendingRaw, next.amountAtomic);
-  assert.equal(f.app.ledger.usage().rolling[0].publishedRaw, original.amountAtomic);
-  assert.equal(nextPayment.paymentState, 'READY');
-  assert.equal(nextPayment.nativeState, 'unknown');
-  assert.equal(f.app.ledger.get(next.requestId).index, 1);
-  const recovered = await f.app.call('marketplace_pay_intent_status', { requestId: original.requestId });
-  assert.equal(recovered.paymentState, 'READY');
-  assert.equal(recovered.nativeState, 'confirmed');
-  assert.equal(recovered.paymentSignature, prepared.paymentSignature);
-  assert.equal(f.state.publicationAttempts.length, 0);
-  assert.equal(prepared.paymentSignature.length > 0, true);
-});
-
-test('native canonical rejection is terminal and never returns the rejected payment signature', { timeout: 30_000 }, async t => {
-  // Given a signed Marketplace intent that has not been submitted by this wallet.
-  const f = await fixture(t, [10], undefined, '100', undefined, { internalMarketplacePayment: internalMarketplaceConfig });
-  await f.reopen('mcp');
-  const request = marketplaceIntentRequest(f.app, 'marketplace-intent-rejected-01');
-  const prepared = await f.app.call('marketplace_pay_intent', request);
-
-  // When another valid block from the same source wins the exact native account height.
-  const competing = await publishCompetingSend(t, f);
-  assert.equal(competing.status, 'published');
-  const failed = await f.app.call('marketplace_pay_intent_status', { requestId: request.requestId });
-  const retry = await f.app.call('marketplace_pay_intent', request);
-
-  // Then native evidence marks the intent terminal, releases its reservation, and hides its signed header.
-  assert.equal(failed.requestId, request.requestId);
-  assert.equal(failed.intentId, request.intentId);
-  assert.equal(failed.network, 'atto:local');
-  assert.equal(failed.amountAtomic, request.amountAtomic);
-  assert.equal(failed.payer, prepared.payer);
-  assert.equal(failed.hash, prepared.hash);
-  assert.equal(failed.paymentState, 'FAILED');
-  assert.equal(failed.nativeState, 'rejected');
-  assert.equal(failed.failureReason, 'NATIVE_TRANSACTION_REJECTED');
-  assert.equal('paymentSignature' in failed, false);
-  assert.equal(retry.paymentState, 'FAILED');
-  assert.equal(retry.failureReason, 'NATIVE_TRANSACTION_REJECTED');
-  assert.equal('paymentSignature' in retry, false);
-  assert.equal(f.app.ledger.get(request.requestId).status, 'failed');
-  assert.equal(f.app.ledger.get(request.requestId).external.paymentState, 'FAILED');
-  assert.equal(f.app.ledger.usage().pendingRaw, '0');
-  assert.equal(f.state.publicationAttempts.length, 1);
-});
-
-test('missing native publication evidence keeps the Marketplace signature and reservation unresolved', { timeout: 30_000 }, async t => {
-  // Given an exact saved Marketplace payment whose hash and canonical account-height transaction are unavailable.
-  const f = await fixture(t, [10], undefined, '100', undefined, { internalMarketplacePayment: internalMarketplaceConfig });
-  await f.reopen('mcp');
-  const request = marketplaceIntentRequest(f.app, 'marketplace-intent-unresolved-01');
-  const prepared = await f.app.call('marketplace_pay_intent', request);
-  f.state.hideHashLookup = true;
-
-  // When private status checks native history and receives no conclusive transaction.
-  const status = await f.app.call('marketplace_pay_intent_status', { requestId: request.requestId });
-
-  // Then the wallet retains the exact recoverable signature and keeps its account and budget reserved.
-  assert.equal(status.paymentState, 'READY');
-  assert.equal(status.nativeState, 'unknown');
-  assert.equal(status.paymentSignature, prepared.paymentSignature);
-  assert.equal(status.hash, prepared.hash);
-  assert.equal(f.app.ledger.get(request.requestId).status, 'signed');
-  assert.equal(f.app.ledger.usage().pendingRaw, request.amountAtomic);
-  assert.ok(f.state.requests.some(value => value.path === `/transactions/${prepared.hash}`));
-  assert.ok(f.state.requests.some(value => value.path.endsWith('/transactions/stream')));
 });
 
 test('a real CLI send exits while preparation continues and the next CLI send consumes that cache', { timeout: process.platform === 'win32' ? 60_000 : 20_000 }, async t => {
@@ -360,32 +185,46 @@ test('Concurrent sessions choose distinct accounts and atomically share one budg
   assert.equal(f.state.publications.length, 2);
 });
 
-test('A lost internal-publication response resumes the same plan without duplicate transfers', { timeout: 20_000 }, async t => {
-  // Given a node that commits the donor transaction but loses its response.
-  const f = await fixture(t, [1, 1], { indexes: [0, 1], consolidate: true }, '2');
-  const request = f.request('resume-plan', '2', { metadata: { reason: 'One payment' } });
-  f.state.failPublication = 1;
-  f.state.hideHashLookup = true;
+for (const [position, kind] of [[1, 'SEND'], [2, 'RECEIVE']]) {
+  test(`A lost internal-publication response resumes the same plan without duplicate transfers (${kind})`, { timeout: 20_000 }, async t => {
+    // Given a node that commits the selected internal transaction but loses its response.
+    const f = await fixture(t, [1, 1], { indexes: [0, 1], consolidate: true }, '2');
+    const request = f.request(`resume-plan-${kind}`, '2', { metadata: { reason: 'One payment' } });
+    f.state.failPublication = position;
+    f.state.hideHashLookup = true;
 
-  // When the caller reopens the application and retries using canonical account history.
-  await assert.rejects(f.app.call('send', request), { code: 'PUBLICATION_UNCERTAIN' });
-  const before = (await f.app.call('journal_get', { requestId: request.requestId })).record;
-  assert.equal(before.plan.steps[0].status, 'unknown');
-  assert.equal(f.state.publications.length, 1);
-  await f.reopen();
-  const result = await f.app.call('send', f.request(request.requestId, '2'));
+    // When the caller reopens the application and retries using canonical account history.
+    await assert.rejects(f.app.call('send', request), { code: 'PUBLICATION_UNCERTAIN' });
+    const before = f.app.ledger.get(request.requestId), step = before.plan.steps[position - 1];
+    assert.equal(step.status, 'unknown');
+    assert.ok(step.candidateBinding);
+    assert.equal(f.state.publications.length, position);
+    assert.equal(f.state.publicationAttempts.length, position);
+    assert.equal(f.state.publications[position - 1].toJson(), step.transactionJson);
+    assert.equal(f.state.publications[position - 1].hash.toString(), step.hash);
+    await f.reopen();
+    const result = await f.app.call('send', f.request(request.requestId, '2'));
 
-  // Then the original donor hash is retained and only the missing receive and final send execute.
-  const after = (await f.app.call('journal_get', { requestId: request.requestId })).record;
-  assert.equal(result.status, 'published');
-  assert.deepEqual(result.metadata, request.metadata);
-  assert.equal(after.plan.steps[0].hash, before.plan.steps[0].hash);
-  assert.equal(after.index, before.index);
-  assert.equal(f.state.publications.length, 3);
-  assert.equal(new Set(f.state.publicationAttempts.map(value => value.hash.toString())).size, 3);
-  assert.ok(f.state.requests.some(value => value.path.endsWith('/transactions/stream') && value.method === 'GET'));
-  assert.equal((await f.app.call('limits_get')).rolling[0].publishedRaw, '2');
-});
+    // Then canonical observation retains the committed bytes/hash/binding without another publication attempt.
+    const after = f.app.ledger.get(request.requestId), retained = after.plan.steps[position - 1];
+    assert.equal(result.status, 'published');
+    assert.deepEqual(result.metadata, request.metadata);
+    assert.equal(retained.hash, step.hash);
+    assert.equal(retained.transactionJson, step.transactionJson);
+    assert.equal(retained.blockJson, step.blockJson);
+    assert.equal(retained.candidateBinding, step.candidateBinding);
+    assert.equal(after.index, before.index);
+    assert.deepEqual(after.plan.indexes, before.plan.indexes);
+    assert.equal(f.state.publications.length, 3);
+    assert.equal(f.state.publicationAttempts.length, 3);
+    assert.equal(f.state.publicationAttempts.filter(value => value.hash.toString() === step.hash).length, 1);
+    assert.deepEqual(f.state.publications.map(value => JSON.parse(value.block.toJson()).type), ['SEND', 'RECEIVE', 'SEND']);
+    assert.equal(new Set(f.state.publicationAttempts.map(value => value.hash.toString())).size, 3);
+    assert.ok(f.state.requests.some(value => value.path.endsWith('/transactions/stream') && value.method === 'GET'));
+    assert.equal((await f.app.call('limits_get')).rolling[0].publishedRaw, '2');
+    assert.equal(f.app.ledger.journalList().items.length, 1);
+  });
+}
 
 test('Metadata is immutable across retries while omitted metadata retains the original', { timeout: 20_000 }, async t => {
   // Given a published payment with nested caller metadata.
@@ -667,3 +506,67 @@ test('concurrent same-ID label sends and publication recovery preserve one debit
   assert.equal(f.state.publications.length, 1);
   assert.equal((await f.app.call('limits_get')).rolling[0].publishedRaw, '1');
 });
+
+for (const [position, kind] of [[1, 'SEND'], [2, 'RECEIVE']]) {
+  test(`an interrupted consolidation ${kind} replays its retained step before continuing the original plan`, { timeout: 20_000 }, async t => {
+    // Given an actual CLI process held before forwarding the selected consolidation step.
+    const f = await fixture(t, [1, 1], { indexes: [0, 1], consolidate: true }, '2');
+    const request = f.request(`crash-consolidation-${kind}`, '2', { metadata: { reason: 'Original plan' } });
+    f.state.pauseBeforePublication = position;
+    f.state.holdBeforePublication = gate();
+    const harness = `
+      const { OsSecretStore } = await import(process.env.ATTO_TEST_SECRETS_MODULE);
+      OsSecretStore.prototype.get = async () => process.env.ATTO_TEST_PHRASE;
+      process.argv = [process.execPath, 'atto', '--data-dir', process.env.ATTO_TEST_DIRECTORY, '--json', 'send',
+        process.env.ATTO_TEST_DESTINATION, '2', '--unit', 'RAW', '--pool', '--request-id', process.env.ATTO_TEST_REQUEST];
+      await import(process.env.ATTO_TEST_MAIN);
+    `;
+    const child = spawn(process.execPath, ['--input-type=module', '--eval', harness], {
+      stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, NO_UPDATE_NOTIFIER: '1',
+        ATTO_TEST_SECRETS_MODULE: new URL('../storage/secrets.js', applicationUrl).href,
+        ATTO_TEST_MAIN: new URL('../cli/main.js', applicationUrl).href,
+        ATTO_TEST_PHRASE: f.mnemonic(), ATTO_TEST_DIRECTORY: f.directory,
+        ATTO_TEST_DESTINATION: request.destination, ATTO_TEST_REQUEST: request.requestId },
+    });
+    let diagnostics='';
+    child.stdout.on('data',value=>{diagnostics+=value;});child.stderr.on('data',value=>{diagnostics+=value;});
+    t.after(() => { if (child.exitCode === null) child.kill('SIGKILL'); });
+    await until(() => { assert.equal(child.exitCode,null,diagnostics); return Boolean(f.state.heldCandidate); });
+    const before = f.app.ledger.get(request.requestId);
+    const step = before.plan.steps[position - 1];
+    assert.ok(step.candidateBinding);
+    assert.equal(step.hash, f.state.heldCandidate.hash.toString());
+    assert.equal(step.transactionJson, f.state.heldCandidate.toJson());
+    assert.equal(f.state.publications.length, position - 1);
+    assert.ok(before.plan.steps.slice(position).every(value => value.status === 'planned'));
+    // When the process dies, then the same wallet and request resume after restart.
+    const closed = once(child, 'close'); child.kill('SIGKILL'); await closed;
+    // Explicitly discard at the server: child close alone does not order the server's disconnect observation.
+    f.state.heldResponse.destroy();
+    f.state.holdBeforePublication.release();
+    await until(() => f.state.discardedCandidate?.hash.toString() === step.hash);
+    const stopped = f.app.ledger.get(request.requestId);
+    assert.equal(f.state.publications.length, position - 1);
+    assert.equal(f.state.publications.some(value => value.hash.toString() === step.hash), false);
+    assert.deepEqual(stopped.plan.steps[position - 1], step);
+    assert.ok(stopped.plan.steps.slice(position).every(value => value.status === 'planned'
+      && value.hash === undefined && value.transactionJson === undefined && value.candidateBinding === undefined));
+    f.state.pauseBeforePublication = 0;
+    await f.reopen();
+    const result = await f.app.call('send', { ...request, metadata: undefined });
+    // Then exact native bytes are replayed once, each following step waits, and only the final payment is charged.
+    const after = f.app.ledger.get(request.requestId);
+    assert.equal(result.status, 'published');
+    assert.equal(result.index, before.index);
+    assert.deepEqual(after.plan.indexes, before.plan.indexes);
+    assert.equal(after.plan.steps[position - 1].transactionJson, step.transactionJson);
+    assert.equal(after.plan.steps[position - 1].hash, step.hash);
+    assert.equal(after.plan.steps[position - 1].candidateBinding, step.candidateBinding);
+    assert.equal(f.state.publicationAttempts[position].toJson(), step.transactionJson);
+    assert.deepEqual(f.state.publications.map(value => JSON.parse(value.block.toJson()).type), ['SEND', 'RECEIVE', 'SEND']);
+    assert.equal(new Set(f.state.publications.map(value => value.hash.toString())).size, 3);
+    assert.equal(f.state.publicationAttempts.length, 4);
+    assert.equal((await f.app.call('limits_get')).rolling[0].publishedRaw, '2');
+    assert.equal(f.app.ledger.journalList().items.length, 1);
+  });
+}

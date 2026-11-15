@@ -15,6 +15,10 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
     await runWalletHost(env);
     return;
   }
+  if (argv[0] === 'setup' && argv.slice(1).some(arg => arg === '--help' || arg === '-h')) {
+    printHelp();
+    return;
+  }
   if(argv[0]==='setup'&&(argv.includes('--interactive')||argv.slice(1).every(arg=>!arg.startsWith('--')||['--home','--profile','--origin','--audience','--advanced'].includes(arg)))) {
     const {runGuidedSetup}=await import('./guided-setup.js');
     await runGuidedSetup(argv.slice(1),env);return;
@@ -33,7 +37,7 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
   }
   const options = parseArgs(argv, env);
   if (options.help) {
-    process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup [--advanced] [--home <directory>] [--profile <name>] [--origin <origin> --audience <audience>]\nDefaults: production Marketplace, main profile, per-user Marketplace home (override with --home).\nReuse the selected Atto CLI wallet and its current authority, choose Marketplace purposes, and optionally configure Nano. Use --advanced to choose accounts or configure native limits.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp [--profile <profile-id>] [--home <private-directory>] [--payment-handoff-dir <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --apply-atto-limit/--apply-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits apply only to new reservation holds; products:publish without them can manage existing holds.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
+    printHelp();
     return;
   }
   const home = options.home ?? env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env);
@@ -54,7 +58,6 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
   process.stdin.once('end', onSignal);
   try {
     server = createMarketplaceMcpServer({ profiles, profileId, env,
-      ...(options.paymentHandoffDirectory ? { paymentHandoffDirectory: resolve(options.paymentHandoffDirectory) } : {}),
       ...(options.filesDirectory ? { filesDirectory: options.filesDirectory } : {}) });
     server.server.onerror = () => process.stderr.write('Marketplace MCP protocol error.\n');
     await server.connect(new StdioServerTransport());
@@ -64,14 +67,17 @@ export async function run(argv = process.argv.slice(2), env = process.env): Prom
   }
 }
 
-function parseArgs(argv: string[], env: NodeJS.ProcessEnv): { profile?: string; home?: string; paymentHandoffDirectory?: string; filesDirectory?: string; help: boolean } {
-  const result: { profile?: string; home?: string; paymentHandoffDirectory?: string; filesDirectory?: string; help: boolean } = { help: false };
+function printHelp(): void {
+  process.stdout.write('Marketplace MCP\n\nGuided setup: atto-marketplace-mcp setup [--advanced] [--home <directory>] [--profile <name>] [--origin <origin> --audience <audience>]\nDefaults: production Marketplace, main profile, per-user Marketplace home (override with --home).\nReuse the selected Atto CLI wallet and its current authority, choose Marketplace purposes, and optionally configure Nano. Use --advanced to choose accounts or configure native limits.\n\nDedicated wallet: atto-marketplace-mcp wallet setup --help\nShared recovery: new Nano wallets use the selected Atto recovery phrase.\nApproval: atto-marketplace-mcp approve <private-request-file> [--home <private-directory>]\n\nUsage: atto-marketplace-mcp [--profile <profile-id>] [--home <private-directory>] [--files-dir <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --origin <https-origin> --audience <agent-api-audience> --controller-network <ATTO|NANO> --controller-address <address> --controller-index <index> --mode <controller-session|scoped-api-key> [credential grant options]\n       atto-marketplace-mcp setup --profile <id> --complete [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <id> --reauthenticate [--home <private-directory>]\n       atto-marketplace-mcp setup --profile <new-id> --from-profile <controller-profile> --credential-id <api-key-id> [--home <private-directory>]\n\nCredential grants use repeatable --scope values. Per-asset limits include --publish-atto-limit/--publish-xno-limit, --purchase-atto-limit/--purchase-xno-limit and --product-publish-atto-limit/--product-publish-xno-limit. Product-publish limits bound the advertised quantity times unit price. Applications are free. Direct payment evidence uses payments:read and payments:write.\n\nFile tools require an existing absolute private directory via --files-dir or MARKETPLACE_MCP_FILES_DIR; there is no default.\n');
+}
+
+function parseArgs(argv: string[], env: NodeJS.ProcessEnv): { profile?: string; home?: string; filesDirectory?: string; help: boolean } {
+  const result: { profile?: string; home?: string; filesDirectory?: string; help: boolean } = { help: false };
   for (let index = 0; index < argv.length; index++) {
     const arg = argv[index];
     if (arg === '--help' || arg === '-h') result.help = true;
     else if (arg === '--profile' && argv[index + 1]) { const value = argv[++index]; if (!value) throw new Error('Missing profile ID.'); result.profile = value; }
     else if (arg === '--home' && argv[index + 1]) { const value = argv[++index]; if (!value) throw new Error('Missing profile directory.'); result.home = value; }
-    else if (arg === '--payment-handoff-dir' && argv[index + 1]) { const value = argv[++index]; if (!value) throw new Error('Missing payment handoff directory.'); result.paymentHandoffDirectory = value; }
     else if (arg === '--files-dir' && argv[index + 1]) { const value = argv[++index]; if (!value) throw new Error('Missing private files directory.'); result.filesDirectory = value; }
     else throw new Error(`Unknown or incomplete option: ${arg}`);
   }
@@ -79,9 +85,6 @@ function parseArgs(argv: string[], env: NodeJS.ProcessEnv): { profile?: string; 
     throw new Error('Profile IDs must be 1 to 48 letters, digits, underscores or hyphens.');
   }
   if (result.home && (result.home.includes('\0') || result.home.length > 2048)) throw new Error('Profile directory path is invalid.');
-  if (result.paymentHandoffDirectory && (result.paymentHandoffDirectory.includes('\0') || result.paymentHandoffDirectory.length > 4096)) throw new Error('Payment handoff directory path is invalid.');
-  if (!result.paymentHandoffDirectory && env.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR) result.paymentHandoffDirectory = env.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR;
-  if (result.paymentHandoffDirectory && (result.paymentHandoffDirectory.includes('\0') || result.paymentHandoffDirectory.length > 4096)) throw new Error('Payment handoff directory path is invalid.');
   if (!result.filesDirectory && env.MARKETPLACE_MCP_FILES_DIR) result.filesDirectory = env.MARKETPLACE_MCP_FILES_DIR;
   if (result.filesDirectory && (!isAbsolute(result.filesDirectory) || result.filesDirectory.includes('\0') || result.filesDirectory.length > 4096)) {
     throw new Error('Private files directory must be an absolute path of at most 4096 characters.');

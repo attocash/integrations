@@ -21,17 +21,7 @@ export function validateTypedApproval(input: unknown, options: {
       ...(options.now === undefined ? {} : { now: options.now }) });
     if (canonicalController(request.controller.address) !== request.controller.address) throw invalid();
     const action = request.action;
-    if (action.kind === 'payout-address' || action.kind === 'withdrawal') {
-      const command = action.command as Record<string, unknown>;
-      const address = action.kind === 'payout-address' ? action.canonicalTargetAddress : action.destinationAddress;
-      const route = action.network;
-      if (typeof address !== 'string' || canonicalController(address) !== address
-        || (command.asset === 'ATTO' ? !attoNetworks.some(value => value === String(route))
-          : !nanoNetworks.some(value => value === String(route)))
-        || (command.asset === 'ATTO') !== address.startsWith('atto://')
-        || (action.kind === 'payout-address' && command.action === 'ENROLL'
-          && (typeof command.address !== 'string' || canonicalController(command.address) !== address))) throw invalid();
-    }
+    if (!['login','credential','identity-link','identity-unlink'].includes(String(action.kind))) throw invalid();
     if (action.kind === 'identity-link') {
       for (const address of [action.authorizingAddress, action.newIdentityAddress]) {
         if (typeof address !== 'string' || canonicalController(address) !== address) throw invalid();

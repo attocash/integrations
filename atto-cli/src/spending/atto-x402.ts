@@ -99,7 +99,7 @@ export function parseAttoExactRequirement(input: {
 }
 
 /** Build the x402 string profile directly from exact Commons values, leaving native JSON untouched. */
-function wireTransaction(transaction: AttoTransaction): Record<string, unknown> {
+export function wireTransaction(transaction: AttoTransaction): Record<string, unknown> {
   const block = transaction.block;
   if (!(block instanceof AttoSendBlock)) throw new AttoError('MARKETPLACE_PROTOCOL', 'An ATTO payment must be a native SEND.');
   return { block: { type: 'SEND', network: block.network.name, version: Number(block.version.toString()),

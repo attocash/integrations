@@ -54,8 +54,8 @@ for (const source of ['native-seed', 'os-keystore']) {
         sourceOptions = {recoveryWalletDirectory: recovery};
       }
       const wallet = await provisionNanoWallet({dataDir: native, ...sourceOptions, derivationIndex: 1, network: 'nano:dev',
-        rpcUrl: 'http://localhost:17076', origin: 'https://marketplace.example', audience: 'marketplace', handoffDirectory: handoffs,
-        grants: {marketplaceFunding: false, externalTransfers: false, controllerPurposes: []},
+        rpcUrl: 'http://localhost:17076', origin: 'https://marketplace.example', audience: 'marketplace',
+        grants: { externalTransfers: false, controllerPurposes: []},
         limits: {maxPaymentAtomic: '0', rolling24hAtomic: '0'}, terminalConfirmed: true});
       store = await MarketplaceProfileStore.open(home);
       store.createProfile({id: 'agent', origin: 'https://marketplace.example', audience: 'marketplace', accountId, agentId, identityId,

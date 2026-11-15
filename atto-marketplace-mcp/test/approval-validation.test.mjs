@@ -16,28 +16,19 @@ for (const network of ['ATTO','NANO']) {
   const address = network==='ATTO'?atto:nano;
   const nativeNetwork = network==='ATTO'?'live':'nano:dev';
   const cases = [
-    ['login',{kind:'login',network,address},hash(['signer-controller-enrollment-v1',accountId,identityId])],
+    ['login',{kind:'login',network,address},hash(['marketplace-login-v1',accountId,identityId])],
     ['unlink',{kind:'identity-unlink',targetIdentityId:targetId,authorizingIdentityId:identityId},hash(['unlink',accountId,targetId,identityId])],
-    ...['ENROLL','SELECT','DISABLE'].map(operation=>[
-      {ENROLL:'payout address enrollment',SELECT:'payout address selection',DISABLE:'payout address disablement'}[operation],
-      {kind:'payout-address',network:'atto:dev',canonicalTargetAddress:targetAtto,command:{action:operation,asset:'ATTO',network:'atto:dev',idempotencyKey:requestId,
-        ...(operation==='ENROLL'?{address:targetAtto}:{destinationId,expectedSelectionVersion:7})}},
-      hash(['payout-address-v1',accountId,identityId,operation,'ATTO','atto:dev',operation==='ENROLL'?'':destinationId,targetAtto,operation==='ENROLL'?'':'7',requestId]),
-    ]),
-    ['withdrawal creation',{kind:'withdrawal',network:'nano:dev',destinationAddress:nano,command:{asset:'XNO',atomicAmount:'100',destinationId,
-      expectedSelectionVersion:7,idempotencyKey:requestId,network:'nano:dev'}},
-      hash(['withdrawal-create-v2',accountId,identityId,'XNO','100','nano:dev',destinationId,nano,'7',requestId])],
     ...['ROTATE','REVOKE'].map(operation=>[
       operation==='ROTATE'?'API-key rotation':'API-key revocation',
       {kind:'credential',operation,command:{operation,idempotencyKey:requestId,targetApiKeyId:targetId}},
       hash(['agent-credential-v1',accountId,identityId,operation,targetId,requestId,'']),
     ]),
     ...[
-      [{name:'Reader',expiresInDays:30,scopes:['tasks:read']},['agent-credential-v2','Reader','30','tasks:read','','','','']],
-      [{name:'Buyer',expiresInDays:30,scopes:['products:purchase'],purchaseXnoLimit:'5'},['agent-credential-v3','Buyer','30','products:purchase','','','','','','5']],
-      [{name:'Seller',expiresInDays:30,scopes:['products:publish'],productPublishAttoLimit:'8'},['agent-credential-v4','Seller','30','products:publish','','','','','','','8','']],
-    ].map(([credential,fields])=>['API-key creation',{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey:requestId,credential}},
-      hash(['agent-credential-v1',accountId,identityId,'CREATE','',requestId,fields.join('\n')])]),
+      {name:'Reader',expiresInDays:30,scopes:['tasks:read']},
+      {name:'Buyer',expiresInDays:30,scopes:['products:purchase'],purchaseXnoLimit:'5'},
+      {name:'Seller',expiresInDays:30,scopes:['products:publish'],productPublishAttoLimit:'8'},
+    ].map(credential=>['API-key creation',{kind:'credential',operation:'CREATE',command:{operation:'CREATE',idempotencyKey:requestId,credential}},
+      hash(['agent-credential-v1',accountId,identityId,'CREATE','',requestId,['marketplace-credential-v1',credential.name,String(credential.expiresInDays),credential.scopes.slice().sort().join(','),credential.publishAttoLimit??'',credential.publishXnoLimit??'',credential.purchaseAttoLimit??'',credential.purchaseXnoLimit??'',credential.productPublishAttoLimit??'',credential.productPublishXnoLimit??''].join('\n')])]),
   ];
   for (const [purpose,action,binding] of cases) {
     test(`${network} typed ${purpose} validates the exact action and immutable challenge`,()=>{
@@ -61,7 +52,7 @@ for (const network of ['ATTO','NANO']) {
 test('expired exact typed terms can be inspected for response recovery but never authorize fresh signing',()=>{
   // Given a historical, otherwise valid login frame.
   const request=envelope({network:'NANO',address:nano,nativeNetwork:'nano:dev',purpose:'login',
-    action:{kind:'login',network:'NANO',address:nano},binding:hash(['signer-controller-enrollment-v1',accountId,identityId]),now:Date.now()-600_000});
+    action:{kind:'login',network:'NANO',address:nano},binding:hash(['marketplace-login-v1',accountId,identityId]),now:Date.now()-600_000});
   // When the caller explicitly inspects saved terms for recovery.
   assert.deepEqual(validateTypedApproval(request,{allowExpired:true}),request);
   // Then fresh signing still rejects it and malformed historical lifetimes stay invalid.

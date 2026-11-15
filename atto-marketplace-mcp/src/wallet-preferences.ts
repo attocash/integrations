@@ -8,7 +8,6 @@ export interface AttoWalletAccess {
   index: number;
   network: string;
   fingerprint: string;
-  marketplaceFunding: boolean;
   externalTransfers: boolean;
 }
 
@@ -16,18 +15,16 @@ export interface WalletSelection {
   attoDirectory?: string;
   nanoDirectory?: string;
   nanoControllerDirectory?: string;
-  paymentHandoffDirectory?: string;
   attoAccess?: AttoWalletAccess;
 }
 
-const fields = ['attoDirectory', 'nanoDirectory', 'nanoControllerDirectory', 'paymentHandoffDirectory'] as const;
+const fields = ['attoDirectory', 'nanoDirectory', 'nanoControllerDirectory'] as const;
 const schema = `CREATE TABLE wallet_selection (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
   version INTEGER NOT NULL CHECK (version = 1),
   atto_directory TEXT,
   nano_directory TEXT,
   nano_controller_directory TEXT,
-  payment_handoff_directory TEXT,
   atto_access TEXT
 )`;
 
@@ -68,12 +65,12 @@ export async function saveWalletSelection(home: string, patch: Partial<WalletSel
     // A shared controller follows the primary wallet; only a separate role needs its own pointer.
     if (selected.nanoControllerDirectory === selected.nanoDirectory) delete selected.nanoControllerDirectory;
     validateDirectories(selected);
-    db.prepare(`INSERT INTO wallet_selection(singleton,version,atto_directory,nano_directory,nano_controller_directory,payment_handoff_directory,atto_access)
-      VALUES(1,1,?,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET atto_directory=excluded.atto_directory,
+    db.prepare(`INSERT INTO wallet_selection(singleton,version,atto_directory,nano_directory,nano_controller_directory,atto_access)
+      VALUES(1,1,?,?,?,?) ON CONFLICT(singleton) DO UPDATE SET atto_directory=excluded.atto_directory,
       nano_directory=excluded.nano_directory,nano_controller_directory=excluded.nano_controller_directory,
-      payment_handoff_directory=excluded.payment_handoff_directory,atto_access=excluded.atto_access`)
+      atto_access=excluded.atto_access`)
       .run(selected.attoDirectory ?? null, selected.nanoDirectory ?? null, selected.nanoControllerDirectory ?? null,
-        selected.paymentHandoffDirectory ?? null, selected.attoAccess ? JSON.stringify(selected.attoAccess) : null);
+        selected.attoAccess ? JSON.stringify(selected.attoAccess) : null);
     db.exec('COMMIT');
     transaction = false;
   } catch (error) {
@@ -104,12 +101,12 @@ function validateDirectories(selection: WalletSelection): void {
 function validateAttoAccess(value: unknown): asserts value is AttoWalletAccess {
   const access = value as AttoWalletAccess;
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).length !== 6
-    || Object.keys(value).some(key => !['address','index','network','fingerprint','marketplaceFunding','externalTransfers'].includes(key))
+    || Object.keys(value).length !== 5
+    || Object.keys(value).some(key => !['address','index','network','fingerprint','externalTransfers'].includes(key))
     || !Number.isInteger(access.index) || access.index < 0 || access.index > 0x7fffffff
     || !['atto:live','atto:beta','atto:dev','atto:local'].includes(access.network)
     || typeof access.fingerprint !== 'string' || !/^[a-f0-9]{64}$/.test(access.fingerprint)
-    || typeof access.marketplaceFunding !== 'boolean' || typeof access.externalTransfers !== 'boolean') throw selectionError();
+    || typeof access.externalTransfers !== 'boolean') throw selectionError();
   try { if (AttoAddress.parse(access.address).value !== access.address) throw selectionError(); }
   catch { throw selectionError(); }
 }
@@ -126,14 +123,14 @@ function validateSchema(db: DatabaseSync): boolean {
 function canonicalSchema(value: string): string { return value.replace(/\s+/g, '').toLowerCase(); }
 
 function readSelection(db: DatabaseSync): WalletSelection | undefined {
-  const rows = db.prepare('SELECT singleton,version,atto_directory,nano_directory,nano_controller_directory,payment_handoff_directory,atto_access FROM wallet_selection LIMIT 2').all();
+  const rows = db.prepare('SELECT singleton,version,atto_directory,nano_directory,nano_controller_directory,atto_access FROM wallet_selection LIMIT 2').all();
   if (rows.length === 0) return undefined;
   if (rows.length !== 1) throw selectionError();
   const row = rows[0]!;
   if (row.singleton !== 1 || row.version !== 1) throw selectionError();
   const selection: WalletSelection = {};
   for (const [field, column] of [['attoDirectory', 'atto_directory'], ['nanoDirectory', 'nano_directory'],
-    ['nanoControllerDirectory', 'nano_controller_directory'], ['paymentHandoffDirectory', 'payment_handoff_directory']] as const) {
+    ['nanoControllerDirectory', 'nano_controller_directory']] as const) {
     const value = row[column];
     if (value !== null) {
       if (typeof value !== 'string') throw selectionError();

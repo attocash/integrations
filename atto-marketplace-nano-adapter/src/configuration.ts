@@ -16,11 +16,9 @@ interface NanoWalletSettings {
     rpcUrl: string;
     workUrl?: string;
     sourceAddress: string;
-    handoffDirectory: string;
     origin: string;
     audience: string;
     grants: {
-        marketplaceFunding: boolean;
         externalTransfers: boolean;
         controllerPurposes: ControllerPurpose[];
     };
@@ -55,17 +53,6 @@ export function canonical(value: unknown): string {
 }
 export function sha256(value: string | Uint8Array): string {
     return createHash('sha256').update(value).digest('hex');
-}
-export function framedHash(fields: string[]): Buffer {
-    const hash = createHash('sha256');
-    for (const field of fields) {
-        const bytes = Buffer.from(field, 'utf8');
-        const length = Buffer.alloc(4);
-        length.writeUInt32BE(bytes.length);
-        hash.update(length);
-        hash.update(bytes);
-    }
-    return hash.digest();
 }
 export function object(value: unknown): Record<string, any> {
     if (!value || typeof value !== 'object' || Array.isArray(value))
@@ -114,7 +101,7 @@ export function defaultDataDirectory(env: NodeJS.ProcessEnv = process.env): stri
 }
 export function validateConfiguration(value: unknown): NanoWalletConfiguration {
     const supplied = object(value);
-    const raw = exactKeys(supplied, ['version', 'keySource', 'derivationIndex', 'network', 'rpcUrl', 'sourceAddress', 'handoffDirectory', 'origin', 'audience', 'grants', 'limits',
+    const raw = exactKeys(supplied, ['version', 'keySource', 'derivationIndex', 'network', 'rpcUrl', 'sourceAddress', 'origin', 'audience', 'grants', 'limits',
         ...(Object.hasOwn(supplied, 'workUrl') ? ['workUrl'] : [])]);
     if (raw.version !== 1 ||
         !Number.isInteger(raw.derivationIndex) ||
@@ -135,7 +122,6 @@ export function validateConfiguration(value: unknown): NanoWalletConfiguration {
         text(source.credentialAccount, 200);
         if (!['Atto CLI', 'Atto MCP'].includes(source.credentialService) || !/^atto:\/\/[a-z0-9]+$/.test(source.identityAddress)) fail('WALLET_CONFIGURATION');
     } else fail('WALLET_CONFIGURATION');
-    absolutePath(raw.handoffDirectory);
     canonicalOrigin(raw.origin);
     if (canonicalAddress(raw.sourceAddress) !== raw.sourceAddress)
         fail('WALLET_CONFIGURATION');
@@ -160,9 +146,8 @@ export function validateConfiguration(value: unknown): NanoWalletConfiguration {
             !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)))
             fail('WALLET_CONFIGURATION');
     }
-    exactKeys(raw.grants, ['marketplaceFunding', 'externalTransfers', 'controllerPurposes']);
-    if (typeof raw.grants.marketplaceFunding !== 'boolean' ||
-        typeof raw.grants.externalTransfers !== 'boolean' ||
+    exactKeys(raw.grants, ['externalTransfers', 'controllerPurposes']);
+    if (typeof raw.grants.externalTransfers !== 'boolean' ||
         !Array.isArray(raw.grants.controllerPurposes) ||
         new Set(raw.grants.controllerPurposes).size !== raw.grants.controllerPurposes.length ||
         raw.grants.controllerPurposes.some((p: unknown) => !(CONTROLLER_PURPOSES as readonly unknown[]).includes(p)))
@@ -177,7 +162,6 @@ export function loadConfiguration(dataDir: string): NanoWalletConfiguration {
     recoverPublication(join(dataDir, 'wallet.json'));
     const config = validateConfiguration(parseJsonObject(readPrivate(join(dataDir, 'wallet.json'), 32768).toString('utf8')));
     if (config.keySource.type === 'native-seed') privateDirectory(dirname(config.keySource.seedFile), false);
-    privateDirectory(config.handoffDirectory, false);
     requireSharedWalletBinding(config, dataDir);
     return config;
 }
@@ -243,10 +227,6 @@ function preflightSharedDestination(options:ProvisionNanoWalletOptions,config:Na
             continue;
         }
         if(concurrentlyPublished())return;
-        if(entry.isDirectory()&&path===options.handoffDirectory){
-            privateDirectory(path,false);
-            if(readdirSync(path).length===0)continue;
-        }
         fail('WALLET_CONFIGURATION_EXISTS','This directory retains wallet state without its original configuration. Restore that configuration and journal before continuing.');
     }
 }
@@ -261,7 +241,6 @@ function publishConfiguration(options:ProvisionNanoWalletOptions, config:NanoWal
         preflightSharedDestination(options,config);
         privateDirectory(dataDir);
         if(config.keySource.type==='shared-recovery')claimSharedWalletBinding(config,dataDir);
-        privateDirectory(config.handoffDirectory);
         publishPrivate(configurationPath,Buffer.from(`${canonical(config)}\n`));
     }
     return {address:config.sourceAddress,index:config.derivationIndex,network:config.network,configurationPath};
@@ -282,9 +261,9 @@ export async function provisionNanoWallet(options:ProvisionNanoWalletOptions):Pr
         address=identity.address;
     }
     const config=validateConfiguration({version:1,keySource,derivationIndex:options.derivationIndex,
-        network:options.network,rpcUrl:options.rpcUrl,...(options.workUrl===undefined?{}:{workUrl:options.workUrl}),sourceAddress:address,handoffDirectory:options.handoffDirectory,
+        network:options.network,rpcUrl:options.rpcUrl,...(options.workUrl===undefined?{}:{workUrl:options.workUrl}),sourceAddress:address,
         origin:options.origin,audience:options.audience,
-        grants:{marketplaceFunding:options.grants?.marketplaceFunding??false,externalTransfers:options.grants?.externalTransfers??false,controllerPurposes:options.grants?.controllerPurposes??[]},
+        grants:{externalTransfers:options.grants?.externalTransfers??false,controllerPurposes:options.grants?.controllerPurposes??[]},
         limits:options.limits??{maxPaymentAtomic:'0',rolling24hAtomic:'0'}});
     return publishConfiguration(options,config);
 }

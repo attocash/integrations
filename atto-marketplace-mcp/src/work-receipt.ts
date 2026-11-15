@@ -1,55 +1,23 @@
 import { createHash, createPublicKey, verify } from 'node:crypto';
 import { MarketplaceApiError } from './marketplace-api.js';
 
-const v2Fields = ['schema','keyVersion','receiptId','taskId','engagementId','buyerAgentId','workerAgentId',
-  'buyerRole','workerRole','category','buyerHandle','buyerDisplayName','workerHandle','workerDisplayName',
-  'asset','grossAtomic','feeAtomic','workerNetAtomic','refundAtomic','outcome','submissionHash',
-  'ledgerTransactionId','engagementCreatedAt','settledAt','feeRateBasisPoints'];
-
-interface Receipt {
-  receiptId:string; taskId:string; outcome:string; content:Record<string,string>; canonicalBase64:string;
-  contentSha256:string; signatureBase64:string; keyVersion:string; ledgerTransactionId:string;
-}
-
-/** Verify the canonical payload, its JSON projection and the committed economic terms. */
-export function verifyWorkReceipt(receipt:Receipt, key:{version:string;algorithm:string;publicKeyBase64:string}, taskId:string):void {
+interface Receipt {receiptId:string;taskId:string;outcome:string;content:Record<string,string>;canonicalBase64:string;contentSha256:string;signatureBase64:string;keyVersion:string;paymentRequirementId:string}
+export function verifyWorkReceipt(receipt:Receipt,key:{version:string;algorithm:string;publicKeyBase64:string},taskId:string):void {
   try {
-    if (receipt.taskId !== taskId || key.version !== receipt.keyVersion || key.algorithm !== 'Ed25519') throw invalid();
-    const canonical = decodeBase64(receipt.canonicalBase64);
-    let offset = 0;
-    const read = ():string => {
-      if (offset+4 > canonical.length) throw invalid();
-      const length=canonical.readUInt32BE(offset); offset+=4;
-      if (length>16_384 || offset+length>canonical.length) throw invalid();
-      const value=new TextDecoder('utf-8',{fatal:true}).decode(canonical.subarray(offset,offset+length));
-      offset+=length; return value;
-    };
-    const schema=read();
-    if (schema!=='marketplace-work-receipt-v2') throw invalid();
-    const fields=v2Fields;
-    const content:Record<string,string>={schema};
-    for (const field of fields.slice(1)) content[field]=read();
-    if (offset!==canonical.length || Object.keys(receipt.content).length!==fields.length
-      || fields.some(field=>content[field]!==receipt.content[field]) || content.taskId!==taskId
-      || content.engagementId!==taskId || content.receiptId!==receipt.receiptId
-      || content.keyVersion!==receipt.keyVersion || content.outcome!==receipt.outcome
-      || content.ledgerTransactionId!==receipt.ledgerTransactionId || !['ATTO','XNO'].includes(content.asset!)) throw invalid();
+    if(receipt.taskId!==taskId || key.version!==receipt.keyVersion || key.algorithm!=='Ed25519') throw invalid();
+    const canonical=decodeBase64(receipt.canonicalBase64);
+    const c=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(canonical)) as Record<string,string>;
+    if(!c || Array.isArray(c) || Object.keys(c).length!==Object.keys(receipt.content).length || Object.keys(c).some(k=>typeof c[k]!=='string'||c[k]!==receipt.content[k])
+      || c.schema!=='marketplace-work-receipt-v3' || c.taskId!==taskId || c.receiptId!==receipt.receiptId || c.outcome!==receipt.outcome
+      || !/^[1-9][0-9]{0,64}$/.test(c.grossAtomic??'') || !(c.asset==='ATTO'?c.feeRateBasisPoints==='100':c.asset==='XNO'&&c.feeRateBasisPoints==='500')) throw invalid();
+    const milestones=JSON.parse(c.milestones??'null') as Array<{state:string;amountAtomic:string;paidTransactionHash:string}>;
+    if(!Array.isArray(milestones)||!milestones.length||milestones.some(m=>m.state!=='PAID'||!/^[1-9][0-9]{0,64}$/.test(m.amountAtomic)||!/^[a-f0-9]{64}$/i.test(m.paidTransactionHash))
+      ||milestones.reduce((sum,m)=>sum+BigInt(m.amountAtomic),0n)!==BigInt(c.grossAtomic!)) throw invalid();
+    if(JSON.stringify(Object.fromEntries(Object.entries(c).sort(([a],[b])=>a.localeCompare(b))))!==canonical.toString('utf8')) throw invalid();
     const digest=createHash('sha256').update(canonical).digest();
-    if (digest.toString('hex')!==receipt.contentSha256) throw invalid();
-    const message=Buffer.concat([Buffer.from('marketplace-work-receipt-signature-v2\0'),digest]);
+    if(digest.toString('hex')!==receipt.contentSha256) throw invalid();
     const publicKey=createPublicKey({key:decodeBase64(key.publicKeyBase64),format:'der',type:'spki'});
-    if (!verify(null,message,publicKey,decodeBase64(receipt.signatureBase64))) throw invalid();
-    for (const field of ['grossAtomic','feeAtomic','workerNetAtomic','refundAtomic']) {
-      if (!/^(0|[1-9][0-9]{0,64})$/.test(content[field]!)) throw invalid();
-    }
-    const rate=content.feeRateBasisPoints;
-    if (rate!=='100') throw invalid();
-    const gross=BigInt(content.grossAtomic!),fee=BigInt(content.feeAtomic!),net=BigInt(content.workerNetAtomic!),refund=BigInt(content.refundAtomic!);
-    if (gross<=0n) throw invalid();
-    if (content.outcome==='BUYER_REFUND') {
-      if (refund!==gross || fee!==0n || net!==0n) throw invalid();
-    } else if (!['ACCEPTED','WORKER_AWARD'].includes(content.outcome!)
-      || fee!==gross*BigInt(rate)/10_000n || net!==gross-fee || refund!==0n) throw invalid();
+    if(!verify(null,Buffer.concat([Buffer.from('marketplace-work-receipt-v3\0'),digest]),publicKey,decodeBase64(receipt.signatureBase64))) throw invalid();
   } catch { throw invalid(); }
 }
 

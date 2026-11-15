@@ -144,6 +144,15 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
         const prior = accounts.get(key);
         assert.ok(prior, 'These fixtures only spend from opened synthetic accounts.');
         state.publicationAttempts.push(transaction);
+        if (state.pauseBeforePublication === state.publicationAttempts.length) {
+          state.heldCandidate = transaction;
+          state.heldResponse = response;
+          await state.holdBeforePublication.promise;
+          if (response.destroyed) {
+            state.discardedCandidate = transaction;
+            return;
+          }
+        }
         assert.equal(state.publications.some(value => value.hash.toString() === transaction.hash.toString()), false, 'A retry must never republish a committed transfer.');
         assert.equal(block.previous.toString(), prior.lastTransactionHash.toString());
         assert.equal(BigInt(block.height.toString()), BigInt(prior.height.toString()) + 1n);
@@ -203,6 +212,7 @@ export async function fixture(t, balances, pool = { indexes: balances.map((_, in
   };
   t.after(async () => {
     state.holdPublications?.release();
+    state.holdBeforePublication?.release();
     state.holdWork?.release();
     state.releaseExecution?.();
     await Promise.allSettled([...applications].map(application => application.close()));

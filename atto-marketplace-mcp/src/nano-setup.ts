@@ -54,7 +54,6 @@ export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOp
   const workUrl = selectedWorkUrl ? validateNanoRpcUrl(selectedWorkUrl) : undefined;
   const { origin, audience } = marketplaceConnection(options);
   const index = derivationIndex(await answer(options, 'Nano derivation index', mode === 'create' ? '0' : '1'));
-  const handoffDirectory = privatePath(options.env.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR ?? join(home, 'payment-handoffs'));
   let seedFile: string | undefined;
   let importedAddress: string | undefined;
   if (mode === 'import') {
@@ -75,7 +74,7 @@ export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOp
     ? `Existing private seed file: ${seedFile}`
     : `Recovery phrase: OS password store for ${recoveryWalletDirectory}; Nano derivation m/44'/165'/${index}'. No separate seed file.`;
   await approve(options, review({ mode, directory, address: importedAddress ?? recovery?.address, network, rpcUrl, workUrl, origin, audience,
-    index, handoffDirectory, policy, seedDescription }));
+    index, policy, seedDescription }));
 
   // Recheck after consent: imported seed disappearance must never create a new identity.
   requireEmptyTarget(directory);
@@ -91,7 +90,7 @@ export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOp
     expectedAddress = current.address;
   }
   const result = await provisionNanoWallet({ dataDir: directory, derivationIndex: index, network, rpcUrl, ...(workUrl ? { workUrl } : {}), origin, audience,
-    handoffDirectory, ...(seedFile ? { seedFile, expectedAddress: importedAddress! } : {}),
+    ...(seedFile ? { seedFile, expectedAddress: importedAddress! } : {}),
     ...(recoveryWalletDirectory ? { recoveryWalletDirectory, expectedAddress: expectedAddress! } : {}), ...policy, terminalConfirmed: true });
   if (recoveryWalletDirectory) await saveWalletSelection(home, { attoDirectory: selectedAttoDirectory ?? recoveryWalletDirectory });
   return { directory, address: result.address, index: result.index, network: result.network };
@@ -122,7 +121,7 @@ async function reuseWallet(options: NanoInteractiveSetupOptions, directory: stri
   }
   await approve(options, review({ mode: 'reuse', directory, address: config.sourceAddress, network: config.network,
     rpcUrl: config.rpcUrl, workUrl: config.workUrl, origin: config.origin, audience: config.audience, index: config.derivationIndex,
-    handoffDirectory: config.handoffDirectory, policy, seedDescription: config.keySource.type === 'shared-recovery' ? `Recovery phrase: OS password store for ${config.keySource.recoverySource.directory}; ${config.keySource.derivationVersion}` : `Existing private seed file: ${config.keySource.seedFile}` }));
+    policy, seedDescription: config.keySource.type === 'shared-recovery' ? `Recovery phrase: OS password store for ${config.keySource.recoverySource.directory}; ${config.keySource.derivationVersion}` : `Existing private seed file: ${config.keySource.seedFile}` }));
 
   const current = await inspectNanoWallet(directory);
   if (JSON.stringify(current) !== JSON.stringify(config)) throw failure('WALLET_CONFIGURATION_CHANGED', 'The Nano profile changed during review. Repeat setup against its current settings.');
@@ -133,22 +132,21 @@ async function reuseWallet(options: NanoInteractiveSetupOptions, directory: stri
 }
 
 async function policyQuestions(options: NanoInteractiveSetupOptions, current?: Policy): Promise<Policy> {
-  const marketplaceFunding = await yesNo(options, 'Allow Marketplace funding from this wallet', current?.grants.marketplaceFunding ?? false);
   const externalTransfers = await yesNo(options, 'Allow external Nano transfers from this wallet', current?.grants.externalTransfers ?? false);
   let maxPaymentAtomic = current?.limits.maxPaymentAtomic ?? '0';
   let rolling24hAtomic = current?.limits.rolling24hAtomic ?? '0';
-  if (marketplaceFunding || externalTransfers) {
+  if (externalTransfers) {
     maxPaymentAtomic = xnoToRaw(await answer(options, 'Maximum XNO per payment (up to 30 decimal places)', maxPaymentAtomic === '0' ? '1' : rawToXno(maxPaymentAtomic)));
-    rolling24hAtomic = xnoToRaw(await answer(options, 'Maximum XNO over rolling 24 hours (shared by funding and external transfers)', rolling24hAtomic === '0' ? '10' : rawToXno(rolling24hAtomic)));
+    rolling24hAtomic = xnoToRaw(await answer(options, 'Maximum XNO over rolling 24 hours (all native sends)', rolling24hAtomic === '0' ? '10' : rawToXno(rolling24hAtomic)));
     if (BigInt(maxPaymentAtomic) > BigInt(rolling24hAtomic)) throw failure('INVALID_AMOUNT', 'The per-payment ceiling must not exceed the rolling 24-hour ceiling.');
   }
-  return { grants: { marketplaceFunding, externalTransfers, controllerPurposes: [...(current?.grants.controllerPurposes ?? [])] },
+  return { grants: { externalTransfers, controllerPurposes: [...(current?.grants.controllerPurposes ?? [])] },
     limits: { maxPaymentAtomic, rolling24hAtomic } };
 }
 
 function review(input: {
   mode: SetupMode; directory: string; address: string | undefined; network: NanoNetwork; rpcUrl: string; workUrl: string | undefined;
-  origin: string; audience: string; index: number; handoffDirectory: string; policy: Policy; seedDescription: string;
+  origin: string; audience: string; index: number; policy: Policy; seedDescription: string;
 }): string {
   return [
     'Review Nano wallet setup:',
@@ -161,8 +159,6 @@ function review(input: {
     `Work: ${input.workUrl ?? input.rpcUrl}`,
     `Marketplace origin: ${input.origin}`,
     `Audience: ${input.audience}`,
-    `Payment handoff directory: ${input.handoffDirectory}`,
-    `Marketplace funding: ${input.policy.grants.marketplaceFunding ? 'allowed' : 'denied'}`,
     `External transfers: ${input.policy.grants.externalTransfers ? 'allowed' : 'denied'}`,
     `Controller purposes: ${input.policy.grants.controllerPurposes.join(', ') || 'none'}`,
     `Maximum per payment: ${rawToXno(input.policy.limits.maxPaymentAtomic)} XNO (${input.policy.limits.maxPaymentAtomic} raw)`,

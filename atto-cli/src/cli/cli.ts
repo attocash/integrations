@@ -269,9 +269,9 @@ export async function runCli(argv = process.argv): Promise<void> {
       });
     });
   program.command('metrics').description('Read public Atto market metrics').action(() => call('metrics_get'));
-  const marketplace = program.command('marketplace').description('Fund and inspect the configured Marketplace account');
+  const marketplace = program.command('marketplace').description('Connect and approve Marketplace identity requests');
   marketplace.command('connect').description('Connect this wallet to Marketplace in a local terminal')
-    .requiredOption('--api-url <url>', 'Marketplace /v1/agent/topups URL')
+    .requiredOption('--api-url <url>', 'Marketplace /v1/agent/payments URL')
     .requiredOption('--audience <audience>', 'Exact Marketplace controller-proof audience')
     .option('--browser-origin <origin>', 'Allow this exact browser origin for typed proof approvals (repeatable)',
       (origin: string, previous: string[]) => [...previous, origin], [])
@@ -282,21 +282,6 @@ export async function runCli(argv = process.argv): Promise<void> {
         controllerIndex: options.controllerIndex, ...(options.browserOrigin?.length ? { browserOrigins: options.browserOrigin } : {}) });
       output(result, 'marketplace_connect');
     });
-  marketplace.command('topup <amount>').description('Fund the configured Marketplace ATTO account under wallet spending limits')
-    .option('--unit <unit>', 'ATTO (default) or RAW')
-    .option('--request-id <id>', 'Payment ID (generated if omitted); reuse it after uncertainty')
-    .option('--index <index>', 'Source account index (defaults to the approved pool)', number)
-    .action(async (amount, options) => {
-      const requestId = options.requestId ?? randomUUID();
-      const input = compact({ amount, unit: options.unit, requestId, index: options.index });
-      parseOperation('marketplace_topup', input);
-      sendRequestId = requestId;
-      process.stderr.write(program.opts().json ? `${JSON.stringify({ progress: { requestId } })}\n`
-        : `Marketplace top-up request ID: ${requestId}\n`);
-      await call('marketplace_topup', input);
-    });
-  marketplace.command('status <request-id>').description('Read and reconcile a Marketplace top-up by its original request ID')
-    .action(requestId => call('marketplace_topup_status', { requestId }));
   marketplace.command('approve <request-file>').description('Review and sign one exact typed Marketplace controller-proof request')
     .action(async requestFile => {
       requireTerminal();
@@ -481,10 +466,8 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto message sign': 'atto message sign --index 0 --text "exact challenge"',
     'atto message verify': 'atto message verify --public-key <hex> --signature <hex> --text "exact challenge"',
     'atto send': 'atto send <address> 1\n  atto send --to-index 1 --amount 1\n  atto send --to-label "Savings" --amount 1\n  atto send <address> --usd 1',
-    'atto marketplace': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto marketplace topup 1 --request-id marketplace-funding-001\n  atto marketplace status marketplace-funding-001',
-    'atto marketplace connect': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/topups --audience marketplace --controller-index 0 --browser-origin https://site.example',
-    'atto marketplace topup': 'atto marketplace topup 1 --request-id marketplace-funding-001',
-    'atto marketplace status': 'atto marketplace status marketplace-funding-001',
+    'atto marketplace': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/payments --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto marketplace approve ./marketplace-approval-request.json',
+    'atto marketplace connect': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/payments --audience marketplace --controller-index 0 --browser-origin https://site.example',
     'atto marketplace approve': 'atto marketplace approve ./marketplace-approval-request.json',
     'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1',
     'atto terms': 'atto terms show', 'atto terms show': 'atto terms show',

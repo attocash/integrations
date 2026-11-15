@@ -23,12 +23,6 @@ async function terminal(args,environment,response='APPROVE',command) {
   assert.equal(metadata.timedOut,false);
   return {...metadata,transcript:Buffer.from(metadata.transcriptBase64,'base64').toString('utf8').replaceAll('\r','')};
 }
-function binding(fields) {
-  const hash=createHash('sha256');
-  for(const field of fields){const bytes=Buffer.from(field),size=Buffer.alloc(4);size.writeUInt32BE(bytes.length);hash.update(size);hash.update(bytes);}
-  return hash.digest('hex');
-}
-
 for (const { name, network, rpcOption, rpcUrl, workUrl } of [
   { name: 'mainnet omitted RPC uses Nano.to', network: 'nano:mainnet', rpcOption: [], rpcUrl: 'https://rpc.nano.to' },
   { name: 'development omitted RPC uses loopback', network: 'nano:dev', rpcOption: [], rpcUrl: 'http://localhost:17076' },
@@ -69,7 +63,7 @@ for (const network of ['nano:mainnet','nano:dev']) {
     await writeFile(seedFile,seed,{mode:0o600});
     const rpcUrl='https://nano.example/custom-rpc',workUrl='https://work.nano.example/existing',origin='http://localhost:8080',audience='terminal-rpc-reuse';
     await provisionNanoWallet({seedFile,dataDir:directory,derivationIndex:7,network,rpcUrl,workUrl,origin,audience,
-      handoffDirectory:join(home,'payment-handoffs'),terminalConfirmed:true});
+      terminalConfirmed:true});
     const configPath=join(directory,'wallet.json'),before=await readFile(configPath);
     const journalPath=join(directory,'nano-wallet.sqlite3'),journal='retained original native journal bytes';
     await writeFile(journalPath,journal,{mode:0o600});
@@ -108,40 +102,39 @@ test('Nano terminal setup rejects invalid work URLs without publishing a profile
   }
 });
 
-test('Nano seed import, separate transfer policy and profile-pinned Shop proof approval use the real terminal', {skip:process.platform==='win32'},async t=>{
+test('Nano seed import, separate transfer policy and profile-pinned credential proof approval use the real terminal', {skip:process.platform==='win32'},async t=>{
   const home=await mkdtemp(join(tmpdir(),'marketplace-nano-terminal-'));
   t.after(()=>rm(home,{recursive:true,force:true}));await chmod(home,0o700);
   const env={MARKETPLACE_MCP_HOME:home};
   const seedFile=join(home,'import.hex');await writeFile(seedFile,'42'.repeat(32)+'\n',{mode:0o600});
   const setup=['setup','--asset','XNO','--network','nano:dev','--rpc-url','http://localhost:17076',
     '--origin','http://localhost:8080','--audience','terminal-test','--seed-file',seedFile,
-    '--allow-marketplace-funding','--max-payment-atomic','1000','--rolling-24h-atomic','2000'];
+    '--max-payment-atomic','1000','--rolling-24h-atomic','2000'];
   const created=await terminal(setup,env);assert.equal(created.exitCode,0);assert.equal(created.promptAnswered,true);
   const wallet=join(home,'wallets/nano'),configPath=join(wallet,'wallet.json');
   const before=JSON.parse(await readFile(configPath,'utf8'));
-  assert.equal(before.grants.marketplaceFunding,true);assert.equal(before.grants.externalTransfers,false);
+  assert.equal(before.grants.externalTransfers,false);
   const seed=await readFile(before.keySource.seedFile,'utf8');assert.ok(!created.transcript.includes(seed.trim()));
-  const policy=['policy','--asset','XNO','--allow-external-transfers','--allow-marketplace-funding',
+  const policy=['policy','--asset','XNO','--allow-external-transfers',
     '--max-payment-atomic','1500','--rolling-24h-atomic','3000'];
   await assert.rejects(execute(process.execPath,[main,'wallet',...policy],{env:{...process.env,...env}}),error=>/interactive local terminal/.test(error.stderr));
   const approved=await terminal(policy,env);assert.equal(approved.exitCode,0);
   const after=JSON.parse(await readFile(configPath,'utf8'));assert.equal(after.grants.externalTransfers,true);
   assert.equal(after.keySource.seedFile,before.keySource.seedFile);assert.equal(after.sourceAddress,before.sourceAddress);
   assert.equal(await readFile(after.keySource.seedFile,'utf8'),seed);
-  const accountId=randomUUID(),identityId=randomUUID(),releaseId=randomUUID(),idempotencyKey=randomUUID();
-  const action={kind:'productPurchase',releaseId,expectedReleaseHash:'a'.repeat(64),sellerAgentId:randomUUID(),asset:'XNO',
-    grossAtomic:'1000',feeAtomic:'10',netAtomic:'990',idempotencyKey};
+  const accountId=randomUUID(),identityId=randomUUID(),targetApiKeyId=randomUUID(),idempotencyKey=randomUUID();
+  const action={kind:'credential',operation:'REVOKE',command:{operation:'REVOKE',targetApiKeyId,idempotencyKey}};
   const challengeId=randomUUID(),issuedAt=new Date().toISOString(),expiresAt=new Date(Date.now()+240000).toISOString();
-  const digest=binding(['marketplace-product-purchase-approval-v1',accountId,identityId,releaseId,action.expectedReleaseHash,'XNO','1000',idempotencyKey]);
+  const digest=createHash('sha256').update(['agent-credential-v1',accountId,identityId,'REVOKE',targetApiKeyId,idempotencyKey,''].join('\n')).digest('hex');
   const message=['Nano Marketplace Agent Controller Proof v1','Audience: terminal-test','Network: nano:dev',`Address: ${after.sourceAddress}`,
-    'Purpose: product purchase',`Request ID: ${challengeId}`,`Binding Hash: ${digest}`,`Nonce: ${randomBytes(32).toString('hex')}`,
+    'Purpose: API-key revocation',`Request ID: ${challengeId}`,`Binding Hash: ${digest}`,`Nonce: ${randomBytes(32).toString('hex')}`,
     `Issued At: ${issuedAt}`,`Expiration Time: ${expiresAt}`].join('\n');
   const handoffId=randomBytes(16).toString('hex');
   const directory=join(home,'approvals/agent');await mkdir(directory,{recursive:true,mode:0o700});await chmod(join(home,'approvals'),0o700);
   const path=join(directory,`${handoffId}.request.json`);
   const request={version:1,type:'marketplace-controller-approval-request',profileId:'agent',handoffId,marketplaceOrigin:'http://localhost:8080',
     transport:'AGENT_API',proofOrigin:null,audience:'terminal-test',accountId,identityId,controller:{network:'NANO',address:after.sourceAddress,index:after.derivationIndex},
-    purpose:'product purchase',action,challenge:{challengeId,message,issuedAt,expiresAt}};
+    purpose:'API-key revocation',action,challenge:{challengeId,message,issuedAt,expiresAt}};
   await writeFile(path,JSON.stringify(request),{mode:0o600});
   const store=await MarketplaceProfileStore.open(home);
   try{
@@ -155,7 +148,7 @@ test('Nano seed import, separate transfer policy and profile-pinned Shop proof a
   assert.equal(verifyNanoMessage({address:after.sourceAddress,message,signature:response.signature}),true);
   const retry=await terminal(['approve',path],env);assert.equal(retry.exitCode,0);assert.equal(retry.promptAnswered,false);
   assert.equal(await readFile(responsePath,'utf8'),bytes);
-  await writeFile(path,JSON.stringify({...request,action:{...action,grossAtomic:'2000'}}),{mode:0o600});
+  await writeFile(path,JSON.stringify({...request,action:{...action,command:{...action.command,targetApiKeyId:randomUUID()}}}),{mode:0o600});
   const changed=await terminal(['approve',path],env);assert.notEqual(changed.exitCode,0);assert.equal(changed.promptAnswered,false);
 });
 
@@ -173,7 +166,7 @@ test('raw Nano import previews its address before consent and persists external 
   await writeFile(seedFile,seed,{mode:0o600});
   const expected=await inspectNanoSeed(seedFile,3);
   const environment={MARKETPLACE_MCP_HOME:home,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:wallet,
-    MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR:wallet,MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:handoffs};
+    MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR:wallet};
   const args=['setup','--asset','XNO','--network','nano:dev','--rpc-url','http://localhost:1',
     '--origin','http://localhost:8080','--audience','terminal-path-test','--index','3','--seed-file',seedFile];
   const cancelled=await terminal(args,environment,'NO');
@@ -187,13 +180,12 @@ test('raw Nano import previews its address before consent and persists external 
   assert.equal(approved.transcript.includes(seed.trim()),false);
   assert.equal((await stat(home)).mode&0o777,0o700);
   const config=JSON.parse(await readFile(join(wallet,'wallet.json'),'utf8'));
-  assert.equal(config.sourceAddress,expected.address);assert.equal(config.keySource.seedFile,seedFile);assert.equal(config.handoffDirectory,handoffs);
+  assert.equal(config.sourceAddress,expected.address);assert.equal(config.keySource.seedFile,seedFile);
   assert.equal(await readFile(seedFile,'utf8'),seed);
-  assert.deepEqual(readWalletSelection(home),{nanoDirectory:wallet,paymentHandoffDirectory:handoffs});
+  assert.deepEqual(readWalletSelection(home),{nanoDirectory:wallet});
   const restart=await restartedSelection(home);
   assert.equal(restart.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR,wallet);
   assert.equal(restart.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR,wallet);
-  assert.equal(restart.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR,handoffs);
 });
 
 test('explicit shared Nano controller clears a previously saved separate controller without changing either wallet', {skip:process.platform==='win32'},async t=>{
@@ -205,9 +197,9 @@ test('explicit shared Nano controller clears a previously saved separate control
   const primarySeedFile=join(root,'primary.hex'),controllerSeedFile=join(root,'controller.hex');
   await writeFile(primarySeedFile,'42'.repeat(32)+'\n',{mode:0o600});
   await writeFile(controllerSeedFile,'43'.repeat(32)+'\n',{mode:0o600});
-  await provisionNanoWallet({...common,seedFile:primarySeedFile,dataDir:primary,handoffDirectory:handoffs});
-  await provisionNanoWallet({...common,seedFile:controllerSeedFile,dataDir:controller,handoffDirectory:join(root,'controller-handoffs')});
-  await saveWalletSelection(home,{nanoDirectory:primary,nanoControllerDirectory:controller,paymentHandoffDirectory:handoffs});
+  await provisionNanoWallet({...common,seedFile:primarySeedFile,dataDir:primary});
+  await provisionNanoWallet({...common,seedFile:controllerSeedFile,dataDir:controller});
+  await saveWalletSelection(home,{nanoDirectory:primary,nanoControllerDirectory:controller});
   const primaryBefore=await readFile(join(primary,'wallet.json')),controllerBefore=await readFile(join(controller,'wallet.json'));
   const primarySeedPath=JSON.parse(primaryBefore).keySource.seedFile,controllerSeedPath=JSON.parse(controllerBefore).keySource.seedFile;
   const primarySeed=await readFile(primarySeedPath),controllerSeed=await readFile(controllerSeedPath);
@@ -217,10 +209,9 @@ test('explicit shared Nano controller clears a previously saved separate control
   const cancelled=await terminal(args,environment,'NO');assert.notEqual(cancelled.exitCode,0);
   assert.equal(readWalletSelection(home).nanoControllerDirectory,controller);
   const approved=await terminal(args,environment);assert.equal(approved.exitCode,0);assert.equal(approved.promptAnswered,true);
-  assert.deepEqual(readWalletSelection(home),{nanoDirectory:primary,paymentHandoffDirectory:handoffs});
+  assert.deepEqual(readWalletSelection(home),{nanoDirectory:primary});
   const restart=await restartedSelection(home);
   assert.equal(restart.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR,primary);assert.equal(restart.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR,primary);
-  assert.equal(restart.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR,handoffs);
   assert.deepEqual(await readFile(join(primary,'wallet.json')),primaryBefore);assert.deepEqual(await readFile(join(controller,'wallet.json')),controllerBefore);
   assert.deepEqual(await readFile(primarySeedPath),primarySeed);assert.deepEqual(await readFile(controllerSeedPath),controllerSeed);
   assert.equal(await readFile(journalPath,'utf8'),'retained native journal');
@@ -234,7 +225,7 @@ test('Nano policy approval rejects a configuration changed during terminal conse
   const directory=join(home,'wallets','nano');
   const seedFile=join(home,'policy.hex');await writeFile(seedFile,'42'.repeat(32)+'\n',{mode:0o600});
   await provisionNanoWallet({seedFile,dataDir:directory,derivationIndex:0,network:'nano:dev',rpcUrl:'http://localhost:17076',
-    origin:'http://localhost:8080',audience:'policy-consent',handoffDirectory:join(home,'handoffs'),terminalConfirmed:true});
+    origin:'http://localhost:8080',audience:'policy-consent',terminalConfirmed:true});
   const path=join(directory,'wallet.json'),before=JSON.parse(await readFile(path,'utf8'));
   const source=`import {readFileSync,writeFileSync} from 'node:fs';
     import {runNanoTerminal} from ${JSON.stringify(moduleUrl('nano-terminal.js'))};

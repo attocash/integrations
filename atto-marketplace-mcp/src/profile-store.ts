@@ -26,8 +26,6 @@ export interface MarketplaceProfile {
   publishXnoLimit: string | null;
   productPublishAttoLimit: string | null;
   productPublishXnoLimit: string | null;
-  applyAttoLimit: string | null;
-  applyXnoLimit: string | null;
   purchaseAttoLimit: string | null;
   purchaseXnoLimit: string | null;
   accessToken: string | null;
@@ -39,7 +37,7 @@ export interface MarketplaceProfile {
 }
 
 export interface NewProfile extends Omit<MarketplaceProfile,
-  'controllerIndex' | 'apiKey' | 'apiScopes' | 'publishAttoLimit' | 'publishXnoLimit' | 'applyAttoLimit' | 'applyXnoLimit' |
+  'controllerIndex' | 'apiKey' | 'apiScopes' | 'publishAttoLimit' | 'publishXnoLimit' |
   'productPublishAttoLimit' | 'productPublishXnoLimit' | 'purchaseAttoLimit' | 'purchaseXnoLimit' |
   'accessToken' | 'accessExpiresAt' | 'refreshToken' | 'refreshExpiresAt' | 'refreshState' | 'refreshAttemptId'> {
   controllerIndex?: number;
@@ -49,8 +47,6 @@ export interface NewProfile extends Omit<MarketplaceProfile,
   publishXnoLimit?: string | null;
   productPublishAttoLimit?: string | null;
   productPublishXnoLimit?: string | null;
-  applyAttoLimit?: string | null;
-  applyXnoLimit?: string | null;
   purchaseAttoLimit?: string | null;
   purchaseXnoLimit?: string | null;
   accessToken?: string | null;
@@ -98,8 +94,6 @@ export class MarketplaceProfileStore {
         publish_xno_limit TEXT,
         product_publish_atto_limit TEXT,
         product_publish_xno_limit TEXT,
-        apply_atto_limit TEXT,
-        apply_xno_limit TEXT,
         purchase_atto_limit TEXT,
         purchase_xno_limit TEXT,
         access_token TEXT,
@@ -145,8 +139,6 @@ export class MarketplaceProfileStore {
         publish_xno_limit TEXT,
         product_publish_atto_limit TEXT,
         product_publish_xno_limit TEXT,
-        apply_atto_limit TEXT,
-        apply_xno_limit TEXT,
         purchase_atto_limit TEXT,
         purchase_xno_limit TEXT,
         created_at INTEGER NOT NULL,
@@ -237,13 +229,12 @@ export class MarketplaceProfileStore {
       this.db.prepare(`INSERT INTO profiles (
         id,origin,audience,account_id,agent_id,identity_id,controller_network,controller_address,controller_index,
         auth_mode,api_key,api_scopes,publish_atto_limit,publish_xno_limit,product_publish_atto_limit,product_publish_xno_limit,
-        apply_atto_limit,apply_xno_limit,purchase_atto_limit,purchase_xno_limit,access_token,access_expires_at,refresh_token,refresh_expires_at
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        purchase_atto_limit,purchase_xno_limit,access_token,access_expires_at,refresh_token,refresh_expires_at
+      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
         profile.id, profile.origin, profile.audience, profile.accountId, profile.agentId, profile.identityId,
         profile.controllerNetwork, profile.controllerAddress, profile.controllerIndex ?? 0, profile.authMode, profile.apiKey ?? null,
         JSON.stringify(profile.apiScopes ?? []), profile.publishAttoLimit ?? null,
         profile.publishXnoLimit ?? null, profile.productPublishAttoLimit ?? null, profile.productPublishXnoLimit ?? null,
-        profile.applyAttoLimit ?? null, profile.applyXnoLimit ?? null,
         profile.purchaseAttoLimit ?? null, profile.purchaseXnoLimit ?? null,
         profile.accessToken ?? null, profile.accessExpiresAt ?? null, profile.refreshToken ?? null,
         profile.refreshExpiresAt ?? null,
@@ -300,18 +291,17 @@ export class MarketplaceProfileStore {
   }
 
   replaceSessionWithApiKey(id: string, apiKey: string, scopes: string[], ceilings: {
-    publishAttoLimit?: string; publishXnoLimit?: string; applyAttoLimit?: string; applyXnoLimit?: string;
+    publishAttoLimit?: string; publishXnoLimit?: string;
     productPublishAttoLimit?: string; productPublishXnoLimit?: string;
     purchaseAttoLimit?: string; purchaseXnoLimit?: string;
   }): void {
     this.transaction(() => {
       const result = this.db.prepare(`UPDATE profiles SET auth_mode='scoped-api-key',api_key=?,api_scopes=?,
-        publish_atto_limit=?,publish_xno_limit=?,product_publish_atto_limit=?,product_publish_xno_limit=?,apply_atto_limit=?,apply_xno_limit=?,purchase_atto_limit=?,purchase_xno_limit=?,access_token=NULL,access_expires_at=NULL,
+        publish_atto_limit=?,publish_xno_limit=?,product_publish_atto_limit=?,product_publish_xno_limit=?,purchase_atto_limit=?,purchase_xno_limit=?,access_token=NULL,access_expires_at=NULL,
         refresh_token=NULL,refresh_expires_at=NULL,refresh_state='READY',refresh_attempt_id=NULL
         WHERE id=? AND auth_mode='controller-session'`).run(apiKey, JSON.stringify([...new Set(scopes)].sort()),
         ceilings.publishAttoLimit ?? null, ceilings.publishXnoLimit ?? null,
         ceilings.productPublishAttoLimit ?? null, ceilings.productPublishXnoLimit ?? null,
-        ceilings.applyAttoLimit ?? null, ceilings.applyXnoLimit ?? null,
         ceilings.purchaseAttoLimit ?? null, ceilings.purchaseXnoLimit ?? null, id);
       if (Number(result.changes) !== 1) throw new ProfileError('AUTH_MODE', 'This profile cannot be changed to scoped API-key authority.');
     });
@@ -387,7 +377,7 @@ export class MarketplaceProfileStore {
             identity.requestId) as {id:string;operation:string}|undefined;
           if (alias) {
             throw new ProfileError('FUNDING_PROFILE_ALIAS',
-              `This requestId already has a ${alias.operation} mutation under matching local profile \`${alias.id}\`. Select that original profile and check marketplace_funding_status with the same requestId. No mutation was reserved in the current profile, and no Marketplace or wallet request, signing, or payment was performed.`);
+              `This requestId already has a ${alias.operation} mutation under matching local profile \`${alias.id}\`. Select that original profile and retry the same operation with the same requestId. No mutation was reserved in the current profile, and no Marketplace or wallet request, signing, or payment was performed.`);
           }
         }
       }
@@ -505,7 +495,7 @@ export class MarketplaceProfileStore {
 
   putIssuedCredential(profileId: string, credential: {
     apiKeyId: string; apiKey: string; scopes: string[]; publishAttoLimit?: string | null;
-    publishXnoLimit?: string | null; applyAttoLimit?: string | null; applyXnoLimit?: string | null;
+    publishXnoLimit?: string | null;
     productPublishAttoLimit?: string | null; productPublishXnoLimit?: string | null;
     purchaseAttoLimit?: string | null; purchaseXnoLimit?: string | null;
   }): void {
@@ -521,30 +511,28 @@ export class MarketplaceProfileStore {
         return;
       }
       this.db.prepare(`INSERT INTO issued_credentials(profile_id,api_key_id,api_key,scopes,publish_atto_limit,
-        publish_xno_limit,product_publish_atto_limit,product_publish_xno_limit,apply_atto_limit,apply_xno_limit,
-        purchase_atto_limit,purchase_xno_limit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        publish_xno_limit,product_publish_atto_limit,product_publish_xno_limit,
+        purchase_atto_limit,purchase_xno_limit,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
         profileId, credential.apiKeyId, credential.apiKey, JSON.stringify([...new Set(credential.scopes)].sort()),
         credential.publishAttoLimit ?? null, credential.publishXnoLimit ?? null,
         credential.productPublishAttoLimit ?? null, credential.productPublishXnoLimit ?? null,
-        credential.applyAttoLimit ?? null,
-        credential.applyXnoLimit ?? null, credential.purchaseAttoLimit ?? null, credential.purchaseXnoLimit ?? null, Date.now());
+        credential.purchaseAttoLimit ?? null, credential.purchaseXnoLimit ?? null, Date.now());
     });
   }
 
   getIssuedCredential(profileId: string, apiKeyId: string): {
-    apiKeyId:string; apiKey:string; scopes:string[]; publishAttoLimit:string|null; publishXnoLimit:string|null; applyAttoLimit:string|null; applyXnoLimit:string|null;
+    apiKeyId:string; apiKey:string; scopes:string[]; publishAttoLimit:string|null; publishXnoLimit:string|null;
     productPublishAttoLimit:string|null; productPublishXnoLimit:string|null;
     purchaseAttoLimit:string|null; purchaseXnoLimit:string|null;
   } {
     assertUuid(apiKeyId, 'credential');
-    const row = this.db.prepare(`SELECT api_key_id,api_key,scopes,publish_atto_limit,publish_xno_limit,product_publish_atto_limit,product_publish_xno_limit,apply_atto_limit,apply_xno_limit,
+    const row = this.db.prepare(`SELECT api_key_id,api_key,scopes,publish_atto_limit,publish_xno_limit,product_publish_atto_limit,product_publish_xno_limit,
       purchase_atto_limit,purchase_xno_limit
       FROM issued_credentials WHERE profile_id=? AND api_key_id=?`).get(profileId, apiKeyId) as Record<string,unknown>|undefined;
     if (!row) throw new ProfileError('CREDENTIAL_NOT_FOUND', 'No locally saved one-time API key matches this credential ID.');
     return { apiKeyId:String(row.api_key_id), apiKey:String(row.api_key), scopes:parseScopes(row.scopes),
       publishAttoLimit:nullableString(row.publish_atto_limit), publishXnoLimit:nullableString(row.publish_xno_limit),
       productPublishAttoLimit:nullableString(row.product_publish_atto_limit), productPublishXnoLimit:nullableString(row.product_publish_xno_limit),
-      applyAttoLimit:nullableString(row.apply_atto_limit), applyXnoLimit:nullableString(row.apply_xno_limit),
       purchaseAttoLimit:nullableString(row.purchase_atto_limit), purchaseXnoLimit:nullableString(row.purchase_xno_limit) };
   }
 
@@ -610,10 +598,10 @@ export class MarketplaceProfileStore {
     const expected={
       profiles:['id','origin','audience','account_id','agent_id','identity_id','controller_network','controller_address',
         'controller_index','auth_mode','api_key','api_scopes','publish_atto_limit','publish_xno_limit','product_publish_atto_limit',
-        'product_publish_xno_limit','apply_atto_limit','apply_xno_limit','purchase_atto_limit','purchase_xno_limit','access_token',
+        'product_publish_xno_limit','purchase_atto_limit','purchase_xno_limit','access_token',
         'access_expires_at','refresh_token','refresh_expires_at','refresh_state','refresh_attempt_id'],
       issued_credentials:['profile_id','api_key_id','api_key','scopes','publish_atto_limit','publish_xno_limit',
-        'product_publish_atto_limit','product_publish_xno_limit','apply_atto_limit','apply_xno_limit','purchase_atto_limit',
+        'product_publish_atto_limit','product_publish_xno_limit','purchase_atto_limit',
         'purchase_xno_limit','created_at'],
     };
     for (const [table,names] of Object.entries(expected)) {
@@ -641,7 +629,6 @@ function profileFromRow(row: Record<string, unknown>): MarketplaceProfile {
     apiKey: nullableString(row.api_key), apiScopes: parseScopes(row.api_scopes),
     publishAttoLimit: nullableString(row.publish_atto_limit), publishXnoLimit: nullableString(row.publish_xno_limit),
     productPublishAttoLimit: nullableString(row.product_publish_atto_limit), productPublishXnoLimit: nullableString(row.product_publish_xno_limit),
-    applyAttoLimit: nullableString(row.apply_atto_limit), applyXnoLimit: nullableString(row.apply_xno_limit),
     purchaseAttoLimit: nullableString(row.purchase_atto_limit), purchaseXnoLimit: nullableString(row.purchase_xno_limit), accessToken: nullableString(row.access_token),
     accessExpiresAt: nullableNumber(row.access_expires_at), refreshToken: nullableString(row.refresh_token),
     refreshExpiresAt: nullableNumber(row.refresh_expires_at), refreshState: row.refresh_state as RefreshState,
@@ -737,7 +724,7 @@ function walletPathError(): ProfileError {
 }
 
 export function requireSession(profile: MarketplaceProfile): void {
-  if (profile.authMode!=='controller-session') throw new ProfileError('SETUP_REQUIRED','This operation requires a controller-session profile. Use guided setup to configure a separate controller-session profile; scoped API-key profiles do not gain funding authority.');
+  if (profile.authMode!=='controller-session') throw new ProfileError('SETUP_REQUIRED','This operation requires a controller-session profile. Use guided setup to configure a separate controller-session profile; scoped API-key profiles do not gain controller authority.');
 }
 
 function ensureProfileHome(home: string): void {

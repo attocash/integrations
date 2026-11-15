@@ -2,7 +2,7 @@ import {fileURLToPath} from 'node:url';
 import {inspectNanoWallet} from '@attocash/atto-marketplace-nano-adapter';
 import {MarketplaceProfileStore,ProfileError} from './profile-store.js';
 import {readWalletSelection,saveWalletSelection} from './wallet-preferences.js';
-import {ensurePaymentHandoffDirectory} from './payment-handoff-files.js';
+import {ensurePrivateDirectory} from './private-directory.js';
 import {managedWalletEnvironment} from './wallet-home.js';
 import {setupAttoWalletInteractive,type AttoSetupResult} from './atto-setup.js';
 import {setupNanoWalletInteractive} from './nano-setup.js';
@@ -25,12 +25,12 @@ function optionsFromArgs(argv:string[]):GuidedOptions {
 }
 function publicHostConfiguration(home:string,profile:string):Record<string,unknown> {
   const selected=managedWalletEnvironment(home,{});
-  const env=Object.fromEntries(['MARKETPLACE_MCP_HOME','MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR','MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR'].map(key=>[key,selected[key]!]));
+  const env=Object.fromEntries(['MARKETPLACE_MCP_HOME','MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_WALLET_DATA_DIR','MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR'].map(key=>[key,selected[key]!]));
   return {mcpServers:{'atto-marketplace':{command:process.execPath,args:[fileURLToPath(new URL('./main.js',import.meta.url)),'--home',home,'--profile',profile],env}}};
 }
 async function saveNanoSelection(home:string,directory:string,env:NodeJS.ProcessEnv,prompt:Prompt):Promise<NodeJS.ProcessEnv> {
   const wallet=await inspectNanoWallet(directory);
-  let selected={...env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:directory,MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:wallet.handoffDirectory};
+  let selected={...env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:directory};
   const configured=managedWalletEnvironment(home,selected);
   let controllerDirectory=configured.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR!;
   if(controllerDirectory!==directory){
@@ -38,8 +38,8 @@ async function saveNanoSelection(home:string,directory:string,env:NodeJS.Process
     process.stderr.write(`Selected separate Nano controller: ${controller.sourceAddress} at ${JSON.stringify(controllerDirectory)}\n`);
     if(!await yesNo(prompt,'Keep this separate Nano controller for Marketplace approvals?',true))controllerDirectory=directory;
   }
-  ensurePaymentHandoffDirectory(home);
-  await saveWalletSelection(home,{nanoDirectory:directory,nanoControllerDirectory:controllerDirectory,paymentHandoffDirectory:wallet.handoffDirectory});
+  ensurePrivateDirectory(home);
+  await saveWalletSelection(home,{nanoDirectory:directory,nanoControllerDirectory:controllerDirectory});
   return {...selected,MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR:controllerDirectory};
 }
 
@@ -79,7 +79,6 @@ export async function runGuidedSetup(argv:string[],env:NodeJS.ProcessEnv,prompt:
     const resumeEnv={...env};
     if(approved?.attoDirectory)resumeEnv.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR=approved.attoDirectory;
     if(approved?.nanoDirectory){resumeEnv.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR=approved.nanoDirectory;resumeEnv.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR=approved.nanoControllerDirectory??approved.nanoDirectory;}
-    if(approved?.paymentHandoffDirectory)resumeEnv.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR=approved.paymentHandoffDirectory;
     await connectWithTerminalApproval(['--profile',profile,'--home',home,'--complete'],resumeEnv,home,profile,prompt);
     const resumed=await MarketplaceProfileStore.open(home);
     try{if(resumed.listProfileIds().includes(profile))process.stdout.write(`${JSON.stringify({status:'ready',home,profileId:profile,...publicHostConfiguration(home,profile)})}\n`);}finally{resumed.close();}

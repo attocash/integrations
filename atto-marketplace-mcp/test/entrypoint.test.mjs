@@ -45,3 +45,28 @@ test('removed wallet approve alias fails before opening a home or requesting con
     await assert.rejects(readdir(home),{code:'ENOENT'});
   } finally {await rm(directory,{recursive:true,force:true});}
 });
+
+for (const help of ['--help', '-h']) {
+  test(`setup ${help} exits successfully without a terminal or home side effects`, async () => {
+    // Given a nonexistent private home and piped stdio.
+    const directory = await mkdtemp(join(tmpdir(), 'atto-marketplace-setup-help-'));
+    const home = join(directory, 'untouched');
+    try {
+      // When help is requested before either guided or explicit setup dispatch.
+      const result = await execute(process.execPath, [fileURLToPath(new URL('../dist/main.js', import.meta.url)),
+        'setup', help, '--home', home], { timeout: 10_000,
+        env: { ...process.env, MARKETPLACE_MCP_HOME: home, HOME: home } });
+      // Then usage is useful and no approval, network setup or profile creation occurs.
+      for (const option of ['--advanced', '--controller-network', '--mode', '--complete', '--reauthenticate', '--from-profile', '--credential-id']) {
+        assert.ok(result.stdout.includes(option), option);
+      }
+      assert.match(result.stdout, /Guided setup: atto-marketplace-mcp setup/);
+      assert.doesNotMatch(result.stderr, /requires an interactive|TERMINAL_REQUIRED|Type APPROVE/);
+      await assert.rejects(readdir(home), { code: 'ENOENT' });
+      const wallet = await execute(process.execPath, [fileURLToPath(new URL('../dist/main.js', import.meta.url)),
+        'wallet', 'setup', '--help', '--home', home], { timeout: 10_000 });
+      assert.match(wallet.stdout + wallet.stderr, /Usage: atto-marketplace-mcp wallet setup/);
+      await assert.rejects(readdir(home), { code: 'ENOENT' });
+    } finally { await rm(directory, { recursive: true, force: true }); }
+  });
+}

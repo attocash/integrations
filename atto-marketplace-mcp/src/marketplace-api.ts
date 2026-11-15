@@ -3,8 +3,6 @@ import { resolve } from 'node:path';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
 
 const REQUEST_TIMEOUT_MS = 15_000;
-const COMMAND_WAIT_TIMEOUT_MS = 30_000;
-const COMMAND_POLL_INTERVAL_MS = 250;
 const RESPONSE_LIMIT_BYTES = 1_048_576;
 const TOKEN_LIMIT = 8192;
 
@@ -12,21 +10,10 @@ const TOKEN_LIMIT = 8192;
 // SQLite remains the authority for attempt ownership across processes and logins.
 const sessionRefreshes = new Map<string, Promise<string>>();
 
-export interface MarketplaceCommandPointer {
-  commandId: string;
-  statusUrl: string;
-}
-
-interface CommandOrigin {
-  operation: 'task-publish';
-  target: string;
-}
-
 export interface ApiResponse {
   status: number;
   json: unknown;
   headers: Headers;
-  command?: MarketplaceCommandPointer;
 }
 
 export interface RequestOptions {
@@ -52,21 +39,12 @@ export class MarketplaceApiError extends Error {
 }
 
 export class MarketplaceApiClient {
-  constructor(private readonly profiles: MarketplaceProfileStore, private readonly profileId: string,
-    private readonly commandWaitTimeoutMs = COMMAND_WAIT_TIMEOUT_MS,
-    private readonly commandPollIntervalMs = COMMAND_POLL_INTERVAL_MS) {}
+  constructor(private readonly profiles: MarketplaceProfileStore, private readonly profileId: string) {}
 
   async request(path: string, options: RequestOptions = {}): Promise<ApiResponse> {
-    const profile = this.profiles.getProfile(this.profileId);
-    const response = await this.fetchResponse(profile, path, options, REQUEST_TIMEOUT_MS);
-    if (response.status !== 202) return response;
-    const pointer = parseCommandPointer(response.json);
-    return pointer ? { ...response, command: pointer } : response;
-  }
-
-  async resumeCommand(pointer: MarketplaceCommandPointer, origin?: CommandOrigin): Promise<ApiResponse> {
-    const profile = this.profiles.getProfile(this.profileId);
-    return this.resolveCommand(profile, validateCommandPointer(pointer), origin);
+    const response = await this.fetchResponse(this.profiles.getProfile(this.profileId), path, options, REQUEST_TIMEOUT_MS);
+    if (response.status === 202 && !options.allowStatus?.includes(202)) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL', 'Unexpected asynchronous response. Preserve the original request ID and retry its exact request.');
+    return response;
   }
 
   /** Stream a bounded private file through the pinned profile and normal auth refresh path. */
@@ -201,80 +179,9 @@ export class MarketplaceApiClient {
         const minimumError = taskMinimumError(json);
         if (minimumError) throw minimumError;
       }
-      if ((options.method ?? 'GET') === 'POST' && url.search === ''
-        && (url.pathname === '/v1/agent/withdrawals'
-          || /^\/v1\/(?:agent\/releases\/[0-9a-f-]+\/purchase|agent\/purchases\/[0-9a-f-]+\/refund)$/.test(url.pathname))) {
-        const location=response.headers.get('Location');
-        if (location) {
-          const match=/^\/v1\/agent\/commands\/([0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})$/.exec(location);
-          if (!match) throw new MarketplaceApiError('COMMAND_PROTOCOL',url.pathname === '/v1/agent/withdrawals'
-            ? 'Marketplace returned an unsafe withdrawal command pointer.' : 'Marketplace returned an unsafe Shop command pointer.');
-          if (url.pathname === '/v1/agent/withdrawals') {
-            throw new MarketplaceApiError('COMMAND_UNRESOLVED','Recover the original withdrawal through its durable command status.',
-              response.status,{commandId:match[1],statusUrl:location});
-          }
-          const detail=objectRecord(json);
-          throw new MarketplaceApiError(typeof detail?.error==='string'?detail.error:'MARKETPLACE_HTTP',
-            typeof detail?.message==='string'?detail.message:`Marketplace returned HTTP ${response.status} for the original Shop command.`,
-            response.status,{commandId:match[1],statusUrl:location});
-        }
-      }
       throw new MarketplaceApiError('MARKETPLACE_HTTP', `Marketplace returned HTTP ${response.status} for the requested operation.`, response.status);
     }
     return { status: response.status, json, headers: response.headers };
-  }
-
-  private async resolveCommand(profile: MarketplaceProfile, pointer: MarketplaceCommandPointer,
-    origin?: CommandOrigin): Promise<ApiResponse> {
-    const deadline = Date.now() + this.commandWaitTimeoutMs;
-    let lastTransientError: unknown;
-    while (Date.now() < deadline) {
-      const remaining = deadline - Date.now();
-      try {
-        const response = await this.fetchResponse(profile, pointer.statusUrl,
-          { method: 'GET', allowStatus: [200] }, Math.min(REQUEST_TIMEOUT_MS, remaining));
-        const status = objectRecord(response.json);
-        if (!status || status.commandId !== pointer.commandId || status.statusUrl !== pointer.statusUrl) {
-          throw new MarketplaceApiError('COMMAND_PROTOCOL', 'Marketplace returned status for a different durable command.', undefined,
-            { commandId: pointer.commandId, statusUrl: pointer.statusUrl });
-        }
-        if (status.status === 'SETTLED') {
-          if (!Object.hasOwn(status, 'result')) {
-            throw new MarketplaceApiError('COMMAND_PROTOCOL', 'Marketplace omitted the completed durable command result.', undefined,
-              { commandId: pointer.commandId, statusUrl: pointer.statusUrl });
-          }
-          return { status: 200, json: status.result, headers: response.headers, command: pointer };
-        }
-        if (status.status === 'REJECTED') {
-          const code = typeof status.errorCode === 'string' && /^[A-Z0-9_]{1,64}$/.test(status.errorCode)
-            ? status.errorCode : 'COMMAND_REJECTED';
-          const httpStatus = Number.isInteger(status.httpStatus) && Number(status.httpStatus) >= 400
-            && Number(status.httpStatus) <= 599 ? Number(status.httpStatus) : undefined;
-          if (origin?.operation === 'task-publish' && origin.target.length <= 64
-            && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(origin.target)
-            && pointer.statusUrl === `/v1/agent/commands/${pointer.commandId}`
-            && status.errorCode === 'task_minimum' && httpStatus === 409) {
-            const minimumError = taskMinimumError(status.result, pointer);
-            if (minimumError) throw minimumError;
-          }
-          throw new MarketplaceApiError(code, 'Marketplace rejected this durable command.', httpStatus,
-            { commandId: pointer.commandId, statusUrl: pointer.statusUrl, terminal: true });
-        }
-        if (status.status !== 'PENDING') {
-          throw new MarketplaceApiError('COMMAND_PROTOCOL', 'Marketplace returned an unsupported durable command state.', undefined,
-            { commandId: pointer.commandId, statusUrl: pointer.statusUrl });
-        }
-        lastTransientError = undefined;
-      } catch (error) {
-        if (error instanceof MarketplaceApiError && error.code !== 'MARKETPLACE_UNAVAILABLE') throw error;
-        lastTransientError = error;
-      }
-      const waitMs = Math.min(this.commandPollIntervalMs, Math.max(0, deadline - Date.now()));
-      if (waitMs > 0) await new Promise(resolve => setTimeout(resolve, waitMs));
-    }
-    throw new MarketplaceApiError('COMMAND_PENDING', 'Marketplace accepted this command and it is still unresolved. Resume it with the same request ID; do not submit a replacement.',
-      undefined, { commandId: pointer.commandId, statusUrl: pointer.statusUrl,
-        ...(lastTransientError instanceof MarketplaceApiError ? { statusErrorCode: lastTransientError.code } : {}) });
   }
 
   private async authorization(profile: MarketplaceProfile): Promise<string> {
@@ -383,17 +290,16 @@ function inactiveActivityError(value: unknown): MarketplaceApiError | undefined 
       recovery: { action: 'read-engagement-and-activity', replaceRequestAllowed: false } });
 }
 
-function taskMinimumError(value: unknown, pointer?: MarketplaceCommandPointer): MarketplaceApiError | undefined {
+function taskMinimumError(value: unknown): MarketplaceApiError | undefined {
   const response = objectRecord(value);
   if (response?.error !== 'task_minimum') return undefined;
-  const pointerDetails = pointer ? { commandId: pointer.commandId, statusUrl: pointer.statusUrl, terminal: true } : {};
   const recovery = { action: 'reconcile-rejected-publish-then-correct-draft', newRequestIdRequired: true };
   const details = objectRecord(response.details);
   if (!Object.hasOwn(response, 'details') || response.details === null
     || (details !== undefined && Object.keys(details).length === 0)) {
     return new MarketplaceApiError('TASK_MINIMUM',
       'Marketplace rejected this publication because its gross is below the configured asset minimum. First reconcile the terminal rejection for the original request. Then read the private draft’s current version, determine the configured minimum for its asset, update grossAtomic to that amount or higher, and publish the corrected draft with a new requestId. Never retry the rejected requestId with changed arguments.',
-      409, { serverCode: 'task_minimum', recovery, ...pointerDetails });
+      409, { serverCode: 'task_minimum', recovery });
   }
   if (!details) return undefined;
   const keys = Object.keys(details).sort();
@@ -406,7 +312,7 @@ function taskMinimumError(value: unknown, pointer?: MarketplaceCommandPointer): 
   const minimumAtomic = details.minimumAtomic;
   return new MarketplaceApiError('TASK_MINIMUM',
     `Marketplace rejected this publication because the ${asset} gross is below its minimum of ${minimumAtomic} atomic units. First reconcile the terminal rejection for the original request. Then read the private draft’s current version, update grossAtomic to at least ${minimumAtomic}, and publish the corrected draft with a new requestId. Never retry the rejected requestId with changed arguments.`,
-    409, { serverCode: 'task_minimum', asset, minimumAtomic, recovery, ...pointerDetails });
+    409, { serverCode: 'task_minimum', asset, minimumAtomic, recovery });
 }
 
 /** Preserve only the signer's exact public status/code pairs, never upstream diagnostics. */
@@ -454,24 +360,6 @@ function missingProfilePublicationFields(value: unknown): Array<'handle' | 'disp
   return supported.filter(field => Object.hasOwn(details, field));
 }
 
-export function parseCommandPointer(value: unknown): MarketplaceCommandPointer | undefined {
-  const record = objectRecord(value);
-  if (!record || !Object.hasOwn(record, 'commandId')) return undefined;
-  // Top-up status DTOs also expose commandId/statusUrl, but their status URL is the
-  // payment lookup itself and the endpoint has its own x402 receipt semantics.
-  if (record.intentId === record.commandId && record.statusUrl === `/v1/agent/topups/${record.intentId}`) return undefined;
-  return validateCommandPointer({ commandId: record.commandId as string, statusUrl: record.statusUrl as string });
-}
-
-function validateCommandPointer(value: MarketplaceCommandPointer): MarketplaceCommandPointer {
-  const commandIdPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-  if (!value || typeof value.commandId !== 'string' || !commandIdPattern.test(value.commandId)
-    || value.statusUrl !== `/v1/agent/commands/${value.commandId}`) {
-    throw new MarketplaceApiError('COMMAND_PROTOCOL', 'Marketplace returned an invalid durable command pointer.');
-  }
-  return { commandId: value.commandId, statusUrl: value.statusUrl };
-}
-
 export function newRequestId(): string { return randomUUID(); }
 
 async function readBounded(response: Response, overflowError?: MarketplaceApiError): Promise<string> {
@@ -516,10 +404,4 @@ function dateMillis(value: unknown): number {
   const timestamp = Date.parse(value);
   if (!Number.isSafeInteger(timestamp) || timestamp <= 0) throw new Error('bad date');
   return timestamp;
-}
-
-export function commandPointerFromError(error:unknown):MarketplaceCommandPointer|undefined {
-  if (!(error instanceof MarketplaceApiError) || !error.details) return undefined;
-  try { return parseCommandPointer(error.details); }
-  catch { return undefined; }
 }

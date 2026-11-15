@@ -226,3 +226,13 @@ test('Every command has a description and an example, and removed commands have 
   }
   await f.assertNoProfile();
 });
+
+test('Marketplace help advertises only connection and current typed approval',async t=>{
+  const f=await fixture(t),help=await f.run(['marketplace','--help']);
+  assert.equal(help.code,0);assert.match(help.stdout,/connect/);assert.match(help.stdout,/approve/);
+  assert.doesNotMatch(help.stdout,/topup|marketplace status|funding/i);
+  for(const command of ['topup','status']){
+    const rejected=await f.run(['marketplace',command]);assert.equal(rejected.code,1);assert.match(rejected.stderr,/unknown command/i);
+  }
+  await f.assertNoProfile();
+});

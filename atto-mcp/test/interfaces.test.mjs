@@ -36,7 +36,7 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   // Then
   const publicOperations = operations.filter(operation => !operation.internalOnly);
   assert.deepEqual(result.tools.map(tool => tool.name).sort(), publicOperations.map(operation => operation.name).sort());
-  assert.equal(result.tools.length, 40);
+  assert.equal(result.tools.length, 38);
   assert.equal(result.tools.some(tool => tool.name.startsWith('marketplace_pay_intent')), false,
     'ordinary Atto MCP clients never receive private payment-signature tools');
   await assert.rejects(client.callTool({ name: 'marketplace_pay_intent_status', arguments: { requestId: 'request-identifier-001' } }));
@@ -55,13 +55,6 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.match(result.tools.find(tool => tool.name === 'message_sign').description, /locally approved messageSigningIndexes/);
   assert.equal(result.tools.find(tool => tool.name === 'watch_start').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'price_quote').annotations.readOnlyHint, true);
-  assert.equal(result.tools.find(tool => tool.name === 'marketplace_topup').annotations.readOnlyHint, false);
-  assert.equal(result.tools.find(tool => tool.name === 'marketplace_topup').annotations.destructiveHint, true);
-  assert.equal(result.tools.find(tool => tool.name === 'marketplace_topup').annotations.idempotentHint, true);
-  assert.equal(result.tools.find(tool => tool.name === 'marketplace_topup_status').annotations.readOnlyHint, true);
-  assert.equal(result.tools.find(tool => tool.name === 'marketplace_topup_status').inputSchema.properties.requestId.type, 'string');
-  assert.match(client.getInstructions(), /funds only the configured Marketplace account/);
-  assert.match(client.getInstructions(), /does not create tasks, hire agents, or submit work/);
   assert.equal(result.tools.find(tool => tool.name === 'terms_accept').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'pool_get').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'address_add').annotations.idempotentHint, false);
@@ -82,23 +75,14 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   }
 });
 
-test('only the explicitly private Marketplace child mode registers signed-intent recovery tools', async t => {
-  // Given a private stdio transport whose only consumer is the Marketplace MCP child.
-  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-  const client = new Client({ name: 'private-marketplace-child-test', version: '1.0.0' });
-  const secretHeader = Buffer.from('{"x402Version":2,"synthetic":"private"}').toString('base64');
-  const server = createMcpServer({ call: async name => name === 'marketplace_pay_intent_status'
-    ? { requestId: 'request-identifier-001', paymentSignature: secretHeader } : null }, { internalMarketplacePayment: true });
-  t.after(async () => { await client.close(); await server.close(); });
-  await server.connect(serverTransport);
-  await client.connect(clientTransport);
-  // When the child lists tools and reads a journaled payment response.
+test('retired customer payment tools are absent from the wallet catalog', async t => {
+  // Given / When
+  const client = await connected({ call: async () => null }, t);
   const names = (await client.listTools()).tools.map(tool => tool.name);
-  assert.ok(names.includes('marketplace_pay_intent'));
-  assert.ok(names.includes('marketplace_pay_intent_status'));
-  const result = await client.callTool({ name: 'marketplace_pay_intent_status', arguments: { requestId: 'request-identifier-001' } });
-  // Then the exact signature is available over the private pipe.
-  assert.equal(result.structuredContent.result.paymentSignature, secretHeader);
+  // Then local direct sends are the only transfer entrypoint.
+  assert.ok(names.includes('send'));
+  for (const name of ['marketplace_topup','marketplace_topup_status','marketplace_pay_intent','marketplace_pay_intent_status'])
+    assert.equal(names.includes(name), false);
 });
 
 test('MCP limit changes only propose, and an existing connection observes terminal approval', async t => {
@@ -123,9 +107,6 @@ test('MCP limit changes only propose, and an existing connection observes termin
   const denied = await client.callTool({ name: 'address_deactivate', arguments: { index: 0 } });
   assert.equal(denied.isError, true);
   assert.equal(denied.structuredContent.error.code, 'MCP_READ_ONLY');
-  const deniedTopUp = await client.callTool({ name: 'marketplace_topup', arguments: { amount: '1', unit: 'RAW', requestId: 'mcp-read-only-topup' } });
-  assert.equal(deniedTopUp.isError, true);
-  assert.equal(deniedTopUp.structuredContent.error.code, 'MCP_READ_ONLY');
   const requested = { perRequest: null, rolling: [] };
   // When
   const result = await client.callTool({ name: 'limits_propose', arguments: { policy: requested, pool: { indexes: [0], consolidate: true } } });

@@ -187,9 +187,9 @@ async function verifyCli(directory, prefix, noMcp) {
   const source = `
     import assert from 'node:assert/strict';
     const core = await import('@attocash/cli/core');
-    assert.equal(core.operations.length, 40);
-    assert.equal(core.operations.find(operation => operation.name === 'marketplace_topup')?.readOnly, false);
-    assert.equal(core.operations.find(operation => operation.name === 'marketplace_topup_status')?.readOnly, true);
+    assert.equal(core.operations.length, 38);
+    assert.equal(core.operations.some(operation => operation.name === 'marketplace_topup'), false);
+    assert.equal(core.operations.some(operation => operation.name === 'marketplace_topup_status'), false);
     assert.equal(typeof core.errorResult, 'function');
     const app = core.createApplication({ directory: process.argv[1] });
     assert.deepEqual(Object.keys(app).sort(), ['call', 'close', 'start']);
@@ -236,14 +236,16 @@ try {
     join(root, 'atto-cli/test/private-permissions.test.mjs'),
     join(root, 'atto-cli/test/marketplace-wallet-setup.test.mjs'),
     join(root, 'atto-cli/test/marketplace-wallet-inspection.test.mjs'),
-    join(root, 'atto-cli/test/marketplace-private-recovery.test.mjs'),
     join(root, 'atto-cli/test/internal-marketplace-wallet.test.mjs'),
+    join(root, 'atto-cli/test/marketplace-connection.test.mjs'),
+    join(root, 'atto-cli/test/marketplace-approval.test.mjs'),
+    join(root, 'atto-cli/test/marketplace-approval-workspace.test.mjs'),
     join(root, 'atto-cli/test/receive-amount-recovery.test.mjs'),
     join(root, 'atto-cli/test/auto-receive.test.mjs'), join(root, 'atto-cli/test/receive-lookup.test.mjs'), join(root, 'atto-cli/test/receive-progress.test.mjs'),
     join(root, 'atto-cli/test/work.test.mjs'), join(root, 'atto-cli/test/background-receive.test.mjs'),
     join(root, 'atto-cli/test/network.test.mjs'), join(root, 'atto-cli/test/stream-idle.test.mjs'),
     join(root, 'atto-cli/test/reconciliation.test.mjs'),
-    join(root, 'atto-cli/test/payments.test.mjs'), join(root, 'atto-cli/test/marketplace-topups.test.mjs'), join(root, 'atto-mcp/test/interfaces.test.mjs'), join(root, 'atto-mcp/test/onboarding.test.mjs'),
+    join(root, 'atto-cli/test/payments.test.mjs'), join(root, 'atto-mcp/test/interfaces.test.mjs'), join(root, 'atto-mcp/test/onboarding.test.mjs'),
     join(root, 'atto-mcp/test/stream-failure.test.mjs'), join(root, 'atto-mcp/test/configuration.test.mjs'),
     join(root, 'atto-mcp/test/representative.test.mjs'),
   ], {
@@ -255,11 +257,11 @@ try {
     join(root, 'atto-marketplace-mcp/test/platform-support.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/approval-files.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/approval-terminal-recovery.test.mjs'),
-    join(root, 'atto-marketplace-mcp/test/payment-handoff-files.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/wallet-preferences.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/stdio-submission-files.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/marketplace-api-signer.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/node-wallet-host.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/atto-payment-wallet-host.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/wallet-results.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/receive-recovery-errors.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/wallet-access.test.mjs'),
@@ -267,8 +269,12 @@ try {
     join(root, 'atto-marketplace-mcp/test/nano-wallet-terminal.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/setup.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/guided-onboarding.integration.test.mjs'),
-    join(root, 'atto-marketplace-mcp/test/atto-private-recovery.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/stdio-profile.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/direct-payments.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/noncustodial-tools.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/stdio-products.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/stdio-purchases.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/work-receipt.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/unified-approval-native.integration.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/shared-recovery-onboarding.integration.test.mjs'),
   ]);

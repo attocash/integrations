@@ -55,13 +55,7 @@ function binding(request) {
     if (command.credential) {
       const credential = command.credential;
       const scopes = [...credential.scopes].sort();
-      const version = credential.productPublishAttoLimit != null || credential.productPublishXnoLimit != null ? 4
-        : scopes.some(scope => /^(files|products|purchases):/.test(scope)) ? 3 : 2;
-      const fields = [`agent-credential-v${version}`, credential.name.trim(), String(credential.expiresInDays ?? 90), scopes.join(','),
-        credential.publishAttoLimit ?? '', credential.publishXnoLimit ?? '', credential.applyAttoLimit ?? '', credential.applyXnoLimit ?? ''];
-      if (version >= 3) fields.push(credential.purchaseAttoLimit ?? '', credential.purchaseXnoLimit ?? '');
-      if (version >= 4) fields.push(credential.productPublishAttoLimit ?? '', credential.productPublishXnoLimit ?? '');
-      payload = fields.join('\n');
+      payload=['marketplace-credential-v1',credential.name.trim(),String(credential.expiresInDays??90),scopes.join(','),credential.publishAttoLimit??'',credential.publishXnoLimit??'',credential.purchaseAttoLimit??'',credential.purchaseXnoLimit??'',credential.productPublishAttoLimit??'',credential.productPublishXnoLimit??''].join('\n');
     }
     return hash(['agent-credential-v1', owner, actor, command.operation, command.targetApiKeyId ?? '', command.idempotencyKey, payload]);
   }
@@ -136,7 +130,7 @@ async function fixture(t, network, origin, actualBackend = false) {
     MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: wallet, MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: nano};
   const audience = actualBackend ? process.env.UNIFIED_APPROVAL_BACKEND_AUDIENCE ?? 'urn:marketplace:agent-api:local' : 'unified-approval-fixture';
   const nanoOptions = {dataDir: nano, recoveryWalletDirectory: wallet, derivationIndex: 1, network: 'nano:dev', rpcUrl: 'http://localhost:17076', origin,
-    audience, handoffDirectory: join(root, 'handoffs'), grants: {marketplaceFunding: false, externalTransfers: false,
+    audience,  grants: { externalTransfers: false,
       controllerPurposes: actualBackend ? ['login'] : []},
     limits: {maxPaymentAtomic: '0', rolling24hAtomic: '0'}, terminalConfirmed: true};
   const provision = `import {provisionNanoWallet} from ${JSON.stringify(adapterUrl)};process.stdout.write(JSON.stringify(await provisionNanoWallet(JSON.parse(process.argv[1]))));`;
@@ -146,7 +140,7 @@ async function fixture(t, network, origin, actualBackend = false) {
   assert.equal(savedNano.keySource.recoverySource.directory, wallet);
   assertPrivateOutput(JSON.stringify(savedNano));
   await assert.rejects(readFile(join(nano, 'seed.hex')), {code: 'ENOENT'});
-  await saveWalletSelection(home, {attoDirectory: wallet, nanoDirectory: nano, paymentHandoffDirectory: join(root, 'handoffs')});
+  await saveWalletSelection(home, {attoDirectory: wallet, nanoDirectory: nano});
   const address = network === 'ATTO' ? atto : nanoConfig.address;
   let profile;
   if (actualBackend) {
@@ -234,7 +228,7 @@ async function approveAndRetry(f, name, args) {
   return result;
 }
 
-for (const network of ['ATTO', 'NANO']) test(`${network}: real terminal approvals cross stdio with Kotlin credential/payout/withdrawal bindings`,
+for (const network of ['ATTO', 'NANO']) test(`${network}: real terminal approvals cross stdio with current Kotlin credential bindings`,
   {skip: process.platform !== 'linux', timeout: 120000}, async t => {
     let f, selection = null, withdrawal, posts = 0, challenges = 0;
     const server = createServer(async (req, res) => {
@@ -274,49 +268,12 @@ for (const network of ['ATTO', 'NANO']) test(`${network}: real terminal approval
       {name: 'shop publisher', expiresInDays: 90, scopes: ['products:publish'], productPublishAttoLimit: '20', productPublishXnoLimit: '30'},
     ]) await approveAndRetry(f, 'marketplace_credentials_create', {requestId: randomUUID(), credential});
     const asset = network === 'ATTO' ? 'ATTO' : 'XNO', route = network === 'ATTO' ? 'atto:local' : 'nano:dev';
-    await approveAndRetry(f, 'marketplace_payout_address_mutate', {action: 'ENROLL', asset, network: route, address: f.address, requestId: randomUUID()});
-    await approveAndRetry(f, 'marketplace_withdrawal_create', {asset, network: route, destinationId, expectedSelectionVersion: 1, atomicAmount: '1', requestId: randomUUID()});
-    assert.equal(posts, 5, 'Same-request process restarts must not resubmit completed protected operations.');
-    assert.equal(challenges, 5, 'Same-request process restarts must not mint fresh approval challenges.');
-    const login = challenge(network, f.address, 'login', hash(['signer-controller-enrollment-v1', accountId, identityId]));
+    assert.equal(posts, 3, 'Same-request process restarts must not resubmit completed protected operations.');
+    assert.equal(challenges, 3, 'Same-request process restarts must not mint fresh approval challenges.');
+    const login = challenge(network, f.address, 'login', hash(['marketplace-login-v1', accountId, identityId]));
     const raw = network === 'ATTO' ? {index: 0, address: f.address, message: login.message}
       : {origin: f.profile.origin, network: 'nano:dev', address: f.address, index: 1, audience: f.profile.audience, purpose: 'login', message: login.message};
     await assert.rejects(callWallet(f.env, {asset, operation: 'controller.sign', input: raw}),
       error => ['LOCAL_SIGNER', 'PERMISSION_DENIED', 'MCP_READ_ONLY'].includes(error.code), 'One-off typed consent must not grant raw headless signing.');
     await f.assertStandalonePreserved();
-  });
-
-// Live compatibility gate intentionally excludes money movement: fresh credentials,
-// payout registration and a server-authored withdrawal proof with an unfunded account.
-for (const network of ['ATTO', 'NANO']) test(`${network}: actual LOCAL backend accepts typed credential and payout proofs`,
-  {skip: !live || process.platform !== 'linux', timeout: 120000}, async t => {
-    const origin = process.env.UNIFIED_APPROVAL_BACKEND_ORIGIN;
-    assert.ok(origin, 'Choose an explicitly authorized LOCAL backend origin.');
-    const url = new URL(origin);
-    assert.ok(url.origin === origin && url.protocol === 'http:' && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname), 'Only an exact loopback HTTP origin is allowed.');
-    const f = await fixture(t, network, origin, true);
-    await approveAndRetry(f, 'marketplace_credentials_create', {requestId: randomUUID(), credential: {name: 'fresh acceptance reader', scopes: ['tasks:read'], expiresInDays: 1}});
-    const asset = network === 'ATTO' ? 'ATTO' : 'XNO', route = network === 'ATTO' ? 'atto:local' : 'nano:dev';
-    const destination = await approveAndRetry(f, 'marketplace_payout_address_mutate', {action: 'ENROLL', asset, network: route, address: f.address, requestId: randomUUID()});
-    const args = {asset, network: route, destinationId: destination.destinationId, expectedSelectionVersion: destination.selectionVersion, atomicAmount: '1', requestId: randomUUID()};
-    const client = await f.connect();
-    try {
-      const selection = await tool(client, 'marketplace_payout_selection_get', {asset, network: route});
-      const remaining = Date.parse(selection.usableAfter) - Date.now();
-      assert.ok(Number.isFinite(remaining) && remaining <= 15000, 'The live gate requires the short LOCAL payout cooldown.');
-      if (remaining > 0) await delay(remaining + 50);
-      const pending = await tool(client, 'marketplace_withdrawal_create', args);
-      assert.equal(pending.status, 'approval_required');
-      const path = join(f.home, 'approvals', 'acceptance', `${pending.handoffId}.request.json`);
-      const request = JSON.parse(await readFile(path, 'utf8'));
-      assert.equal(request.challenge.message.split('\n')[6], `Binding Hash: ${binding(request)}`);
-      await terminalApprove(f, path);
-      const proof = JSON.parse(await readFile(path.replace('.request.json', '.response.json'), 'utf8'));
-      assert.equal(network === 'ATTO' ? await validAttoProof(f.address, proof.message, proof.signature) : offchainVerify(f.address, proof.message, proof.signature), true);
-      // Do not submit this valid withdrawal against an unfunded account. The live
-      // gate covers backend-authored exact bytes; default tests cover MCP submission.
-      assert.match(await terminalApprove(f, path), /"recovered":true/);
-      assert.deepEqual(await tool(client, 'marketplace_withdrawals_list', {}), [], 'The fresh live account must have no submitted withdrawals.');
-      await f.assertStandalonePreserved();
-    } finally {await client.close();}
   });

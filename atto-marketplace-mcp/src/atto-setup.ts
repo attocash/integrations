@@ -6,7 +6,7 @@ import {setupMarketplaceWallet} from '@attocash/cli/terminal';
 import {managedWalletEnvironment} from './wallet-home.js';
 import {readWalletSelection} from './wallet-preferences.js';
 import {ProfileError} from './profile-store.js';
-import {ensurePaymentHandoffDirectory} from './payment-handoff-files.js';
+import {ensurePrivateDirectory} from './private-directory.js';
 import {absoluteDirectory,requiredText,requireSetupTerminal,type Prompt} from './terminal-input.js';
 import {approveAttoWalletAccess,approveCompactAttoWalletAccess} from './wallet-access.js';
 import {inspectMarketplaceWalletSetup} from '@attocash/cli/internal-marketplace';
@@ -86,7 +86,7 @@ async function setupAttoWalletAdvanced(options:AttoSetupOptions):Promise<AttoSet
     workerUrl=httpUrl(await requiredText(prompt,'Trusted Atto work-service URL',workerUrl));
     process.stderr.write(`${JSON.stringify({directory,network,nodeUrl,workerUrl},null,2)}\n`);
     if(await prompt('Type APPROVE to configure this dedicated Atto wallet: ')!=='APPROVE')throw new ProfileError('CANCELLED','Atto wallet setup was cancelled.');
-    ensurePaymentHandoffDirectory(home);ensurePaymentHandoffDirectory(directory);
+    ensurePrivateDirectory(home);ensurePrivateDirectory(directory);
   }else{
     process.stderr.write(`Reuse the original Atto profile ${JSON.stringify(directory)}. Its credentials, settings, spending history and coordination stay shared.\n`);
     if(await prompt('Type REUSE to select this existing Atto wallet: ')!=='REUSE')throw new ProfileError('CANCELLED','Existing Atto wallet selection was cancelled.');
@@ -108,7 +108,7 @@ async function setupAttoWalletAdvanced(options:AttoSetupOptions):Promise<AttoSet
       throw new ProfileError('WALLET_CONFIGURATION_MISMATCH','The supplied network or endpoints differ from this existing wallet. Configure them through its CLI before setup.');
     }
   }finally{await app.close();}
-  ensurePaymentHandoffDirectory(home);
+  ensurePrivateDirectory(home);
   await approveAttoWalletAccess({home,directory,index:wallet.index,prompt});
   return {...wallet,network:network!};
 }

@@ -1,4 +1,5 @@
 import { paymentTransactionMatches, type AttoPaymentNetwork } from './atto-x402.js';
+import { parseRelayOffer, validateRelayOfferRefresh, type RelayRecord } from '../marketplace/relay.js';
 import { validateDestinationBinding, type DestinationBinding } from './destination.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
@@ -7,7 +8,7 @@ import { amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
 import type { StateStore } from '../storage/state.js';
 import type { AccountPool, SpendingPolicy, SpendingRule } from '../wallet/types.js';
-import { paymentMetadataSchema, validatePaymentPlan, type ConsolidationStep, type PaymentMetadata, type PaymentPlan } from './journal.js';
+import { paymentMetadataSchema, validatePaymentPlan, validateNativeCandidate, type ConsolidationStep, type PaymentMetadata, type PaymentPlan } from './journal.js';
 
 export type { ConsolidationStep, PaymentMetadata, PaymentPlan } from './journal.js';
 
@@ -21,6 +22,8 @@ export interface SendRecord {
   status: 'reserved' | 'signed' | 'published' | 'unknown' | 'failed';
   hash?: string;
   blockJson?: string;
+  transactionJson?: string;
+  candidateBinding?: string;
   result?: unknown;
   publishedAt?: number;
   sourceAddress?: string;
@@ -30,6 +33,7 @@ export interface SendRecord {
   selection?: 'automatic' | 'explicit';
   plan?: PaymentPlan;
   external?: ExternalPaymentRecord | LegacyExternalPaymentRecord;
+  relay?: RelayRecord;
 }
 
 export interface ExternalPaymentRecord {
@@ -74,7 +78,7 @@ export interface ExternalPaymentSecrets {
 }
 
 export type SendReservation = Pick<SendRecord, 'id' | 'index' | 'destination' | 'raw' | 'createdAt'>
-  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding'>>
+  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding' | 'relay'>>
   & { external?: ExternalPaymentRecord };
 
 const DAY_MS = 86_400_000;
@@ -285,7 +289,8 @@ export class SpendLedger {
           || ['sourceAddress', 'network', 'metadata', 'quote', 'selection'].some(key => {
             const field = key as 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection';
             return request[field] !== undefined && !isDeepStrictEqual(request[field], existing[field]);
-          }) || (request.plan !== undefined && !isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)))
+          }) || (request.relay !== undefined && !isDeepStrictEqual({ ...existing.relay, paymentSignature: undefined }, { ...request.relay, paymentSignature: undefined }))
+          || (request.plan !== undefined && !isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)))
           || (request.external !== undefined && !isDeepStrictEqual(this.externalDefinition(request.external), this.externalDefinition(existing.external)))) {
           throw new AttoError('REQUEST_CONFLICT', 'This request ID already belongs to a different payment.');
         }
@@ -378,14 +383,37 @@ export class SpendLedger {
     } : {}) };
   }
 
-  signed(id: string, hash: string, blockJson: string): void {
+  signed(id: string, hash: string, blockJson: string, transactionJson?: string, candidateBinding?: string): void {
     this.update(id, (record) => {
-      if (record.status === 'published' || record.status === 'failed' || (record.hash && record.hash !== hash)) {
+      if (record.status === 'published' || record.status === 'failed' || (record.hash && (record.hash !== hash || record.blockJson !== blockJson))
+        || (record.transactionJson !== undefined && (record.transactionJson !== transactionJson || record.candidateBinding !== candidateBinding))) {
         throw new AttoError('SEND_STATE', 'This payment cannot be assigned a new block.');
       }
       if (!hash || !blockJson) throw new AttoError('SEND_STATE', 'A signed payment requires its block hash and block.');
       if (record.plan?.steps.some(step => step.status !== 'published')) throw new AttoError('SEND_STATE', 'Complete every consolidation step before signing the external payment.');
-      return { ...record, hash, blockJson, status: 'signed' };
+      return { ...record, hash, blockJson, ...(transactionJson !== undefined ? { transactionJson, candidateBinding } : {}), status: 'signed' };
+    });
+  }
+
+  /** The exact final header is immutable before any caller may submit it to Market. */
+  authorizeRelay(id: string, paymentSignature: string): void {
+    this.update(id, record => {
+      if (!record.relay || !record.transactionJson || !record.hash || record.status === 'failed'
+        || (record.relay.paymentSignature !== undefined && record.relay.paymentSignature !== paymentSignature)) {
+        throw new AttoError('REQUEST_CONFLICT', 'The original relay payment cannot be replaced.');
+      }
+      return { ...record, relay: { ...record.relay, paymentSignature } };
+    });
+  }
+
+  /** Caller holds the same account/wallet locks used by signing and candidate persistence. */
+  refreshUnusedRelay(id: string, relay: RelayRecord): void {
+    this.update(id, record => {
+      if (!record.relay || record.status !== 'reserved' || record.hash !== undefined || record.blockJson !== undefined
+        || record.transactionJson !== undefined || record.candidateBinding !== undefined || record.relay.paymentSignature !== undefined
+        || record.plan?.steps.some(step => step.hash !== undefined)) throw new AttoError('REQUEST_CONFLICT', 'A retained native candidate can never accept another offer window.');
+      validateRelayOfferRefresh(record.relay, relay);
+      return { ...record, relay };
     });
   }
 
@@ -549,14 +577,15 @@ export class SpendLedger {
     });
   }
 
-  stepSigned(id: string, stepId: string, hash: string, blockJson: string): void {
+  stepSigned(id: string, stepId: string, hash: string, blockJson: string, transactionJson?: string, candidateBinding?: string): void {
     this.updateStep(id, stepId, (step, position, plan) => {
       if (step.status === 'published' || step.status === 'failed' || !hash || !blockJson
         || (step.hash !== undefined && (step.hash !== hash || step.blockJson !== blockJson))
+        || (step.transactionJson !== undefined && (step.transactionJson !== transactionJson || step.candidateBinding !== candidateBinding))
         || plan.steps.slice(0, position).some(previous => previous.status !== 'published')) {
         throw new AttoError('SEND_STATE', 'This consolidation step cannot be assigned a new block.');
       }
-      return { ...step, hash, blockJson, status: 'signed' };
+      return { ...step, hash, blockJson, ...(transactionJson !== undefined ? { transactionJson, candidateBinding } : {}), status: 'signed' };
     });
   }
 
@@ -711,6 +740,7 @@ export class SpendLedger {
   }
 
   private validateDetails(record: Omit<SendRecord, 'status'>, historical = false): void {
+    validateNativeCandidate(record);
     if (record.destinationBinding !== undefined) {
       validateDestinationBinding(record.destinationBinding);
       if (record.destinationBinding.address !== record.destination || record.destinationBinding.network !== record.network) throw new Error('Payment destination binding mismatch.');
@@ -721,6 +751,14 @@ export class SpendLedger {
     if (record.metadata !== undefined) paymentMetadataSchema.parse(record.metadata);
     if (record.plan !== undefined) validatePaymentPlan(record.plan, record);
     if (record.external !== undefined) this.validateExternal(record.external, historical);
+    if (record.relay !== undefined) {
+      if (record.external || record.relay.version !== 1 || record.id !== record.relay.requestId || record.relay.index !== record.index || record.plan?.steps.length
+        || record.sourceAddress !== record.relay.terms.senderAddress || record.destination !== record.relay.terms.recipientAddress
+        || record.raw !== record.relay.terms.amountAtomic || record.relay.terms.asset !== 'ATTO'
+        || `atto:${record.network?.toLowerCase()}` !== record.relay.terms.network
+        || (record.relay.paymentSignature !== undefined && (typeof record.relay.paymentSignature !== 'string' || record.relay.paymentSignature.length > 90_000))) throw new Error('Invalid relay payment.');
+      parseRelayOffer(record.relay, true);
+    }
   }
 
   private validateExternal(external: ExternalPaymentRecord | LegacyExternalPaymentRecord, historical = false): void {

@@ -11,7 +11,7 @@ const {publicWalletErrorCode}=await import(pathToFileURL(join(directory,'dist/wa
 const key='11'.repeat(32),otherKey='22'.repeat(32);
 const attoAddress=value=>new AttoAddress(AttoAlgorithm.V1,new AttoPublicKey(new Int8Array(32).fill(value))).value;
 const nanoAddress=value=>addressFromPublicKey(publicKey(derivePrivateKey(new Uint8Array(32).fill(value),7)));
-const permissions={marketplaceFunding:true,externalTransfers:false,receive:true};
+const permissions={externalTransfers:true,receive:true};
 const atto={asset:'ATTO',network:'atto:local',address:attoAddress(17),index:7,permissions};
 const nano={asset:'XNO',network:'nano:dev',address:nanoAddress(1),index:7,permissions};
 const sendHash='ab'.repeat(32),receiveHash='cd'.repeat(32);

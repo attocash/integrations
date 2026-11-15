@@ -88,7 +88,7 @@ esac
   assert.equal(config.version, 1); assert.equal(config.derivationIndex, 0); assert.equal(config.sourceAddress, nanoAddress);
   assert.equal(config.keySource.derivationVersion, 'bip39-ed25519-slip10-nano-v1');
   assert.deepEqual(config.keySource.recoverySource, { directory: source, credentialAccount: env.ATTO_TEST_RECOVERY_ACCOUNT, credentialService: 'Atto MCP', identityAddress: attoAddress });
-  assert.deepEqual(config.grants, { marketplaceFunding: false, externalTransfers: false, controllerPurposes: [] });
+  assert.deepEqual(config.grants, {  externalTransfers: false, controllerPurposes: [] });
   assert.equal('seedFile' in config, false); assert.equal(existsSync(join(nano, 'seed.hex')), false);
   assert.equal(configBytes.includes(Buffer.from(phrase)), false); assert.equal(await readFile(env.ATTO_TEST_RECOVERY_STORE, 'utf8'), phrase);
   const storeCount = async environment => (await readFile(environment.ATTO_TEST_RECOVERY_OPERATIONS, 'utf8')).trim().split('\n').filter(op => op === 'store').length;
@@ -96,7 +96,7 @@ esac
   assertNoAttoAuthority(await walletStatus(source, env));
   const status = await execute(process.execPath, [main, 'wallet', 'status', '--asset', 'XNO'], { env: childEnvironment(env) });
   assert.deepEqual(JSON.parse(status.stdout), {asset: 'XNO', address: nanoAddress, index: 0, network: 'nano:dev',
-    permissions: {marketplaceFunding: false, externalTransfers: false, receive: false}});
+    permissions: { externalTransfers: false, receive: false}});
   const sourceBefore = await snapshot(source);
   const replayed = await terminal([process.execPath, main, ...setup], env, [consent]);
   assert.equal(replayed.exitCode, 0, replayed.transcript);

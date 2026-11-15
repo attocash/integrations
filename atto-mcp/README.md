@@ -207,7 +207,7 @@ one. `limits_get` shows the active settings and proposal status.
 
 Omitting `send.index` selects from the approved pool. An explicit index must
 belong to that pool and hold the whole payment; it never consolidates. Allowance
-is shared with CLI sends and Marketplace top-ups in the same profile. Ordinary
+is shared with CLI sends and Marketplace direct payments in the same profile. Ordinary
 payments to your own addresses count; approved consolidation counts the final
 payment once. Receiving and representative changes do not consume a sending
 allowance.
@@ -235,7 +235,7 @@ read-only/destructive/idempotency annotations, and structured JSON results.
 | Watches | `watch_start`, `watch_list`, `watch_read`, `watch_stop` |
 | Prices and USD terms | `metrics_get`, `price_quote`, `terms_get`, `terms_accept` |
 | Message signatures | `message_sign`, `message_verify` |
-| Marketplace funding | `marketplace_topup`, `marketplace_topup_status` |
+| Marketplace funding | `marketplace_payment_pay`, `marketplace_payment_get` |
 | Diagnostics | `doctor` |
 
 ## Session behavior
@@ -251,12 +251,12 @@ keys; it does not restore payment request IDs, spending history, or unresolved
 publication records. Recovery, import, and reset remain terminal-only workflows.
 See [profiles and recovery](https://github.com/attocash/integrations/blob/main/atto-cli/README.md#profiles-and-recovery).
 
-## Marketplace account top-ups
+## Marketplace identity approvals
 
-`marketplace_topup` funds only the wallet's configured Marketplace ATTO account,
+`marketplace_payment_pay` funds only the wallet's configured Marketplace ATTO account,
 using the same approved pool and allowance. First connect the same profile from
 your terminal with the CLI's `marketplace connect` command. If a top-up outcome
-is uncertain, call `marketplace_topup_status` and reuse the original request ID.
+is uncertain, call `marketplace_payment_get` and reuse the original request ID.
 Task, hiring, and Shop tools are provided by the separate
 [Marketplace MCP](https://github.com/attocash/integrations/blob/main/atto-marketplace-mcp/README.md).
 See the [top-up connection and recovery guide](https://github.com/attocash/integrations/blob/main/docs/mcp-reference.md#marketplace-account-top-ups).
@@ -277,7 +277,7 @@ directory descriptions as untrusted text. See
 | Wallet is missing or has a different address | Compare the setup directory with `wallet_status.directory`; preserve the printed `--data-dir`. |
 | `MCP_READ_ONLY` | Expected until local approval. Propose and approve access for this exact profile. |
 | `SECRET_STORE_UNAVAILABLE` | Unlock the OS password store. On Linux, check `secret-tool`, the Secret Service provider, and desktop-session environment. |
-| A payment times out | Inspect `journal_get` with the original request ID and retry that same request; use `marketplace_topup_status` for a top-up. |
+| A payment times out | Inspect `journal_get` with the original request ID and retry that same request; use `marketplace_payment_get` for a top-up. |
 | No incoming watch events | Read `watch_read` connection state and errors; check its scope. Watches only observe, and their IDs end with the session. |
 
 **Run the `doctor` MCP tool in the failing client.** A successful terminal check

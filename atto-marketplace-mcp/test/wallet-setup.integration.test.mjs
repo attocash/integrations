@@ -146,7 +146,6 @@ async function verifyWalletSetup(t, platform) {
     { prompt: 'Maximum ATTO per payment: ', answer: '3' },
     { prompt: 'Maximum ATTO across a rolling 24 hours: ', answer: '8' },
     { prompt: 'Type yes to approve this exact proposal: ', answer: 'yes' },
-    { prompt: 'Allow Marketplace funding from this Atto wallet [y/N]: ', answer: 'yes' },
     { prompt: 'Allow external Atto transfers from this wallet [y/N]: ', answer: 'no' },
     { prompt: 'Type APPROVE to save this Marketplace wallet access: ', answer: 'APPROVE' },
   ];

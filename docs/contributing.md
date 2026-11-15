@@ -88,7 +88,7 @@ a package.
 | Terminal Marketplace approval presentation | `atto-cli/src/marketplace/approval-preview.ts`; all rendered fields pass through terminal escaping |
 | Wallet MCP protocol and transport | `atto-mcp/src/`, using the released CLI engine |
 | Marketplace tools and resource-specific commands | `atto-marketplace-mcp/src/server.ts` |
-| Marketplace funding intent and native-payment recovery | `atto-marketplace-mcp/src/marketplace-funding.ts` |
+| Direct wallet payment and hash-bound evidence | `atto-marketplace-mcp/src/direct-payments.ts` |
 | Protected Marketplace mutations and terminal approval recovery | `atto-marketplace-mcp/src/protected-mutation.ts` |
 | Marketplace profile persistence and submission claims | `atto-marketplace-mcp/src/profile-store.ts` |
 | Marketplace canonical serialization and asset/network rules | `atto-marketplace-mcp/src/canonical-json.ts` and `asset-network.ts` |

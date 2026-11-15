@@ -11,7 +11,7 @@ test('Commons 8 signed SEND uses exact decimal strings on x402 wire and preserve
   assert.equal(await transaction.isValid(), true);
   assert.match(transactionJson, /"balance":9007199254740993/);
 
-  const apiUrl = 'https://marketplace.example.test/v1/agent/topups';
+  const apiUrl = 'https://marketplace.example.test/v1/agent/payments';
   const intentId = '00000000-0000-4000-8000-000000000079';
   const requirementJson = JSON.stringify({ x402Version: 2,
     resource: { url: `${apiUrl}/${intentId}` },
@@ -48,7 +48,7 @@ test('x402 challenges reject unsupported mechanism fields and resources outside 
   // Given a valid immutable exact-v2 Marketplace challenge for the signed LOCAL vector.
   const transactionJson = (await readFile(new URL('./fixtures/commons8-send-bigint.json', import.meta.url), 'utf8')).trim();
   const transaction = AttoTransaction.fromJson(transactionJson);
-  const apiUrl = 'https://marketplace.example.test/v1/agent/topups';
+  const apiUrl = 'https://marketplace.example.test/v1/agent/payments';
   const intentId = '00000000-0000-4000-8000-000000000079';
   const base = { x402Version: 2, resource: { url: `${apiUrl}/${intentId}` },
     accepts: [{ scheme: 'exact', network: 'atto:local', amount: '10', asset: 'atto',
@@ -72,13 +72,13 @@ test('x402 challenges reject unsupported mechanism fields and resources outside 
   ]) assert.throws(() => parse(candidate), { code: 'MARKETPLACE_PROTOCOL' });
 
   // Then resource origin, intent path, query, and fragment are checked separately from payment terms.
-  assert.throws(() => parse({ ...base, resource: { url: 'https://other.example/v1/agent/topups/' + intentId } }), { code: 'MARKETPLACE_RESOURCE_MISMATCH' });
+  assert.throws(() => parse({ ...base, resource: { url: 'https://other.example/v1/agent/payments/' + intentId } }), { code: 'MARKETPLACE_RESOURCE_MISMATCH' });
   assert.throws(() => parse({ ...base, resource: { url: `${apiUrl}/${intentId}?next=elsewhere` } }), { code: 'MARKETPLACE_RESOURCE_MISMATCH' });
 });
 
 async function challenge() {
   const transaction = AttoTransaction.fromJson((await readFile(new URL('./fixtures/commons8-send-bigint.json', import.meta.url), 'utf8')).trim());
-  const apiUrl = 'https://marketplace.example.test/v1/agent/topups', intentId = '00000000-0000-4000-8000-000000000079';
+  const apiUrl = 'https://marketplace.example.test/v1/agent/payments', intentId = '00000000-0000-4000-8000-000000000079';
   const value = { x402Version: 2, resource: { url: `${apiUrl}/${intentId}`, description: 'An exact top-up' },
     accepts: [{ scheme: 'exact', network: 'atto:local', amount: '10', asset: 'atto', payTo: transaction.block.receiverAddress.value,
       maxTimeoutSeconds: 300, extra: { assetTransferMethod: 'native', paymentFlow: 'authorization', merchant: 'unchanged' } }],

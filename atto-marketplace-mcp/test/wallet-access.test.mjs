@@ -14,7 +14,7 @@ const {selectedAttoWallet,assertAttoWalletWrite,approveAttoWalletAccess}=await i
 const address=(await AttoPrivateKey.Companion.parse('01'.repeat(32)).toSigner()).address.toString();
 const fingerprint='a'.repeat(64);
 const status={initialized:true,identity:{fingerprint},settings:{network:'LOCAL'},addresses:[{address,index:7}],mcpAccess:'spend',pool:{indexes:[7]}};
-const access={address,index:7,network:'atto:local',fingerprint,marketplaceFunding:true,externalTransfers:false};
+const access={address,index:7,network:'atto:local',fingerprint,externalTransfers:false};
 
 async function fixture(t){
   const root=await mkdtemp(join(tmpdir(),'marketplace-native-access-'));
@@ -24,7 +24,7 @@ async function fixture(t){
   return{home,directory,env:{MARKETPLACE_MCP_HOME:home,MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:directory}};
 }
 
-test('Atto Marketplace funding and external transfers require separate saved grants',async t=>{
+test('Atto native transfer and receive require explicit saved permission',async t=>{
   // Given a CLI wallet with spend access but no Marketplace purpose approval.
   const f=await fixture(t);
   await saveWalletSelection(f.home,{attoDirectory:f.directory});
@@ -32,14 +32,12 @@ test('Atto Marketplace funding and external transfers require separate saved gra
   await saveWalletSelection(f.home,{attoAccess:access});
   const before=await readFile(join(f.home,'profiles.sqlite'));
   // When the narrower Marketplace authority is checked.
-  assert.doesNotThrow(()=>assertAttoWalletWrite(f.env,status,'payment.prepare'));
-  assert.doesNotThrow(()=>assertAttoWalletWrite(f.env,status,'receive'));
+  assert.throws(()=>assertAttoWalletWrite(f.env,status,'receive'),{code:'PERMISSION_DENIED'});
   assert.throws(()=>assertAttoWalletWrite(f.env,status,'transfer.send'),{code:'PERMISSION_DENIED'});
   // Then existing CLI spend alone did not grant external transfers or mutate state.
-  assert.deepEqual(selectedAttoWallet(f.env,status).permissions,{marketplaceFunding:true,externalTransfers:false,receive:true});
+  assert.deepEqual(selectedAttoWallet(f.env,status).permissions,{externalTransfers:false,receive:false});
   assert.deepEqual(await readFile(join(f.home,'profiles.sqlite')),before);
-  await saveWalletSelection(f.home,{attoAccess:{...access,marketplaceFunding:false,externalTransfers:true}});
-  assert.throws(()=>assertAttoWalletWrite(f.env,status,'payment.prepare'),{code:'PERMISSION_DENIED'});
+  await saveWalletSelection(f.home,{attoAccess:{...access,externalTransfers:true}});
   assert.doesNotThrow(()=>assertAttoWalletWrite(f.env,status,'transfer.send'));
   assert.doesNotThrow(()=>assertAttoWalletWrite(f.env,status,'receive'));
 });
@@ -53,11 +51,11 @@ test('Atto source binding and CLI authority cannot be replaced by Marketplace pr
     {...status,addresses:[{address,index:8}]}])assert.throws(()=>selectedAttoWallet(f.env,changed),{code:'WALLET_SETUP_REQUIRED'});
   for(const changed of [{...status,mcpAccess:'read-only'},{...status,pool:{indexes:[0]}}]){
     // Then no Marketplace flag bypasses the underlying spend/pool restriction.
-    assert.deepEqual(selectedAttoWallet(f.env,changed).permissions,{marketplaceFunding:false,externalTransfers:false,receive:false});
+    assert.deepEqual(selectedAttoWallet(f.env,changed).permissions,{externalTransfers:false,receive:false});
     assert.throws(()=>assertAttoWalletWrite(f.env,changed,'receive'),{code:'PERMISSION_DENIED'});
   }
   assert.throws(()=>selectedAttoWallet({...f.env,MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:join(f.home,'other')},status),{code:'WALLET_SETUP_REQUIRED'});
-  await saveWalletSelection(f.home,{attoAccess:{...access,marketplaceFunding:false}});
+  await saveWalletSelection(f.home,{attoAccess:{...access}});
   assert.throws(()=>assertAttoWalletWrite(f.env,status,'receive'),{code:'PERMISSION_DENIED'});
 });
 
@@ -89,14 +87,14 @@ test('Atto Marketplace access approval preserves standalone wallet configuration
       prompts.push(question);return question.startsWith('Type APPROVE')?'APPROVE':'';
     }});
     // Then both purposes stay denied and standalone settings/access/pool remain identical.
-    assert.equal(prompts.length,3);
+    assert.equal(prompts.length,2);
     const saved=readWalletSelection(f.home).attoAccess;
-    assert.equal(saved.marketplaceFunding,false);assert.equal(saved.externalTransfers,false);
+    assert.equal(saved.externalTransfers,false);
     const after=new AttoApplication({directory:f.directory});
     try{assert.deepEqual(await after.call('wallet_status',{}),before);}finally{await after.close();}
     const prior=readWalletSelection(f.home);
     await assert.rejects(approveAttoWalletAccess({home:f.home,env:f.env,directory:f.directory,index:0,
-      grants:{marketplaceFunding:true,externalTransfers:true},prompt:async()=> 'DECLINE'}),{code:'APPROVAL_DECLINED'});
+      grants:{externalTransfers:true},prompt:async()=> 'DECLINE'}),{code:'APPROVAL_DECLINED'});
     assert.deepEqual(readWalletSelection(f.home),prior);
   }finally{
     [process.stdin,process.stderr].forEach((stream,index)=>descriptors[index]?Object.defineProperty(stream,'isTTY',descriptors[index]):delete stream.isTTY);

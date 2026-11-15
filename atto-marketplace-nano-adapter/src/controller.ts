@@ -1,9 +1,8 @@
 import { addressPublicKey, canonicalAddress, hexBytes, offchainSign, offchainVerify, upperHex } from './protocol.js';
 import { canonical, exactKeys, loadConfiguration, text, withPrivateKey, type NanoWalletConfiguration } from './configuration.js';
-import { instant } from './handoff.js';
 import { fail } from './errors.js';
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const typedPurposes = new Set(['login', 'link authorizer', 'link new identity', 'unlink', 'API-key creation', 'API-key rotation', 'API-key revocation', 'payout address enrollment', 'payout address selection', 'payout address disablement', 'withdrawal creation', 'product purchase', 'product refund']);
+const typedPurposes = new Set(['login', 'link authorizer', 'link new identity', 'unlink', 'API-key creation', 'API-key rotation', 'API-key revocation', 'payment evidence']);
 const rawPurposes = new Set(['login', 'link authorizer', 'link new identity', 'unlink']);
 export interface ControllerProofRequest {
     origin: string;
@@ -16,7 +15,9 @@ export interface ControllerProofRequest {
 }
 /** Headless native proofs retain their explicit per-purpose grants. */
 export function validateControllerProof(request: ControllerProofRequest, config: NanoWalletConfiguration, now: number): void {
-    if (!rawPurposes.has(request.purpose) || !config.grants.controllerPurposes.includes(request.purpose as any)) fail('CONTROLLER_PROOF_INVALID');
+    if (request.purpose === 'payment evidence') {
+        if (!config.grants.externalTransfers) fail('PERMISSION_DENIED');
+    } else if (!rawPurposes.has(request.purpose) || !config.grants.controllerPurposes.includes(request.purpose as any)) fail('CONTROLLER_PROOF_INVALID');
     validateControllerFrame(request, config, now);
 }
 function validateTerminalControllerProof(request: ControllerProofRequest, config: NanoWalletConfiguration, now: number): void {
@@ -88,4 +89,11 @@ export function verifyNanoMessage(input: {
     catch {
         return false;
     }
+}
+
+function instant(value: string): number {
+    if (!/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d{1,9})?(?:Z|[+-]\d\d:\d\d)$/.test(value)) fail('INVALID_REQUEST');
+    const time = Date.parse(value);
+    if (!Number.isFinite(time)) fail('INVALID_REQUEST');
+    return time;
 }

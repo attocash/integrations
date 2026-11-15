@@ -48,7 +48,7 @@ try {
       access: 'spend', pool: { indexes: [0], consolidate: false },
     });
     await app.approveLimitsProposal(proposal.id);
-    const connected = await app.connectMarketplace({ apiUrl: `${marketplaceOrigin}/v1/agent/topups`,
+    const connected = await app.connectMarketplace({ apiUrl: `${marketplaceOrigin}/v1/agent/payments`,
       audience: 'urn:marketplace:agent-api:test', controllerIndex: 0 });
     console.log(JSON.stringify({ stage, address: address.address, publicKey: address.publicKey,
       accountId: connected.accountId, agentId: connected.agentId, identityId: connected.identityId }));
@@ -61,7 +61,7 @@ try {
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (input, init) => {
       const url = new URL(input);
-      if (url.origin === marketplaceOrigin && url.pathname.startsWith('/v1/agent/topups/')
+      if (url.origin === marketplaceOrigin && url.pathname.startsWith('/v1/agent/payments/')
         && init.method === 'POST') {
         assert.equal(init.body, undefined, 'The paid continuation must be bodyless.');
         const header = new Headers(init.headers).get('PAYMENT-SIGNATURE');

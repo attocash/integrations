@@ -1,15 +1,15 @@
+import {fileURLToPath,pathToFileURL} from 'node:url';
+const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??fileURLToPath(new URL('../',import.meta.url));
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { MarketplaceProfileStore } from '../dist/profile-store.js';
-import { approvalRequestDigest } from '../dist/approval-files.js';
-import { AttoPrivateKey } from '@attocash/commons-core';
+const { MarketplaceProfileStore }=await import(pathToFileURL(join(packageDirectory,'dist/profile-store.js')).href);
 
 const id=n=>`de305d54-75b4-431b-adb2-eb6b9e5460${String(n).padStart(2,'0')}`;
 const accountId=id(1),agentId=id(2),identityId=id(3),productId=id(4),releaseId=id(5),purchaseId=id(6),fileId=id(7),contentVersionId=id(8);
@@ -17,38 +17,53 @@ const releaseHash='a'.repeat(64),manifestHash='b'.repeat(64),createdAt='2026-10-
 const bytes=Buffer.from('immutable purchased bytes\n');
 const file={ordinal:0,fileId,contentVersionId,filename:'paid.txt',byteLength:bytes.length,mediaType:'text/plain',sha256:createHash('sha256').update(bytes).digest('hex')};
 const pair=generateKeyPairSync('ed25519');
-const fields=['schema','keyVersion','receiptId','purchaseId','buyerAccountId','buyerAgentId','sellerAccountId','sellerAgentId',
-  'productId','releaseId','releaseHash','manifestHash','asset','grossAtomic','feeAtomic','netAtomic','feeRateBasisPoints',
-  'commandId','ledgerTransactionId','outcome','createdAt','settledAt'];
-const refundFields=['originalPurchaseReceiptId','originalPurchaseReceiptHash','originalPurchaseLedgerTransactionId',
-  'authority','actorAccountId','actorIdentityId'];
 
-test('stdio purchase recovery keeps exact saved terms, limits scoped keys, verifies receipts and bought bytes',async()=>{
-  // Given scoped profiles and a deterministic server that applies a purchase before losing its first response.
+function order(asset='ATTO',status='RESERVED') {
+  const active=status==='ACTIVE',paid=['ACTIVE','REFUNDED'].includes(status),refunded=status==='REFUNDED';
+  return {purchaseId,productId,releaseId,releaseHash,manifestHash,buyerAgentId:agentId,sellerAgentId:agentId,
+    asset,grossAtomic:asset==='ATTO'?'101':'900719925474099312345',status,version:paid?1:0,entitlementActive:active,
+    paymentRequirementId:id(40),reservationExpiresAt:'2026-10-16T20:30:00Z',receiptId:paid?id(32):null,receiptHash:null,
+    createdAt,refundedAt:refunded?createdAt:null,refundReceiptId:refunded?id(33):null,refundReceiptHash:null,
+    refundPaymentRequirementId:null,paidTransactionHash:paid?'c'.repeat(64):null};
+}
+const publicProduct=(asset,price)=>({productId,releaseId,releaseSequence:1,releaseHash,sellerAgentId:agentId,sellerProfile:null,
+  title:'Paid note',summaryMarkdown:'Public description',asset,priceAtomic:price,licenseText:'Personal use',manifestHash,
+  files:[{fileId,filename:'paid.txt',byteLength:bytes.length,mediaType:'text/plain'}]});
+
+// Match actual canonical JSON v2 receipts; native transaction evidence replaces ledger/command IDs.
+function makeReceipt(kind,purchase) {
+  const refund=kind==='REFUND',receiptId=refund?id(33):id(32);
+  const content={schema:`marketplace-product-${refund?'refund':'purchase'}-receipt-v2`,receiptId,purchaseId,
+    productId,releaseId,releaseHash,manifestHash,buyerAgentId:agentId,sellerAgentId:agentId,asset:purchase.asset,
+    amountAtomic:purchase.grossAtomic,paymentRequirementId:refund?purchase.refundPaymentRequirementId:purchase.paymentRequirementId,
+    transactionHash:refund?'d'.repeat(64):purchase.paidTransactionHash,senderAddress:refund?'seller-wallet':'buyer-wallet',
+    recipientAddress:refund?'buyer-wallet':'seller-wallet'};
+  const canonical=Buffer.from(JSON.stringify(content)),digest=createHash('sha256').update(canonical).digest();
+  return {receiptId,kind,content,canonicalBase64:canonical.toString('base64'),contentSha256:digest.toString('hex'),
+    signatureBase64:sign(null,Buffer.concat([Buffer.from(`marketplace-product-${refund?'refund':'purchase'}-v2\0`),digest]),pair.privateKey).toString('base64'),keyVersion:'test-v1'};
+}
+
+test('stdio reservation recovery preserves terms and scopes then verifies v2 receipts and immutable bought bytes',async()=>{
+  // Given
   const root=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-purchases-'));
   const home=join(root,'profile'),filesDirectory=join(root,'files');
   await mkdir(join(filesDirectory,'downloads'),{recursive:true,mode:0o700});
   const requests=[];
-  let currentPrice='101',lost=true,refunded=false;
-  let purchase=order(false);
-  const purchaseReceipt=makeReceipt('PURCHASE',purchase);
-  purchase={...purchase,receiptHash:purchaseReceipt.contentSha256};
-  let refundReceipt;
+  let currentPrice='101',lost=true,purchase=order(),purchaseReceipt,refundReceipt;
   const http=await listen(async(req,res)=>{
     const body=req.method==='GET'?undefined:await readJson(req);
-    requests.push({method:req.method,path:req.url,key:req.headers['idempotency-key'],body});
-    if(req.method==='GET'&&req.url===`/v1/products/${productId}`) return json(res,200,publicProduct(currentPrice));
+    requests.push({path:req.url,key:req.headers['idempotency-key'],body});
+    if(req.method==='GET'&&req.url===`/v1/products/${productId}`) return json(res,200,publicProduct('ATTO',currentPrice));
     if(req.method==='POST'&&req.url===`/v1/agent/releases/${releaseId}/purchase`) {
       assert.deepEqual(body,{expectedReleaseHash:releaseHash});
+      if(req.headers.authorization==='Bearer limited-key')return json(res,403,{error:'forbidden'});
       if(lost){lost=false;return json(res,503,{error:'temporary_error'});}
       return json(res,200,purchase);
     }
     if(req.method==='GET'&&req.url==='/v1/agent/purchases') return json(res,200,[purchase]);
     if(req.method==='GET'&&req.url===`/v1/agent/purchases/${purchaseId}`) return json(res,200,purchase);
-    if(req.method==='GET'&&req.url===`/v1/agent/products/${productId}/orders`) return json(res,200,[{
-      purchaseId,buyerAgentId:agentId,releaseId,status:purchase.status,createdAt,refundedAt:purchase.refundedAt}]);
     if(req.method==='GET'&&req.url===`/v1/agent/purchases/${purchaseId}/content`) {
-      if(refunded)return json(res,403,{error:'forbidden'});
+      if(!purchase.entitlementActive) return json(res,403,{error:'forbidden'});
       return json(res,200,{purchaseId,releaseId,paidMarkdown:'Private licensed text',licenseText:'Personal use',manifestHash,files:[file]});
     }
     if(req.method==='GET'&&req.url===`/v1/agent/files/${fileId}/content`) {
@@ -59,264 +74,161 @@ test('stdio purchase recovery keeps exact saved terms, limits scoped keys, verif
     if(req.method==='GET'&&req.url==='/v1/receipts/keys/test-v1') return json(res,200,{
       version:'test-v1',algorithm:'Ed25519',publicKeyBase64:pair.publicKey.export({format:'der',type:'spki'}).toString('base64')});
     if(req.method==='POST'&&req.url===`/v1/agent/purchases/${purchaseId}/refund`) {
-      assert.deepEqual(body,{expectedPurchaseVersion:0});
-      refunded=true;purchase={...order(true),receiptHash:purchaseReceipt.contentSha256};
-      refundReceipt=makeReceipt('REFUND',purchase);
-      purchase={...purchase,receiptHash:purchaseReceipt.contentSha256,refundReceiptHash:refundReceipt.contentSha256};
+      assert.deepEqual(body,{expectedPurchaseVersion:1});
+      purchase={...purchase,refundPaymentRequirementId:id(41)};
       return json(res,200,purchase);
     }
     return json(res,404,{error:'not_found'});
   });
   const store=await MarketplaceProfileStore.open(home);
-  const basic={origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
-    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key'};
-  store.createProfile({id:'buyer',...basic,apiKey:'buyer-key',apiScopes:['products:purchase','purchases:read','purchases:refund','files:read','products:read'],
-    purchaseAttoLimit:'101'});
+  const basic={origin:http.origin,audience:'marketplace',accountId,agentId,identityId,controllerNetwork:'ATTO',
+    controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key'};
+  store.createProfile({id:'buyer',...basic,apiKey:'buyer-key',apiScopes:['products:purchase','purchases:read','purchases:refund','files:read','products:read'],purchaseAttoLimit:'101'});
   store.createProfile({id:'low-limit',...basic,apiKey:'limited-key',apiScopes:['products:purchase'],purchaseAttoLimit:'100'});
   const buyer=await connect(home,'buyer',filesDirectory);
   try {
     const args={productId,releaseId,expectedReleaseHash:releaseHash,asset:'ATTO',grossAtomic:'101',requestId:id(20)};
-    const lower=await connect(home,'low-limit',filesDirectory);
+    const limited=await connect(home,'low-limit',filesDirectory);
     try {
-      const denied=await lower.callTool({name:'marketplace_product_purchase',arguments:args});
+      // When current backend authority denies this credential's actual purchase amount.
+      const denied=await limited.callTool({name:'marketplace_product_purchase',arguments:args});
+      // Then the denial remains authoritative and is never bypassed with another credential.
       assert.equal(denied.isError,true);
-      assert.equal(JSON.parse(text(denied)).error.code,'CEILING_EXCEEDED');
-      assert.equal(requests.length,0);
-    } finally { await lower.close(); }
-
-    // When a response is lost after posting, the exact saved request retries without a new offer preflight.
+      assert.equal(JSON.parse(text(denied)).error.code,'AUTHORIZATION_DENIED');
+      assert.deepEqual(requests.map(r=>r.path),[`/v1/agent/releases/${releaseId}/purchase`]);
+    } finally { await limited.close(); }
+    // When a permitted mutation loses its response and retries the identical saved body and key.
     const uncertain=await buyer.callTool({name:'marketplace_product_purchase',arguments:args});
     assert.equal(uncertain.isError,true);
     const beforeRetry=requests.length;
     currentPrice='999';
     const recovered=await buyer.callTool({name:'marketplace_product_purchase',arguments:args});
     assert.equal(recovered.isError,undefined,text(recovered));
-    assert.equal(JSON.parse(text(recovered)).result.purchaseId,purchaseId);
-    assert.deepEqual(requests.slice(beforeRetry).map(item=>item.path),[`/v1/agent/releases/${releaseId}/purchase`]);
-    assert.deepEqual(requests.filter(item=>item.path===`/v1/agent/releases/${releaseId}/purchase`).map(item=>item.key),[id(20),id(20)]);
-    const wrongReplay=await buyer.callTool({name:'marketplace_product_purchase',arguments:{...args,grossAtomic:'100'}});
-    assert.equal(wrongReplay.isError,true);
-    const afterComplete=await buyer.callTool({name:'marketplace_product_purchase',arguments:args});
-    assert.equal(afterComplete.isError,undefined,text(afterComplete));
-    assert.equal(JSON.parse(text(afterComplete)).result.commandId,id(30));
+    assert.equal(result(recovered).status,'RESERVED');
+    assert.equal(result(recovered).paymentRequirementId,id(40));
+    assert.equal(result(recovered).entitlementActive,false);
+    assert.deepEqual(requests.slice(beforeRetry).map(r=>r.path),[`/v1/agent/releases/${releaseId}/purchase`]);
+    // Then recovery preserves the original requirement and rejects changed immutable terms.
+    assert.deepEqual(requests.filter(r=>r.path===`/v1/agent/releases/${releaseId}/purchase`).map(r=>r.key),[id(20),id(20),id(20)]);
+    assert.equal((await buyer.callTool({name:'marketplace_product_purchase',arguments:{...args,grossAtomic:'100'}})).isError,true);
+    const completedCount=requests.length;
+    assert.equal(result(await buyer.callTool({name:'marketplace_product_purchase',arguments:args})).recovered,true);
+    assert.equal(requests.length,completedCount);
+    assert.equal((await buyer.callTool({name:'marketplace_purchase_content_get',arguments:{purchaseId}})).isError,true);
 
-    // Then historical access uses the exact purchase, signature and byte manifest.
+    // Only a separately verified chain event updates the authoritative fixture, never reservation status.
+    purchase=order('ATTO','ACTIVE');purchaseReceipt=makeReceipt('PURCHASE',purchase);
+    purchase={...purchase,receiptHash:purchaseReceipt.contentSha256};
     const content=await buyer.callTool({name:'marketplace_purchase_content_get',arguments:{purchaseId}});
-    assert.equal(JSON.parse(text(content)).result.paidMarkdown,'Private licensed text');
+    assert.equal(result(content).paidMarkdown,'Private licensed text');
     const signed=await buyer.callTool({name:'marketplace_purchase_receipt_get',arguments:{purchaseId,kind:'PURCHASE'}});
-    assert.equal(signed.isError,undefined,text(signed));
-    assert.equal(JSON.parse(text(signed)).result.verified,true);
-    const downloaded=await buyer.callTool({name:'marketplace_purchase_file_download',arguments:{purchaseId,fileId,
-      destinationPath:'downloads/paid.txt'}});
+    assert.equal(signed.isError,undefined,text(signed));assert.equal(result(signed).verified,true);
+    const downloaded=await buyer.callTool({name:'marketplace_purchase_file_download',arguments:{purchaseId,fileId,destinationPath:'downloads/paid.txt'}});
     assert.equal(downloaded.isError,undefined,text(downloaded));
     assert.deepEqual(await readFile(join(filesDirectory,'downloads/paid.txt')),bytes);
-
-    // A full refund retains the original purchase command and signs a distinct refund command.
-    const refundArgs={purchaseId,expectedPurchaseVersion:0,originalPurchaseReceiptHash:purchase.receiptHash,
-      asset:'ATTO',grossAtomic:'101',requestId:id(21)};
-    const refundedResult=await buyer.callTool({name:'marketplace_product_refund',arguments:refundArgs});
-    assert.equal(refundedResult.isError,undefined,text(refundedResult));
-    assert.equal(JSON.parse(text(refundedResult)).result.commandId,id(30));
-    assert.equal(JSON.parse(text(refundedResult)).result.refundCommandId,id(31));
+    const requested=await buyer.callTool({name:'marketplace_product_refund',arguments:{purchaseId,expectedPurchaseVersion:1,requestId:id(21)}});
+    assert.equal(requested.isError,undefined,text(requested));
+    assert.equal(result(requested).refundPaymentRequirementId,id(41));
+    assert.equal(result(requested).status,'ACTIVE');
+    assert.equal(result(requested).entitlementActive,true);
+    purchase={...order('ATTO','REFUNDED'),receiptHash:purchaseReceipt.contentSha256,refundPaymentRequirementId:id(41)};
+    refundReceipt=makeReceipt('REFUND',purchase);purchase={...purchase,refundReceiptHash:refundReceipt.contentSha256};
     const signedRefund=await buyer.callTool({name:'marketplace_purchase_receipt_get',arguments:{purchaseId,kind:'REFUND'}});
-    assert.equal(signedRefund.isError,undefined,text(signedRefund));
-    const revoked=await buyer.callTool({name:'marketplace_purchase_content_get',arguments:{purchaseId}});
-    assert.equal(revoked.isError,true);
+    assert.equal(signedRefund.isError,undefined,text(signedRefund));assert.equal(result(signedRefund).verified,true);
+    assert.equal((await buyer.callTool({name:'marketplace_purchase_content_get',arguments:{purchaseId}})).isError,true);
+    assert.equal(requests.some(r=>r.path.includes('/challenges')),false);
   } finally {
     await buyer.close();await new Promise(resolve=>http.close(resolve));store.close();await rm(root,{recursive:true,force:true});
   }
 });
 
-test('typed session replays exact purchase and refund proofs for both assets after 429, lost ack and restart',async()=>{
-  // Given a session controller whose ATTO key signs exact server-issued proof text for either purchase asset.
-  const root=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-purchase-proof-'));
-  const home=join(root,'profile');
-  const signer=await AttoPrivateKey.Companion.parse('01'.repeat(32)).toSigner();
-  const address=signer.address.toString();
-  const seen=[];
-  let currentAsset='ATTO';
-  const sends=new Map(),purchased=new Set(),refunded=new Set();
+for(const asset of ['ATTO','XNO']) test(`${asset} controller-session direct reservation and refund retry same keys after 429, lost ack and restart`,async()=>{
+  // Given
+  const root=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-direct-order-')),home=join(root,'profile');
+  const requests=[],purchase=order(asset);let price=purchase.grossAtomic,purchases=0,refunds=0;
   const http=await listen(async(req,res)=>{
-    const body=req.method==='GET'?null:await readJson(req);
-    seen.push({method:req.method,path:req.url,key:req.headers['idempotency-key'],body});
-    const assetName=req.url?.includes(id(51)) || req.url?.includes(id(61))?'XNO':'ATTO';
-    const selectedRelease=assetName==='XNO'?id(51):id(50);
-    const gross=assetName==='XNO'?'900719925474099312345':'101';
-    const fee=assetName==='XNO'?'9007199254740993123':'1';
-    const net=(BigInt(gross)-BigInt(fee)).toString();
-    if(req.method==='GET'&&req.url===`/v1/products/${productId}`) {
-      const selected=currentAsset;
-      return json(res,200,{...publicProduct(selected==='XNO'?'900719925474099312345':'101'),
-        releaseId:selected==='XNO'?id(51):id(50),asset:selected});
-    }
-    if(req.method==='POST'&&req.url===`/v1/agent/releases/${selectedRelease}/purchase/challenges`) {
-      const binding=lengthPrefixedHash(['marketplace-product-purchase-approval-v1',accountId,identityId,
-        selectedRelease,releaseHash,assetName,gross,body.idempotencyKey]);
-      return json(res,200,{releaseId:selectedRelease,releaseHash,sellerAgentId:agentId,asset:assetName,
-        grossAtomic:gross,feeAtomic:fee,netAtomic:net,
-        challenge:proofChallenge(id(52),address,'product purchase',binding)});
-    }
-    if(req.method==='POST'&&req.url===`/v1/agent/releases/${selectedRelease}/purchase`) {
-      assert.equal(body.proof.signature,await signMessage(signer,body.proof.message));
-      const count=(sends.get(`purchase-${assetName}`)??0)+1;sends.set(`purchase-${assetName}`,count);
-      if(count===1) {
-        if(assetName==='ATTO')return json(res,429,{error:'temporary_rate_limit'});
-        purchased.add(assetName);res.destroy();return;
-      }
-      purchased.add(assetName);
-      return json(res,200,sessionOrder(assetName,false));
-    }
-    const purchaseId=assetName==='ATTO'?id(60):id(61);
-    if(req.method==='GET'&&req.url===`/v1/agent/purchases/${purchaseId}`) {
-      return json(res,200,sessionOrder(assetName,refunded.has(assetName)));
-    }
-    if(req.method==='POST'&&req.url===`/v1/agent/purchases/${purchaseId}/refund/challenges`) {
-      const original='c'.repeat(64);
-      const binding=lengthPrefixedHash(['marketplace-product-refund-approval-v1','SELLER',accountId,identityId,
-        purchaseId,original,'0',assetName,gross,body.idempotencyKey]);
-      return json(res,200,{purchaseId,authority:'SELLER',buyerAgentId:agentId,sellerAgentId:agentId,
-        asset:assetName,grossAtomic:gross,feeAtomic:fee,netAtomic:net,originalPurchaseReceiptHash:original,
-        challenge:proofChallenge(id(53),address,'product refund',binding)});
+    const body=req.method==='GET'?undefined:await readJson(req);
+    requests.push({path:req.url,key:req.headers['idempotency-key'],body});
+    if(req.method==='GET'&&req.url===`/v1/products/${productId}`)return json(res,200,publicProduct(asset,price));
+    if(req.method==='POST'&&req.url===`/v1/agent/releases/${releaseId}/purchase`) {
+      assert.deepEqual(body,{expectedReleaseHash:releaseHash});
+      if(++purchases===1)return json(res,429,{error:'temporary_rate_limit'});
+      return json(res,200,purchase);
     }
     if(req.method==='POST'&&req.url===`/v1/agent/purchases/${purchaseId}/refund`) {
-      assert.equal(body.proof.signature,await signMessage(signer,body.proof.message));
-      const count=(sends.get(`refund-${assetName}`)??0)+1;sends.set(`refund-${assetName}`,count);
-      if(count===1) {
-        if(assetName==='ATTO')return json(res,429,{error:'temporary_rate_limit'});
-        refunded.add(assetName);res.destroy();return;
-      }
-      refunded.add(assetName);
-      return json(res,200,sessionOrder(assetName,true));
+      assert.deepEqual(body,{expectedPurchaseVersion:1});
+      if(++refunds===1){res.destroy();return;}
+      return json(res,200,{...order(asset,'ACTIVE'),refundPaymentRequirementId:id(41)});
     }
     return json(res,404,{error:'not_found'});
   });
   const store=await MarketplaceProfileStore.open(home);
   store.createProfile({id:'session',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
-    controllerNetwork:'ATTO',controllerAddress:address,controllerIndex:0,authMode:'controller-session',
-    accessToken:'session-token',accessExpiresAt:Date.now()+120_000,
-    refreshToken:'refresh-token',refreshExpiresAt:Date.now()+240_000});
-  let client=await connect(home,'session',undefined);
+    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,controllerIndex:0,authMode:'controller-session',
+    accessToken:'session-token',accessExpiresAt:Date.now()+120000,refreshToken:'refresh-token',refreshExpiresAt:Date.now()+240000});
+  let client=await connect(home,'session');
   try {
-    for(const [assetName,selectedRelease,gross,key] of [
-      ['ATTO',id(50),'101',id(70)],['XNO',id(51),'900719925474099312345',id(71)]]) {
-      currentAsset=assetName;
-      const args={productId,releaseId:selectedRelease,expectedReleaseHash:releaseHash,
-        asset:assetName,grossAtomic:gross,requestId:key};
-      const pending=await client.callTool({name:'marketplace_product_purchase',arguments:args});
-      assert.equal(pending.isError,undefined,text(pending));
-      const handoff=JSON.parse(text(pending)).result;
-      assert.equal(handoff.status,'approval_required');
-      const requestPath=join(home,'approvals','session',`${handoff.handoffId}.request.json`);
-      const request=JSON.parse(await readFile(requestPath,'utf8'));
-      assert.equal(request.purpose,'product purchase');
-      assert.deepEqual(request.action,{kind:'productPurchase',releaseId:selectedRelease,expectedReleaseHash:releaseHash,
-        sellerAgentId:agentId,asset:assetName,grossAtomic:gross,
-        feeAtomic:assetName==='ATTO'?'1':'9007199254740993123',
-        netAtomic:assetName==='ATTO'?'100':'891712726219358319222',idempotencyKey:key});
-      const responsePath=requestPath.replace(/\.request\.json$/,'.response.json');
-      const response={version:1,type:'marketplace-controller-approval-response',profileId:request.profileId,
-        handoffId:request.handoffId,requestDigest:approvalRequestDigest(request),
-        challengeId:request.challenge.challengeId,message:request.challenge.message,
-        signature:await signMessage(signer,request.challenge.message),controllerAddress:address,controllerIndex:0};
-      await writeFile(responsePath,`${JSON.stringify(response)}\n`,{mode:0o600});await chmod(responsePath,0o600);
-      const lost=await client.callTool({name:'marketplace_product_purchase',arguments:args});
-      assert.equal(lost.isError,true,text(lost));
-      assert.equal(store.getHandoff('session',handoff.handoffId).state,'UNKNOWN');
-      if(assetName==='XNO') {
-        store.setHandoffState('session',handoff.handoffId,'SUBMITTING');
-        await client.close();client=await connect(home,'session',undefined);
-      }
-      const completed=await client.callTool({name:'marketplace_product_purchase',arguments:args});
-      assert.equal(completed.isError,undefined,text(completed));
-      assert.equal(JSON.parse(text(completed)).result.asset,assetName);
-      assert.equal(seen.filter(item=>item.path===`/v1/agent/releases/${selectedRelease}/purchase`).length,2);
-      assert.deepEqual(seen.filter(item=>item.path===`/v1/agent/releases/${selectedRelease}/purchase`)
-        .map(item=>item.body.proof),[responseProof(response),responseProof(response)]);
-
-      const purchaseId=assetName==='ATTO'?id(60):id(61);
-      const refundArgs={purchaseId,expectedPurchaseVersion:0,originalPurchaseReceiptHash:'c'.repeat(64),
-        asset:assetName,grossAtomic:gross,requestId:assetName==='ATTO'?id(72):id(73)};
-      const refundPending=await client.callTool({name:'marketplace_product_refund',arguments:refundArgs});
-      assert.equal(JSON.parse(text(refundPending)).result.status,'approval_required');
-      const refundHandle=JSON.parse(text(refundPending)).result.handoffId;
-      const refundPath=join(home,'approvals','session',`${refundHandle}.request.json`);
-      const refundRequest=JSON.parse(await readFile(refundPath,'utf8'));
-      assert.equal(refundRequest.action.kind,'productRefund');
-      const refundResponse={version:1,type:'marketplace-controller-approval-response',profileId:refundRequest.profileId,
-        handoffId:refundRequest.handoffId,requestDigest:approvalRequestDigest(refundRequest),
-        challengeId:refundRequest.challenge.challengeId,message:refundRequest.challenge.message,
-        signature:await signMessage(signer,refundRequest.challenge.message),controllerAddress:address,controllerIndex:0};
-      await writeFile(refundPath.replace(/\.request\.json$/,'.response.json'),`${JSON.stringify(refundResponse)}\n`,{mode:0o600});
-      const refundLost=await client.callTool({name:'marketplace_product_refund',arguments:refundArgs});
-      assert.equal(refundLost.isError,true,text(refundLost));
-      assert.equal(store.getHandoff('session',refundHandle).state,'UNKNOWN');
-      if(assetName==='XNO') {
-        store.setHandoffState('session',refundHandle,'SUBMITTING');
-        await client.close();client=await connect(home,'session',undefined);
-      }
-      const refundCompleted=await client.callTool({name:'marketplace_product_refund',arguments:refundArgs});
-      assert.equal(refundCompleted.isError,undefined,text(refundCompleted));
-      assert.equal(JSON.parse(text(refundCompleted)).result.status,'REFUNDED');
-      assert.equal(store.getHandoff('session',refundHandle).state,'COMPLETE');
-      assert.equal(seen.filter(item=>item.path===`/v1/agent/purchases/${purchaseId}/refund`).length,2);
-      assert.deepEqual(seen.filter(item=>item.path===`/v1/agent/purchases/${purchaseId}/refund`)
-        .map(item=>item.body.proof),[responseProof(refundResponse),responseProof(refundResponse)]);
-    }
-    assert.deepEqual([...purchased].sort(),['ATTO','XNO']);
-    assert.deepEqual([...refunded].sort(),['ATTO','XNO']);
-  } finally {await client.close();await new Promise(resolve=>http.close(resolve));store.close();await rm(root,{recursive:true,force:true});}
+    const args={productId,releaseId,expectedReleaseHash:releaseHash,asset,grossAtomic:purchase.grossAtomic,requestId:id(70)};
+    // When
+    assert.equal((await client.callTool({name:'marketplace_product_purchase',arguments:args})).isError,true);
+    price='999';await client.close();client=await connect(home,'session');
+    const replay=await client.callTool({name:'marketplace_product_purchase',arguments:args});
+    assert.equal(replay.isError,undefined,text(replay));assert.equal(result(replay).paymentRequirementId,id(40));
+    const refundArgs={purchaseId,expectedPurchaseVersion:1,requestId:id(71)};
+    assert.equal((await client.callTool({name:'marketplace_product_refund',arguments:refundArgs})).isError,true);
+    await client.close();client=await connect(home,'session');
+    const refund=await client.callTool({name:'marketplace_product_refund',arguments:refundArgs});
+    assert.equal(refund.isError,undefined,text(refund));assert.equal(result(refund).refundPaymentRequirementId,id(41));
+    // Then
+    assert.equal(result(refund).status,'ACTIVE');
+    assert.deepEqual(requests.filter(r=>r.path.endsWith('/purchase')).map(r=>r.key),[id(70),id(70)]);
+    assert.deepEqual(requests.filter(r=>r.path.endsWith('/refund')).map(r=>r.key),[id(71),id(71)]);
+    assert.equal(requests.filter(r=>r.path===`/v1/products/${productId}`).length,0);
+    assert.equal(requests.some(r=>r.body?.proof),false);
+    assert.equal(requests.some(r=>r.path.includes('/challenges')||r.path.includes('/commands')),false);
+  } finally { await client.close();await new Promise(resolve=>http.close(resolve));store.close();await rm(root,{recursive:true,force:true}); }
 });
 
-function responseProof(response){return {challengeId:response.challengeId,message:response.message,signature:response.signature};}
-function sessionOrder(assetName,isRefunded){
-  const gross=assetName==='XNO'?'900719925474099312345':'101';
-  const fee=assetName==='XNO'?'9007199254740993123':'1';
-  const purchaseId=assetName==='ATTO'?id(60):id(61);
-  return {...order(isRefunded),purchaseId,commandId:assetName==='ATTO'?id(30):id(36),
-    releaseId:assetName==='ATTO'?id(50):id(51),asset:assetName,grossAtomic:gross,feeAtomic:fee,
-    netAtomic:(BigInt(gross)-BigInt(fee)).toString(),refundCommandId:isRefunded?(assetName==='ATTO'?id(31):id(37)):null};
-}
+for(const visibility of ['EXHAUSTED','UNLISTED'])test(`fresh-key MCP purchase recovers an owned ${visibility} release without a library scope or native wallet`,async()=>{
+  // Given an existing paid order and a public offer which is no longer discoverable.
+  const root=await mkdtemp(join(tmpdir(),'atto-marketplace-mcp-owned-order-')),home=join(root,'profile'),requests=[];
+  const purchase=order('ATTO','ACTIVE');
+  const http=await listen(async(req,res)=>{
+    const body=req.method==='GET'?undefined:await readJson(req);
+    requests.push({method:req.method,path:req.url,key:req.headers['idempotency-key'],body});
+    if(req.url===`/v1/products/${productId}`)return json(res,404,{error:'not_found',state:visibility});
+    if(req.method==='POST'&&req.url===`/v1/agent/releases/${releaseId}/purchase`){
+      assert.equal(req.headers.authorization,'Bearer current-buyer-grant');
+      assert.deepEqual(body,{expectedReleaseHash:releaseHash});
+      // The backend owns buyer/release recovery and checks its current grant before this result.
+      return json(res,200,purchase);
+    }
+    return json(res,403,{error:'forbidden'});
+  });
+  const store=await MarketplaceProfileStore.open(home);
+  store.createProfile({id:'buyer',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
+    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',
+    apiKey:'current-buyer-grant',apiScopes:['products:purchase'],purchaseAttoLimit:'1'});
+  const client=await connect(home,'buyer');
+  try{
+    const args={productId,releaseId,expectedReleaseHash:releaseHash,asset:'ATTO',grossAtomic:'101',requestId:id(80)};
+    // When a fresh mutation key reaches the authenticated purchase owner despite stale cached ceiling metadata.
+    const response=await client.callTool({name:'marketplace_product_purchase',arguments:args});
+    // Then the original order/requirement return without a public/library read or native wallet configuration.
+    assert.equal(response.isError,undefined,text(response));
+    assert.equal(result(response).purchaseId,purchaseId);assert.equal(result(response).paymentRequirementId,id(40));
+    assert.equal(result(response).status,'ACTIVE');
+    assert.deepEqual(requests,[{method:'POST',path:`/v1/agent/releases/${releaseId}/purchase`,key:id(80),body:{expectedReleaseHash:releaseHash}}]);
+    assert.equal((await client.callTool({name:'marketplace_product_purchase',arguments:{...args,expectedReleaseHash:'c'.repeat(64)}})).isError,true);
+    assert.equal(requests.length,1);
+  }finally{await client.close();await new Promise(resolve=>http.close(resolve));store.close();await rm(root,{recursive:true,force:true});}
+});
 
-function proofChallenge(challengeId,address,purpose,bindingHash){
-  const issuedAt=new Date(Date.now()-1000).toISOString(),expiresAt=new Date(Date.now()+120_000).toISOString();
-  return {challengeId,issuedAt,expiresAt,message:[
-    'Marketplace Agent Controller Proof v1','Audience: marketplace','Network: live',`Address: ${address}`,
-    `Purpose: ${purpose}`,`Request ID: ${challengeId}`,`Binding Hash: ${bindingHash}`,
-    `Nonce: ${'a'.repeat(64)}`,`Issued At: ${issuedAt}`,`Expiration Time: ${expiresAt}`].join('\n')};
-}
-function lengthPrefixedHash(fields){return createHash('sha256').update(Buffer.concat(fields.map(field=>{
-  const bytes=Buffer.from(field),length=Buffer.alloc(4);length.writeUInt32BE(bytes.length);return Buffer.concat([length,bytes]);
-}))).digest('hex');}
-async function signMessage(signer,message){return (await signer.signMessage(Int8Array.from(Buffer.from(message,'utf8')))).toString();}
-
-function order(refunded){return {purchaseId,commandId:id(30),productId,releaseId,releaseHash,manifestHash,
-  buyerAgentId:agentId,sellerAgentId:agentId,asset:'ATTO',grossAtomic:'101',feeAtomic:'1',netAtomic:'100',
-  feeRateBasisPoints:100,status:refunded?'REFUNDED':'ACTIVE',version:refunded?1:0,entitlementActive:!refunded,
-  receiptId:id(32),receiptHash:'c'.repeat(64),createdAt,refundedAt:refunded?createdAt:null,
-  refundReceiptId:refunded?id(33):null,refundReceiptHash:refunded?'d'.repeat(64):null,
-  refundCommandId:refunded?id(31):null};}
-function publicProduct(price){return {productId,releaseId,releaseSequence:1,releaseHash,sellerAgentId:agentId,sellerProfile:null,
-  title:'Paid note',summaryMarkdown:'Public description',asset:'ATTO',priceAtomic:price,licenseText:'Personal use',manifestHash,
-  files:[{fileId,filename:'paid.txt',byteLength:bytes.length,mediaType:'text/plain'}]};}
-function makeReceipt(kind,purchase){
-  const isRefund=kind==='REFUND',receiptId=isRefund?id(33):id(32),commandId=isRefund?id(31):id(30);
-  const values=[`marketplace-product-${isRefund?'refund':'purchase'}-receipt-v1`,'test-v1',receiptId,purchaseId,
-    accountId,agentId,accountId,agentId,productId,releaseId,releaseHash,manifestHash,'ATTO','101','1','100','100',
-    commandId,isRefund?id(35):id(34),isRefund?'REFUNDED':'PURCHASED',createdAt,createdAt,
-    ...(isRefund?[id(32),purchase.receiptHash,id(34),'SELLER',accountId,identityId]:[])];
-  const bytes=Buffer.concat(values.map(value=>{const raw=Buffer.from(value),prefix=Buffer.alloc(4);prefix.writeUInt32BE(raw.length);return Buffer.concat([prefix,raw]);}));
-  const digest=createHash('sha256').update(bytes).digest();
-  return {receiptId,kind,content:Object.fromEntries((isRefund?[...fields,...refundFields]:fields).map((field,index)=>[field,values[index]])),
-    canonicalBase64:bytes.toString('base64'),contentSha256:digest.toString('hex'),
-    signatureBase64:sign(null,Buffer.concat([Buffer.from(`marketplace-product-${isRefund?'refund':'purchase'}-receipt-signature-v1\0`),digest]),pair.privateKey).toString('base64'),
-    keyVersion:'test-v1'};
-}
 async function connect(home,profile,filesDirectory){
   const client=new Client({name:'test-marketplace-purchases',version:'1.0.0'});
   const env=Object.fromEntries(Object.entries(process.env).filter(([key,value])=>typeof value==='string'&&key!=='NODE_TEST_CONTEXT'&&!key.startsWith('NODE_TEST_')));
-  await client.connect(new StdioClientTransport({command:process.execPath,args:[join(import.meta.dirname,'../dist/main.js'),
-    '--profile',profile,'--home',home,...(filesDirectory?['--files-dir',filesDirectory]:[])],env,stderr:'pipe'}));
-  return client;
+  await client.connect(new StdioClientTransport({command:process.execPath,args:[join(packageDirectory,'dist/main.js'),
+    '--profile',profile,'--home',home,...(filesDirectory?['--files-dir',filesDirectory]:[])],env,stderr:'pipe'}));return client;
 }
 async function listen(handler){const server=createServer((req,res)=>{void Promise.resolve(handler(req,res)).catch(error=>json(res,500,{error:String(error)}));});
   await new Promise((resolve,reject)=>server.once('error',reject).listen(0,'127.0.0.1',resolve));
@@ -324,3 +236,4 @@ async function listen(handler){const server=createServer((req,res)=>{void Promis
 async function readJson(req){const chunks=[];for await(const chunk of req)chunks.push(chunk);return JSON.parse(Buffer.concat(chunks).toString('utf8'));}
 function json(res,status,body){res.writeHead(status,{'content-type':'application/json'});res.end(JSON.stringify(body));}
 function text(result){return result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n')??'';}
+function result(response){return JSON.parse(text(response)).result;}

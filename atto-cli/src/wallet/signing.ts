@@ -33,11 +33,34 @@ export async function derivedSigner(seed: AttoSeed, index: number): Promise<Atto
   return privateKeyToSigner(await seed.toPrivateKey(toAttoIndex(index)));
 }
 
+/** Publish an already validated candidate without rebuilding, signing or requesting work. */
+export async function publishTransaction(transaction: AttoTransaction, settings: WalletSettings,
+  beforePublish: () => void | Promise<void>, retry?: SendRetry): Promise<void> {
+  const client = new AttoNodeClientAsyncBuilder(settings.nodeUrl).build();
+  let attempted = false;
+  await retryNetwork(async () => {
+    if (attempted) {
+      const confirmed = await new NodeReader(settings).transaction(transaction.hash.toString(), retry?.signal);
+      if (confirmed) {
+        if (confirmed.hash.toString() !== transaction.hash.toString() || !await confirmed.isValid()) {
+          throw new AttoError('INVALID_NODE_RESPONSE', 'The node returned a different or invalid transaction.');
+        }
+        return;
+      }
+    }
+    await beforePublish();
+    if (retry?.signal.aborted) throw new AttoError('CANCELLED', 'Send cancelled.');
+    attempted = true;
+    await client.publish(transaction);
+  }, retry);
+}
+
 export async function signingWallet(
   seed: AttoSeed, index: number, settings: WalletSettings,
   beforeSign: (block: AttoBlock) => void | Promise<void>,
   suppliedWorker?: BlockWorker,
   retry?: SendRetry,
+  beforePublish?: (transaction: AttoTransaction) => void | Promise<void>,
 ) {
   const client = new AttoNodeClientAsyncBuilder(settings.nodeUrl).build();
   const worker = suppliedWorker ?? new AttoWorkerAsyncBuilder(settings.workerUrl).cached(false).timeoutSeconds(60n).build();
@@ -88,23 +111,11 @@ export async function signingWallet(
   async function perform(build: (timestamp: string) => AccountUpdate, timestamp?: AttoInstant | null): Promise<AttoTransaction> {
     return serialized(async () => {
       const { update, block, transaction } = await prepareTransaction(build, timestamp);
-      let attempted = false;
-      await retryNetwork(async () => {
-        if (attempted) {
-          const confirmed = await new NodeReader(settings).transaction(transaction.hash.toString(), retry?.signal);
-          if (confirmed) {
-            if (confirmed.hash.toString() !== transaction.hash.toString() || !await confirmed.isValid()) {
-              throw new AttoError('INVALID_NODE_RESPONSE', 'The node returned a different or invalid transaction.');
-            }
-            return;
-          }
-        }
+      // The payment owner must durably retain the complete candidate before HTTP.
+      await beforePublish?.(transaction);
+      await publishTransaction(transaction, settings, async () => {
         // Approval may have changed while waiting for work or during backoff.
-        // Recheck that the journal still permits this exact block.
         if (retry) await beforeSign(block);
-        if (retry?.signal.aborted) throw new AttoError('CANCELLED', 'Send cancelled.');
-        attempted = true;
-        await client.publish(transaction);
       }, retry);
       account = update.account;
       return transaction;

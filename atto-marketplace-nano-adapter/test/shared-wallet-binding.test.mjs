@@ -22,7 +22,7 @@ async function fixture(t) {
   const environment = { PATH: `${bin}:${process.env.PATH}`, BINDING_TEST_LOOKUP: `lookup service ${profile.credentialService} account ${profile.credentialAccount} key_type mnemonic`, BINDING_TEST_PHRASE: phrase, BINDING_TEST_LOG: log };
   const previous = Object.fromEntries(Object.keys(environment).map(key => [key, process.env[key]])); Object.assign(process.env, environment);
   t.after(() => { for (const [key, value] of Object.entries(previous)) value === undefined ? delete process.env[key] : process.env[key] = value; });
-  const options = name => ({ dataDir: join(root, name), recoveryWalletDirectory: source, derivationIndex: 0, network: 'nano:dev', rpcUrl: 'http://localhost:1', origin: 'http://localhost:8080', audience: 'binding-test', handoffDirectory: join(root, name, 'handoffs'), terminalConfirmed: true });
+  const options = name => ({ dataDir: join(root, name), recoveryWalletDirectory: source, derivationIndex: 0, network: 'nano:dev', rpcUrl: 'http://localhost:1', origin: 'http://localhost:8080', audience: 'binding-test', terminalConfirmed: true });
   const claim = config => join(source, 'marketplace-nano-wallets', `${createHash('sha256').update(config.network).update('\0').update(config.sourceAddress).digest('hex')}.json`);
   return { root, source, options, claim, environment, log };
 }

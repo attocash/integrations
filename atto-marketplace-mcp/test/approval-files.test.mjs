@@ -32,8 +32,8 @@ test('typed wallet-approval request is durable, private, and immutable by opaque
     for (const changed of [
       { ...request, accountId: '99999999-9999-4999-8999-999999999999' },
       { ...request, audience: 'other-audience' },
-      { ...request, action: { ...request.action, command: { ...request.action.command, atomicAmount: '124' } } },
-      { ...request, action: { ...request.action, destinationAddress: 'atto://ccccccccccccccccccccccccccccccccccccccccccccccccccccc' } },
+      { ...request, action: { ...request.action, command: { ...request.action.command, targetApiKeyId: '66666666-6666-4666-8666-666666666666' } } },
+      { ...request, action: { ...request.action, operation: 'ROTATE' } },
       { ...request, action: { ...request.action, command: { ...request.action.command, idempotencyKey: '66666666-6666-4666-8666-666666666666' } } },
     ]) assert.throws(() => validateApprovalResponse(changed, response));
     assert.equal(await writeApprovalRequest(home, 'agent', handoffId, request), path);
@@ -45,7 +45,7 @@ test('typed wallet-approval request is durable, private, and immutable by opaque
   }
 });
 
-test('Nano approval responses bind the full request domain, network, controller, challenge, purpose and Shop action', () => {
+test('Nano approval responses bind the full request domain, network, controller, challenge, purpose and credential action', () => {
   // Given one public Nano controller challenge and its exact v1 approval response envelope.
   const request = nanoApprovalRequest();
   const response = nanoApprovalResponse(request);
@@ -60,7 +60,7 @@ test('Nano approval responses bind the full request domain, network, controller,
     { ...request, controller: { ...request.controller, address: `nano_${'1'.repeat(60)}` } },
     { ...request, controller: { ...request.controller, index: 1 } },
     { ...request, purpose: 'product refund' },
-    { ...request, action: { ...request.action, grossAtomic: '100' } },
+    { ...request, action: { ...request.action, operation: 'REVOKE' } },
     { ...request, challenge: { ...request.challenge, challengeId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb' } },
     { ...request, challenge: { ...request.challenge, message: 'changed challenge' } },
   ];
@@ -84,7 +84,7 @@ test('Nano approval verification checks the public proof locally without opening
     MARKETPLACE_MCP_WALLET_HOST_COMMAND: '/this-command-must-not-be-executed',
     MARKETPLACE_MCP_NANO_WALLET_DATA_DIR: '/this-path-must-not-be-opened',
     MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR: '/this-path-must-not-be-opened',
-    MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR: '/this-path-must-not-be-opened',
+
   };
 
   await verifyApprovalSignature(request, response, env);
@@ -165,13 +165,11 @@ function approvalRequest() {
     accountId: '11111111-1111-4111-8111-111111111111',
     identityId: '33333333-3333-4333-8333-333333333333',
     controller: { network: 'ATTO', address: 'atto://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', index: 0 },
-    purpose: 'withdrawal creation',
-    action: {
-      kind: 'withdrawal',
-      command: { asset: 'ATTO', atomicAmount: '123', destinationId: '22222222-2222-4222-8222-222222222222', expectedSelectionVersion: 0, idempotencyKey: '44444444-4444-4444-8444-444444444444' },
-      network: 'atto:live',
-      destinationAddress: 'atto://bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-    },
+    purpose: 'API-key revocation',
+    action: { kind: 'credential', operation: 'REVOKE', command: {
+      operation: 'REVOKE', targetApiKeyId: '22222222-2222-4222-8222-222222222222',
+      idempotencyKey: '44444444-4444-4444-8444-444444444444',
+    } },
     challenge: {
       challengeId: '55555555-5555-4555-8555-555555555555',
       message: 'exact server-authored challenge message',
@@ -186,8 +184,8 @@ function nanoApprovalRequest() {
     version: 1, type: 'marketplace-controller-approval-request', profileId: 'agent', handoffId: 'a'.repeat(32),
     marketplaceOrigin: 'https://marketplace.example', transport: 'AGENT_API', proofOrigin: null, audience: 'marketplace',
     accountId: '11111111-1111-4111-8111-111111111111', identityId: '22222222-2222-4222-8222-222222222222',
-    controller: { network: 'NANO', address: nanoAddress, index: 0 }, purpose: 'product purchase',
-    action: { kind: 'productPurchase', releaseId: '33333333-3333-4333-8333-333333333333', grossAtomic: '101', idempotencyKey: '44444444-4444-4444-8444-444444444444' },
+    controller: { network: 'NANO', address: nanoAddress, index: 0 }, purpose: 'API-key creation',
+    action: { kind: 'credential', operation: 'CREATE', command: { operation: 'CREATE', credential: { name: 'read-only', scopes: ['payments:read'], expiresInDays: 90 }, idempotencyKey: '44444444-4444-4444-8444-444444444444' } },
     challenge: { challengeId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', message: nanoMessage,
       issuedAt: '2026-10-16T20:00:00.000Z', expiresAt: '2026-10-16T20:02:00.000Z' },
   };

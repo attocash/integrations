@@ -27,6 +27,8 @@ export interface ConsolidationStep {
   status: PaymentStepStatus;
   hash?: string;
   blockJson?: string;
+  transactionJson?: string;
+  candidateBinding?: string;
   result?: unknown;
   publishedAt?: number;
 }
@@ -57,6 +59,7 @@ export function validatePaymentPlan(plan: PaymentPlan, parent: { index: number; 
       || !['planned', 'signed', 'published', 'unknown', 'failed'].includes(step.status)) throw new Error('Invalid consolidation step.');
     if (accountAddresses.has(step.index) && accountAddresses.get(step.index) !== step.sourceAddress) throw new Error('Inconsistent step account.');
     accountAddresses.set(step.index, step.sourceAddress);
+    validateNativeCandidate(step);
     if (step.hash !== undefined && (typeof step.hash !== 'string' || !step.hash || typeof step.blockJson !== 'string' || !step.blockJson)) throw new Error('Invalid recorded step.');
     if (['signed', 'published', 'unknown'].includes(step.status) && !step.hash) throw new Error('Missing step block.');
     if (step.status === 'planned' && step.hash !== undefined) throw new Error('Planned step already has a block.');
@@ -76,4 +79,14 @@ export function validatePaymentPlan(plan: PaymentPlan, parent: { index: number; 
     steps.set(step.id, step);
   }
   if (sentRaw !== receivedRaw || [...steps.values()].some(step => step.kind === 'send' && !received.has(step.id))) throw new Error('Incomplete consolidation plan.');
+}
+
+/** Optional for released block-only journals; new candidates retain exact native bytes. */
+export function validateNativeCandidate(record: { hash?: string; blockJson?: string; transactionJson?: string; candidateBinding?: string }): void {
+  if (record.transactionJson === undefined && record.candidateBinding === undefined) return;
+  if (!record.hash || !record.blockJson || typeof record.transactionJson !== 'string'
+    || Buffer.byteLength(record.transactionJson, 'utf8') < 1 || Buffer.byteLength(record.transactionJson, 'utf8') > 65_536
+    || typeof record.candidateBinding !== 'string' || !/^[a-f0-9]{64}$/.test(record.candidateBinding)) {
+    throw new Error('Invalid retained native candidate.');
+  }
 }

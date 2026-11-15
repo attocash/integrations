@@ -1,26 +1,20 @@
 import { createHash } from 'node:crypto';
 import { AttoError } from '../domain/errors.js';
-import type { MarketplaceConnection } from './topups.js';
+import type { MarketplaceConnection } from './connection.js';
 
 const PURPOSES = new Set([
   'login', 'API-key creation', 'API-key rotation', 'API-key revocation',
   'link authorizer', 'link new identity', 'unlink',
-  'payout address enrollment', 'payout address selection', 'payout address disablement',
-  'withdrawal creation', 'administrator public moderation', 'administrator task cancellation or expiry',
-  'administrator dispute opening', 'administrator dispute resolution', 'product purchase', 'product refund',
+  'administrator public moderation', 'administrator task cancellation or expiry',
+  'administrator dispute opening', 'administrator dispute resolution',
 ]);
 const SCOPES = new Set([
   'tasks:read', 'applications:read', 'applications:apply', 'applications:withdraw',
   'tasks:draft:write', 'tasks:publish', 'submissions:write', 'submissions:read',
-  'activity:read', 'activity:write', 'balances:read',
+  'activity:read', 'activity:write', 'payments:read', 'payments:write',
   'files:read', 'files:write', 'products:read', 'products:write', 'products:publish', 'products:purchase',
   'purchases:read', 'purchases:refund',
 ]);
-const SHOP_SCOPES = new Set([
-  'files:read', 'files:write', 'products:read', 'products:write', 'products:publish', 'products:purchase',
-  'purchases:read', 'purchases:refund',
-]);
-
 export interface MarketplaceProofApprovalRequest {
   version: 1;
   type: 'marketplace-controller-approval-request';
@@ -49,10 +43,9 @@ export function validateMarketplaceUserProofApproval(input: unknown, options: {
 }): MarketplaceUserProofApprovalRequest {
   const request = parseRequest(input, options.network);
   const purposes = new Set(['login', 'API-key creation', 'API-key rotation', 'API-key revocation',
-    'link authorizer', 'link new identity', 'unlink', 'payout address enrollment', 'payout address selection',
-    'payout address disablement', 'withdrawal creation', 'product purchase', 'product refund']);
+    'link authorizer', 'link new identity', 'unlink']);
   const atto = options.network === 'ATTO';
-  if (!purposes.has(request.purpose) || (request.action.authority !== undefined && request.action.authority !== 'SELLER')
+  if (!purposes.has(request.purpose)
     || request.controller.network !== options.network || !Number.isSafeInteger(request.controller.index)
     || request.controller.index < 0 || request.controller.index > (atto ? 0x7fff_ffff : 0xffff_ffff)
     || !(atto ? /^atto:\/\/[a-z2-7]{61}$/.test(request.controller.address)
@@ -253,14 +246,10 @@ function expectedPurpose(action: Record<string, unknown>): string {
       : action.operation === 'NEW_IDENTITY' ? 'link new identity' : '';
     case 'identity-unlink': return 'unlink';
     case 'credential': return ({ CREATE: 'API-key creation', ROTATE: 'API-key rotation', REVOKE: 'API-key revocation' } as Record<string, string>)[String(action.operation)] ?? '';
-    case 'payout-address': return ({ ENROLL: 'payout address enrollment', SELECT: 'payout address selection', DISABLE: 'payout address disablement' } as Record<string, string>)[String(record(action.command).action)] ?? '';
-    case 'withdrawal': return 'withdrawal creation';
     case 'adminModeration': return 'administrator public moderation';
     case 'adminTaskClose': return 'administrator task cancellation or expiry';
     case 'adminDisputeOpen': return 'administrator dispute opening';
     case 'adminDisputeResolution': return 'administrator dispute resolution';
-    case 'productPurchase': return 'product purchase';
-    case 'productRefund': return 'product refund';
     default: return '';
   }
 }
@@ -277,15 +266,7 @@ function validActionKeys(action: Record<string, unknown>): boolean {
     if (!onlyKeys(command, ['operation','idempotencyKey','targetApiKeyId','credential'])) return false;
     if (command.credential === undefined) return true;
     return onlyKeys(record(command.credential), ['name','expiresInDays','scopes','publishAttoLimit','publishXnoLimit',
-      'applyAttoLimit','applyXnoLimit','purchaseAttoLimit','purchaseXnoLimit','productPublishAttoLimit','productPublishXnoLimit']);
-  }
-  if (action.kind === 'payout-address') {
-    return onlyKeys(action, ['kind','command','network','canonicalTargetAddress'])
-      && onlyKeys(record(action.command), ['action','asset','idempotencyKey','address','destinationId','expectedSelectionVersion','network']);
-  }
-  if (action.kind === 'withdrawal') {
-    return onlyKeys(action, ['kind','command','network','destinationAddress'])
-      && onlyKeys(record(action.command), ['asset','atomicAmount','destinationId','expectedSelectionVersion','idempotencyKey','network']);
+      'purchaseAttoLimit','purchaseXnoLimit','productPublishAttoLimit','productPublishXnoLimit']);
   }
   if (action.kind === 'adminModeration') return onlyKeys(action,
     ['kind','targetKind','action','targetId','expectedTargetVersion','expectedModerationVersion','reason','idempotencyKey']);
@@ -295,11 +276,6 @@ function validActionKeys(action: Record<string, unknown>): boolean {
     ['kind','taskId','expectedEngagementVersion','representedAgentId','reason','statement','evidenceUrls','auditReason','idempotencyKey']);
   if (action.kind === 'adminDisputeResolution') return onlyKeys(action,
     ['kind','disputeId','expectedDisputeVersion','outcome','rationale','idempotencyKey']);
-  if (action.kind === 'productPurchase') return hasExactKeys(action,
-    ['kind','releaseId','expectedReleaseHash','sellerAgentId','asset','grossAtomic','feeAtomic','netAtomic','idempotencyKey']);
-  if (action.kind === 'productRefund') return hasExactKeys(action,
-    ['kind','purchaseId','expectedPurchaseVersion','authority','buyerAgentId','sellerAgentId','asset','grossAtomic',
-      'feeAtomic','netAtomic','originalPurchaseReceiptHash','idempotencyKey']);
   return false;
 }
 
@@ -308,32 +284,9 @@ function bindingHash(request: MarketplaceUserProofApprovalRequest): string | und
   if (action.kind === 'login') {
     if (action.network !== request.controller.network || action.address !== request.controller.address
       || !uuid(request.accountId) || !uuid(request.identityId)) throw protocolFailure();
-    return sha256(['signer-controller-enrollment-v1', request.accountId!, request.identityId!].join('\n'));
+    return sha256(['marketplace-login-v1', request.accountId!, request.identityId!].join('\n'));
   }
   if (!request.accountId || !request.identityId) throw protocolFailure();
-  if (action.kind === 'productPurchase') {
-    const releaseId = uuid(action.releaseId);
-    const sellerAgentId = uuid(action.sellerAgentId);
-    const key = uuid(action.idempotencyKey);
-    if (!releaseId || !sellerAgentId || !isSha256Hex(action.expectedReleaseHash) || !isAsset(action.asset)
-      || !validProductAtomicTerms(action.grossAtomic, action.feeAtomic, action.netAtomic) || !key) throw protocolFailure();
-    return lengthPrefixedSha256(['marketplace-product-purchase-approval-v1', request.accountId, request.identityId,
-      releaseId, action.expectedReleaseHash as string, action.asset as string, action.grossAtomic as string, key]);
-  }
-  if (action.kind === 'productRefund') {
-    const purchaseId = uuid(action.purchaseId);
-    const version = safeVersion(action.expectedPurchaseVersion);
-    const buyerAgentId = uuid(action.buyerAgentId);
-    const sellerAgentId = uuid(action.sellerAgentId);
-    const key = uuid(action.idempotencyKey);
-    if (!purchaseId || version === undefined || (action.authority !== 'SELLER' && action.authority !== 'ADMIN')
-      || !buyerAgentId || !sellerAgentId || !isAsset(action.asset)
-      || !validProductAtomicTerms(action.grossAtomic, action.feeAtomic, action.netAtomic)
-      || !isSha256Hex(action.originalPurchaseReceiptHash) || !key) throw protocolFailure();
-    return lengthPrefixedSha256(['marketplace-product-refund-approval-v1', action.authority, request.accountId,
-      request.identityId, purchaseId, action.originalPurchaseReceiptHash as string, String(version), action.asset as string,
-      action.grossAtomic as string, key]);
-  }
   if (action.kind === 'identity-link') {
     const operation = action.operation;
     const linkId = uuid(action.linkId);
@@ -376,60 +329,18 @@ function bindingHash(request: MarketplaceUserProofApprovalRequest): string | und
         || new Set(scopes).size !== scopes.length) throw protocolFailure();
       const publishAttoLimit = atomicOrEmpty(credential.publishAttoLimit);
       const publishXnoLimit = atomicOrEmpty(credential.publishXnoLimit);
-      const applyAttoLimit = atomicOrEmpty(credential.applyAttoLimit);
-      const applyXnoLimit = atomicOrEmpty(credential.applyXnoLimit);
       const purchaseAttoLimit = atomicOrEmpty(credential.purchaseAttoLimit);
       const purchaseXnoLimit = atomicOrEmpty(credential.purchaseXnoLimit);
       const productPublishAttoLimit = atomicOrEmpty(credential.productPublishAttoLimit);
       const productPublishXnoLimit = atomicOrEmpty(credential.productPublishXnoLimit);
       if ((scopes.includes('tasks:publish')) !== Boolean(publishAttoLimit || publishXnoLimit)
-        || (scopes.includes('applications:apply')) !== Boolean(applyAttoLimit || applyXnoLimit)
         || (scopes.includes('products:purchase')) !== Boolean(purchaseAttoLimit || purchaseXnoLimit)
         || (Boolean(productPublishAttoLimit || productPublishXnoLimit) && !scopes.includes('products:publish'))) throw protocolFailure();
-      const orderedFields = [name, String(expiresInDays), [...scopes].sort().join(','), publishAttoLimit, publishXnoLimit, applyAttoLimit];
-      payload = productPublishAttoLimit || productPublishXnoLimit
-        ? ['agent-credential-v4', ...orderedFields, applyXnoLimit, purchaseAttoLimit, purchaseXnoLimit,
-          productPublishAttoLimit, productPublishXnoLimit].join('\n')
-        : scopes.some(scope => SHOP_SCOPES.has(scope))
-          ? ['agent-credential-v3', ...orderedFields, applyXnoLimit, purchaseAttoLimit, purchaseXnoLimit].join('\n')
-          : ['agent-credential-v2', ...orderedFields, applyXnoLimit].join('\n');
+      payload = ['marketplace-credential-v1',name,String(expiresInDays),[...scopes].sort().join(','),publishAttoLimit,publishXnoLimit,
+        purchaseAttoLimit,purchaseXnoLimit,productPublishAttoLimit,productPublishXnoLimit].join('\n');
     }
     return sha256(['agent-credential-v1', request.accountId, request.identityId, operation,
       target || '', key, payload].join('\n'));
-  }
-  if (action.kind === 'payout-address') {
-    const command = record(action.command);
-    const actionName = String(command.action);
-    const asset = String(command.asset);
-    const key = uuid(command.idempotencyKey);
-    const destinationId = command.destinationId === undefined ? '' : uuid(command.destinationId);
-    const version = command.expectedSelectionVersion;
-    const network = action.network;
-    const address = action.canonicalTargetAddress;
-    if (!['ENROLL','SELECT','DISABLE'].includes(actionName) || !['ATTO','XNO'].includes(asset) || !key
-      || destinationId === false || typeof network !== 'string' || typeof address !== 'string' || !address
-      || (command.network !== undefined && command.network !== network)
-      || !(version === undefined || (typeof version === 'number' && Number.isSafeInteger(version) && version >= 0))
-      || (actionName === 'ENROLL') !== (typeof command.address === 'string')
-      || (actionName === 'ENROLL') !== (destinationId === '')) throw protocolFailure();
-    return sha256(['payout-address-v1', request.accountId, request.identityId, actionName, asset,
-      network, destinationId || '', address, version === undefined ? '' : String(version), key].join('\n'));
-  }
-  if (action.kind === 'withdrawal') {
-    const command = record(action.command);
-    const asset = String(command.asset);
-    const amount = command.atomicAmount;
-    const destinationId = uuid(command.destinationId);
-    const key = uuid(command.idempotencyKey);
-    const version = command.expectedSelectionVersion;
-    const network = action.network;
-    const address = action.destinationAddress;
-    if (!['ATTO','XNO'].includes(asset) || typeof amount !== 'string' || !/^[1-9][0-9]{0,64}$/.test(amount)
-      || !destinationId || !key || typeof version !== 'number' || !Number.isSafeInteger(version) || version < 0
-      || typeof network !== 'string' || typeof address !== 'string' || !address
-      || (command.network !== undefined && command.network !== network)) throw protocolFailure();
-    return sha256(['withdrawal-create-v2', request.accountId, request.identityId, asset, amount,
-      network, destinationId, address, String(version), key].join('\n'));
   }
   if (action.kind === 'adminModeration') {
     const targetKind = action.targetKind;
@@ -481,7 +392,7 @@ function bindingHash(request: MarketplaceUserProofApprovalRequest): string | und
     const outcome = action.outcome;
     const rationale = boundedDisputeText(action.rationale);
     const key = uuid(action.idempotencyKey);
-    if (!disputeId || version === undefined || (outcome !== 'WORKER_AWARD' && outcome !== 'BUYER_REFUND')
+    if (!disputeId || version === undefined || (outcome !== 'WORKER_SUPPORTED' && outcome !== 'BUYER_SUPPORTED')
       || rationale === undefined || !key) throw protocolFailure();
     return lengthPrefixedSha256(['dispute-admin-resolve-v1', request.accountId, request.identityId,
       disputeId, String(version), outcome, rationale, key]);
@@ -497,26 +408,6 @@ function browserOriginAllowed(connection: MarketplaceConnection, proofOrigin: st
 
 function safeVersion(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-}
-
-function isAsset(value: unknown): value is 'ATTO' | 'XNO' {
-  return value === 'ATTO' || value === 'XNO';
-}
-
-function isSha256Hex(value: unknown): value is string {
-  return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
-}
-
-function validProductAtomicTerms(gross: unknown, fee: unknown, net: unknown): boolean {
-  if (typeof gross !== 'string' || !/^[1-9][0-9]{0,64}$/.test(gross)
-    || typeof fee !== 'string' || !/^(?:0|[1-9][0-9]{0,64})$/.test(fee)
-    || typeof net !== 'string' || !/^[1-9][0-9]{0,64}$/.test(net)) return false;
-  return BigInt(gross) === BigInt(fee) + BigInt(net);
-}
-
-function hasExactKeys(value: Record<string, unknown>, keys: string[]): boolean {
-  const actual = Object.keys(value);
-  return actual.length === keys.length && actual.every(key => keys.includes(key));
 }
 
 function boundedAsciiSpaceReason(value: unknown, maximumCodePoints: number): string | undefined {

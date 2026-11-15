@@ -13,7 +13,6 @@ Run `atto <command> --help` for the options in your installed version.
 - [Wallet setup and configuration](#wallet-details-and-configuration)
 - [Profiles, backups, and recovery](#profiles-and-recovery)
 - [Background receiving and work preparation](#background-receiving-and-work-preparation)
-- [Marketplace funding](#fund-a-marketplace-account)
 - [Marketplace approvals](#review-a-marketplace-wallet-approval)
 - [Update notices](#update-notices)
 - [Build from source](#install-from-source)
@@ -723,41 +722,11 @@ The worker exits when its queue is drained, keeps at most two speculative
 requests active, and leaves failed or unfinished jobs eligible for a later CLI
 invocation. Reset cancels queued preparation before clearing the profile.
 
-## Fund a Marketplace account
+## Marketplace direct payments
 
-Connect the wallet from an interactive local terminal using the Marketplace
-`/v1/agent/topups` URL, its exact controller-proof audience, and a saved wallet
-account. The connection uses the existing wallet key for authentication; session
-tokens stay in memory. HTTPS is required except for loopback HTTP on an isolated
-LOCAL wallet.
+Use the separate Marketplace MCP package for named task, Shop, direct-payment evidence and own-publication-fee workflows. Standalone ATTO transfers still use the existing local send/spending journal. The Marketplace wallet integration signs locally and retains complete native candidates, then hands the exact authorized x402 payload to Market for unchanged publication and independent confirmation. Standalone send behavior and its journal remain available. Historical block-only signed/unknown entries remain fenced and readable; they cannot be reconstructed into new signed bytes.
 
-```sh
-atto address derive 1
-atto marketplace connect --api-url https://<marketplace-host>/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin https://<site-host>
-atto marketplace topup 1 --unit ATTO --request-id marketplace-funding-2026-001
-atto marketplace status marketplace-funding-2026-001
-```
-
-`--browser-origin` may be repeated for up to eight exact origins. The CLI binds
-browser proof approvals to that provisioned list; it does not accept an origin
-from an approval file as configuration. Without this option, only the Marketplace
-API origin is allowed. Cross-origin browser login and protected actions require
-an existing local Marketplace connection. For an isolated LOCAL stack, use its exact
-loopback API and site origins, for example `http://localhost:8080` and
-`http://localhost:5173`; loopback HTTP is rejected for non-LOCAL wallets.
-
-```sh
-atto marketplace connect --api-url http://localhost:8080/v1/agent/topups --audience <agent-api-audience> --controller-index 1 --browser-origin http://localhost:5173
-```
-
-Marketplace top-ups use the existing shared spending limits, approved account pool,
-and wallet journal. Keep the printed request ID and reuse it after an uncertain
-result; status and recovery use the same intent and exact signed native payment.
-An unresolved top-up keeps its account frontier and allowance reserved. This
-flow funds the configured Marketplace account only. It does not create tasks, hire
-agents, or submit work. The MCP `marketplace_topup` and `marketplace_topup_status` tools
-become available after a local terminal connection; spending still requires
-approved MCP access.
+The CLI retains local typed identity/credential approvals. Connect its identity context with `atto marketplace connect --api-url https://<api-origin>/v1/agent/payments --audience <exact-audience> --controller-index <index>` and only explicitly authorised browser origins. No Marketplace topup/status operation exists. Use the current [Marketplace MCP reference](marketplace-mcp-reference.md) for its tools.
 
 ## Review a Marketplace wallet approval
 

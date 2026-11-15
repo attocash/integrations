@@ -13,14 +13,14 @@ const directory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??join(import.m
 const {callWallet}=await import(pathToFileURL(join(directory,'dist/wallet-process.js')).href);
 test('the installed private Node host works with Java absent and rejects unapproved or over-limit transfers',async t=>{
   const home=await mkdtemp(join(tmpdir(),'marketplace-node-only-host-'));t.after(()=>rm(home,{recursive:true,force:true}));
-  const dataDir=join(home,'nano'),handoffDirectory=join(home,'handoffs'),bin=join(home,'bin');await mkdir(bin,{mode:0o700});
+  const dataDir=join(home,'nano'),bin=join(home,'bin');await mkdir(bin,{mode:0o700});
   if (process.platform === 'win32') await copyFile(process.execPath,join(bin,'node.exe'));
   else await symlink(process.execPath,join(bin,'node'));
-  const env={PATH:bin,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir,MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR:handoffDirectory};
+  const env={PATH:bin,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir};
   await assert.rejects(execute('java',['-version'],{env}),{code:'ENOENT'});
   const seedFile=join(home,'seed.hex');await writeFile(seedFile,'42'.repeat(32)+'\n',{mode:0o600});
   const wallet=await provisionNanoWallet({seedFile,dataDir,derivationIndex:1,network:'nano:dev',rpcUrl:'http://localhost:1',
-    origin:'http://localhost:8080',audience:'node-only',handoffDirectory,terminalConfirmed:true});
+    origin:'http://localhost:8080',audience:'node-only',terminalConfirmed:true});
   const configuredFiles=await readdir(dataDir);
   assert.equal(configuredFiles.includes('nano-wallet.sqlite3'),false);
   await rename(seedFile,`${seedFile}.unavailable`);
@@ -28,12 +28,12 @@ test('the installed private Node host works with Java absent and rejects unappro
   await rename(`${seedFile}.unavailable`,seedFile);
   assert.deepEqual(await readdir(dataDir),configuredFiles,'Configured status neither needs the private key nor creates a payment journal.');
   assert.deepEqual(identity,{asset:'XNO',address:wallet.address,index:1,network:'nano:dev',
-    permissions:{marketplaceFunding:false,externalTransfers:false,receive:false}});
+    permissions:{externalTransfers:false,receive:false}});
   await assert.rejects(callWallet(env,{asset:'XNO',operation:'receive',input:{network:'nano:dev',hash:'a'.repeat(64)}}),{code:'PERMISSION_DENIED'});
   const destination=addressFromPublicKey(publicKey(derivePrivateKey(new Uint8Array(32),7)));
   const transfer={asset:'XNO',operation:'transfer.send',input:{network:'nano:dev',destination,amountAtomic:'11',requestId:randomUUID()}};
   await assert.rejects(callWallet(env,transfer),{code:'PERMISSION_DENIED'});
-  await approveNanoWalletPolicy({dataDir,grants:{marketplaceFunding:false,externalTransfers:true,controllerPurposes:[]},
+  await approveNanoWalletPolicy({dataDir,grants:{externalTransfers:true,controllerPurposes:[]},
     limits:{maxPaymentAtomic:'10',rolling24hAtomic:'100'},terminalConfirmed:true});
   // The unavailable RPC proves these denials happen before work or publication.
   await assert.rejects(callWallet(env,transfer),{code:'SPENDING_LIMIT'});
@@ -54,9 +54,9 @@ test('a separate controller never displaces the primary wallet or supplies fallb
   const primarySeed=join(home,'primary.hex'),controllerSeed=join(home,'controller.hex');
   await writeFile(primarySeed,'42'.repeat(32)+'\n',{mode:0o600});
   await writeFile(controllerSeed,'43'.repeat(32)+'\n',{mode:0o600});
-  const primary=await provisionNanoWallet({...base,seedFile:primarySeed,dataDir:primaryDir,handoffDirectory:join(home,'primary-handoffs'),
+  const primary=await provisionNanoWallet({...base,seedFile:primarySeed,dataDir:primaryDir,
     grants:{controllerPurposes:['login']}});
-  const controller=await provisionNanoWallet({...base,seedFile:controllerSeed,dataDir:controllerDir,handoffDirectory:join(home,'controller-handoffs'),
+  const controller=await provisionNanoWallet({...base,seedFile:controllerSeed,dataDir:controllerDir,
     grants:{controllerPurposes:['login'],externalTransfers:true},limits:{maxPaymentAtomic:'100',rolling24hAtomic:'100'}});
   assert.notEqual(primary.address,controller.address);
   const env={MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:primaryDir,MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR:controllerDir};

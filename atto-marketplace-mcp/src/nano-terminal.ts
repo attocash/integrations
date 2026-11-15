@@ -5,13 +5,13 @@ import { provisionNanoWallet, approveNanoWalletPolicy, loadConfiguration, inspec
 import { initializeMarketplaceRecoveryWallet } from '@attocash/cli/internal-marketplace';
 import { existsSync } from 'node:fs';
 import {readWalletSelection,saveWalletSelection} from './wallet-preferences.js';
-import {ensurePaymentHandoffDirectory} from './payment-handoff-files.js';
+import {ensurePrivateDirectory} from './private-directory.js';
 import { managedWalletEnvironment } from './wallet-home.js';
 import { ProfileError } from './profile-store.js';
 import { callWallet } from './wallet-process.js';
 import { defaultNanoRpcUrl, validateNanoRpcUrl } from './nano-setup.js';
 
-export const nanoWalletUsage = `Nano wallet: atto-marketplace-mcp wallet setup --asset XNO --network <nano:dev|nano:mainnet> [--rpc-url <url>] [--work-url <url>] --origin <marketplace-origin> --audience <audience> [--home <private-directory>] [--index <index>] [--recovery-wallet-dir <existing-Atto-wallet-directory> | --seed-file <private-file>] [--allow-marketplace-funding] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw>] [--rolling-24h-atomic <raw>]\nRPC defaults for new profiles: nano:mainnet uses https://rpc.nano.to; nano:dev uses http://localhost:17076. Existing profiles retain their configured RPC when --rpc-url is omitted. Work uses --work-url when provided, otherwise the saved work URL or the selected RPC.\nPolicy: atto-marketplace-mcp wallet policy --asset XNO [--home <private-directory>] [--allow-marketplace-funding] [--allow-external-transfers] [--allow-purpose <purpose>] --max-payment-atomic <raw> --rolling-24h-atomic <raw>\nApproval: atto-marketplace-mcp approve <private-request-path> [--home <private-directory>]\nStatus: atto-marketplace-mcp wallet status --asset XNO [--home <private-directory>]\n`;
+export const nanoWalletUsage = `Nano wallet: atto-marketplace-mcp wallet setup --asset XNO --network <nano:dev|nano:mainnet> [--rpc-url <url>] [--work-url <url>] --origin <marketplace-origin> --audience <audience> [--home <private-directory>] [--index <index>] [--recovery-wallet-dir <existing-Atto-wallet-directory> | --seed-file <private-file>] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw>] [--rolling-24h-atomic <raw>]\nRPC defaults for new profiles: nano:mainnet uses https://rpc.nano.to; nano:dev uses http://localhost:17076. Existing profiles retain their configured RPC when --rpc-url is omitted. Work uses --work-url when provided, otherwise the saved work URL or the selected RPC.\nPolicy: atto-marketplace-mcp wallet policy --asset XNO [--home <private-directory>] [--allow-external-transfers] [--allow-purpose <purpose>] --max-payment-atomic <raw> --rolling-24h-atomic <raw>\nApproval: atto-marketplace-mcp approve <private-request-path> [--home <private-directory>]\nStatus: atto-marketplace-mcp wallet status --asset XNO [--home <private-directory>]\n`;
 
 export async function runNanoTerminal(argv:string[],env:NodeJS.ProcessEnv):Promise<void> {
   if(argv.includes('--help')||argv.includes('-h')) {process.stdout.write(nanoWalletUsage);return;}
@@ -21,7 +21,7 @@ export async function runNanoTerminal(argv:string[],env:NodeJS.ProcessEnv):Promi
     '--max-payment-atomic','--rolling-24h-atomic','--recovery-wallet-dir']);
   for(let index=1;index<argv.length;index++) {
     const arg=argv[index]!;
-    if(['--allow-marketplace-funding','--allow-external-transfers'].includes(arg)) {
+    if(['--allow-external-transfers'].includes(arg)) {
       if(flags.has(arg))throw usage();flags.add(arg);continue;
     }
     const value=argv[++index];
@@ -41,7 +41,7 @@ export async function runNanoTerminal(argv:string[],env:NodeJS.ProcessEnv):Promi
     if([...values.keys()].some(key=>!['--asset','--home','--max-payment-atomic','--rolling-24h-atomic'].includes(key)))throw usage();
     const config=loadConfiguration(dataDir);
     const limits={maxPaymentAtomic:values.get('--max-payment-atomic')??'0',rolling24hAtomic:values.get('--rolling-24h-atomic')??'0'};
-    const grants={marketplaceFunding:flags.has('--allow-marketplace-funding'),externalTransfers:flags.has('--allow-external-transfers'),controllerPurposes:purposes as ControllerPurpose[]};
+    const grants={externalTransfers:flags.has('--allow-external-transfers'),controllerPurposes:purposes as ControllerPurpose[]};
     if(!await confirm(`${JSON.stringify({directory:dataDir,address:config.sourceAddress,network:config.network,grants,limits},null,2)}\nReplace this wallet's approved policy; its keys and journal stay in this profile.\n`))throw new ProfileError('APPROVAL_DECLINED','Nano policy approval was declined.');
     if(JSON.stringify(loadConfiguration(dataDir))!==JSON.stringify(config))throw new ProfileError('WALLET_CONFIGURATION_CHANGED','The Nano profile changed during review. Repeat policy approval against its current settings.');
     await approveNanoWalletPolicy({dataDir,grants,limits,terminalConfirmed:true});
@@ -73,19 +73,19 @@ export async function runNanoTerminal(argv:string[],env:NodeJS.ProcessEnv):Promi
   const imported=seedFile?await inspectNanoSeed(seedFile,Number(index)):undefined;
   const controllerDirectory=selected.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR!;
   const separateController=controllerDirectory!==dataDir?loadConfiguration(controllerDirectory):undefined;
-  const preview=`${imported?`Imported public address: ${imported.address}\n`:''}${separateController?`Separate controller: ${separateController.sourceAddress} at ${controllerDirectory}\n`:''}Nano wallet: ${dataDir}\nNetwork: ${network}\nRPC: ${rpcUrl}\nWork: ${workUrl??rpcUrl}\nMarketplace: ${origin}\nAudience: ${audience}\nIndex: ${index}\nMarketplace funding: ${flags.has('--allow-marketplace-funding')}\nExternal transfers: ${flags.has('--allow-external-transfers')}\nController purposes: ${purposes.join(', ')||'none'}\nMaximum per payment: ${maxPaymentAtomic} raw\nRolling 24 hours: ${rolling24hAtomic} raw\n${seedFile?'Use the selected existing private seed file.':`Derive Nano from the OS-protected recovery phrase at ${recoveryWalletDirectory}, m/44'/165'/${index}'.${recovery?` Public address: ${recovery.address}`:''}`}\n`;
+  const preview=`${imported?`Imported public address: ${imported.address}\n`:''}${separateController?`Separate controller: ${separateController.sourceAddress} at ${controllerDirectory}\n`:''}Nano wallet: ${dataDir}\nNetwork: ${network}\nRPC: ${rpcUrl}\nWork: ${workUrl??rpcUrl}\nMarketplace: ${origin}\nAudience: ${audience}\nIndex: ${index}\nExternal transfers: ${flags.has('--allow-external-transfers')}\nController purposes: ${purposes.join(', ')||'none'}\nMaximum per payment: ${maxPaymentAtomic} raw\nRolling 24 hours: ${rolling24hAtomic} raw\n${seedFile?'Use the selected existing private seed file.':`Derive Nano from the OS-protected recovery phrase at ${recoveryWalletDirectory}, m/44'/165'/${index}'.${recovery?` Public address: ${recovery.address}`:''}`}\n`;
   if(!await confirm(preview))throw new ProfileError('APPROVAL_DECLINED','Nano wallet setup was declined.');
   if(recoveryWalletDirectory&&!recovery)await initializeMarketplaceRecoveryWallet(recoveryWalletDirectory);
   const current=recoveryWalletDirectory?await inspectNanoRecoveryWallet(recoveryWalletDirectory,Number(index)):undefined;
   if(recovery&&JSON.stringify(current)!==JSON.stringify(recovery))throw new ProfileError('WALLET_KEY_MISMATCH','The recovery wallet changed during review.');
   const result=await provisionNanoWallet({dataDir,derivationIndex:Number(index),network:network as 'nano:mainnet'|'nano:dev',
-    rpcUrl,...(workUrl===undefined?{}:{workUrl}),origin,audience,handoffDirectory:selected.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR!,
+    rpcUrl,...(workUrl===undefined?{}:{workUrl}),origin,audience,
     ...(imported?{seedFile:seedFile!,expectedAddress:imported.address}:{}),
     ...(recoveryWalletDirectory?{recoveryWalletDirectory,expectedAddress:current!.address}:{}),
-    grants:{marketplaceFunding:flags.has('--allow-marketplace-funding'),externalTransfers:flags.has('--allow-external-transfers'),
+    grants:{externalTransfers:flags.has('--allow-external-transfers'),
       controllerPurposes:purposes as ControllerPurpose[]},limits:{maxPaymentAtomic,rolling24hAtomic},terminalConfirmed:true});
-  ensurePaymentHandoffDirectory(selected.MARKETPLACE_MCP_HOME!);
-  await saveWalletSelection(selected.MARKETPLACE_MCP_HOME!,{...(recoveryWalletDirectory?{attoDirectory:selectedAttoDirectory??recoveryWalletDirectory}:{}),nanoDirectory:dataDir,nanoControllerDirectory:controllerDirectory,paymentHandoffDirectory:selected.MARKETPLACE_MCP_PAYMENT_HANDOFF_DIR!});
+  ensurePrivateDirectory(selected.MARKETPLACE_MCP_HOME!);
+  await saveWalletSelection(selected.MARKETPLACE_MCP_HOME!,{...(recoveryWalletDirectory?{attoDirectory:selectedAttoDirectory??recoveryWalletDirectory}:{}),nanoDirectory:dataDir,nanoControllerDirectory:controllerDirectory});
   process.stdout.write(`${JSON.stringify({status:'wallet-configured',...result})}\n`);
 }
 function environment(home:string|undefined,env:NodeJS.ProcessEnv):NodeJS.ProcessEnv {

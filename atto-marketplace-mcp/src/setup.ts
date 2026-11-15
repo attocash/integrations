@@ -11,7 +11,7 @@ import { validateTypedApproval } from './approval-validation.js';
 
 const scopeNames = new Set([
   'tasks:read','applications:read','applications:apply','applications:withdraw','tasks:draft:write','tasks:publish',
-  'submissions:read','submissions:write','activity:read','activity:write','balances:read',
+  'submissions:read','submissions:write','activity:read','activity:write','payments:read','payments:write',
   'files:read','files:write','products:read','products:write','products:publish','products:purchase',
   'purchases:read','purchases:refund',
 ]);
@@ -39,8 +39,6 @@ interface SetupOptions {
   publishXnoLimit?:string;
   productPublishAttoLimit?:string;
   productPublishXnoLimit?:string;
-  applyAttoLimit?:string;
-  applyXnoLimit?:string;
   purchaseAttoLimit?:string;
   purchaseXnoLimit?:string;
 }
@@ -105,7 +103,7 @@ async function beginSetup(store:MarketplaceProfileStore,options:SetupOptions,hom
   if (!mode) throw setupUsage('Choose one explicit auth mode: --mode controller-session or --mode scoped-api-key.');
   const credential=mode==='scoped-api-key'?parseCredentialSetup(options):undefined;
   if (mode==='controller-session' && (options.scopes.length || options.credentialName || options.publishAttoLimit || options.publishXnoLimit
-    || options.productPublishAttoLimit || options.productPublishXnoLimit || options.applyAttoLimit || options.applyXnoLimit
+    || options.productPublishAttoLimit || options.productPublishXnoLimit
     || options.purchaseAttoLimit || options.purchaseXnoLimit)) {
     throw setupUsage('Scoped API grants and ceilings can only be supplied with --mode scoped-api-key.');
   }
@@ -226,7 +224,7 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
     store.deleteSetupState(profileId);
     printJson({status:'ready',profileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
       apiKeyId:result.apiKeyId,scopes:profile.apiScopes,publishAttoLimit:profile.publishAttoLimit,
-      publishXnoLimit:profile.publishXnoLimit,applyAttoLimit:profile.applyAttoLimit,applyXnoLimit:profile.applyXnoLimit,
+      publishXnoLimit:profile.publishXnoLimit,
       productPublishAttoLimit:profile.productPublishAttoLimit,productPublishXnoLimit:profile.productPublishXnoLimit,
       purchaseAttoLimit:profile.purchaseAttoLimit,purchaseXnoLimit:profile.purchaseXnoLimit});
     return;
@@ -273,13 +271,13 @@ function activateCredential(store:MarketplaceProfileStore,options:SetupOptions):
   store.createProfile({id:newProfileId,origin:source.origin,audience:source.audience,accountId:source.accountId,
     agentId:source.agentId,identityId:source.identityId,controllerNetwork:source.controllerNetwork,controllerAddress:source.controllerAddress,
     controllerIndex:source.controllerIndex,authMode:'scoped-api-key',apiKey:saved.apiKey,apiScopes:saved.scopes,
-    publishAttoLimit:saved.publishAttoLimit,publishXnoLimit:saved.publishXnoLimit,applyAttoLimit:saved.applyAttoLimit,applyXnoLimit:saved.applyXnoLimit,
+    publishAttoLimit:saved.publishAttoLimit,publishXnoLimit:saved.publishXnoLimit,
     productPublishAttoLimit:saved.productPublishAttoLimit,productPublishXnoLimit:saved.productPublishXnoLimit,
     purchaseAttoLimit:saved.purchaseAttoLimit,purchaseXnoLimit:saved.purchaseXnoLimit});
   store.deleteIssuedCredential(sourceProfileId,credentialId);
   const profile=store.getProfile(newProfileId);
   printJson({status:'ready',profileId:newProfileId,origin:profile.origin,accountId:profile.accountId,authMode:profile.authMode,
-    scopes:profile.apiScopes,publishAttoLimit:profile.publishAttoLimit,publishXnoLimit:profile.publishXnoLimit,applyAttoLimit:profile.applyAttoLimit,applyXnoLimit:profile.applyXnoLimit,
+    scopes:profile.apiScopes,publishAttoLimit:profile.publishAttoLimit,publishXnoLimit:profile.publishXnoLimit,
     productPublishAttoLimit:profile.productPublishAttoLimit,productPublishXnoLimit:profile.productPublishXnoLimit,
     purchaseAttoLimit:profile.purchaseAttoLimit,purchaseXnoLimit:profile.purchaseXnoLimit});
 }
@@ -328,8 +326,6 @@ function profileFromSetup(saved:Record<string,unknown>,session:Record<string,unk
       publishXnoLimit:typeof credential?.publishXnoLimit==='string'?credential.publishXnoLimit:null,
       productPublishAttoLimit:typeof credential?.productPublishAttoLimit==='string'?credential.productPublishAttoLimit:null,
       productPublishXnoLimit:typeof credential?.productPublishXnoLimit==='string'?credential.productPublishXnoLimit:null,
-      applyAttoLimit:typeof credential?.applyAttoLimit==='string'?credential.applyAttoLimit:null,
-      applyXnoLimit:typeof credential?.applyXnoLimit==='string'?credential.applyXnoLimit:null,
       purchaseAttoLimit:typeof credential?.purchaseAttoLimit==='string'?credential.purchaseAttoLimit:null,
       purchaseXnoLimit:typeof credential?.purchaseXnoLimit==='string'?credential.purchaseXnoLimit:null}:{}),
     ...(apiKey?{}:{accessToken:String(session.accessToken),accessExpiresAt:timestampMillis(session.accessExpiresAt),
@@ -372,7 +368,7 @@ function validateLoginChallenge(challenge:ReturnType<typeof parseChallenge>,
 }
 
 function enrollmentHash(accountId:string,controllerId:string):string {
-  return createHash('sha256').update(['signer-controller-enrollment-v1',accountId,controllerId].join('\n'),'utf8').digest('hex');
+  return createHash('sha256').update(['marketplace-login-v1',accountId,controllerId].join('\n'),'utf8').digest('hex');
 }
 
 function proofField(line:string,label:string):string {
@@ -399,23 +395,20 @@ function parseCredentialSetup(options:SetupOptions):Record<string,unknown> {
     throw setupUsage('Scoped setup needs --credential-name, one or more exact --scope values, and --expires-in-days from 1 through 365.');
   }
   for (const limit of [options.publishAttoLimit,options.publishXnoLimit,options.productPublishAttoLimit,options.productPublishXnoLimit,
-    options.applyAttoLimit,options.applyXnoLimit,
     options.purchaseAttoLimit,options.purchaseXnoLimit]) {
     if (limit!==undefined && !/^[1-9][0-9]{0,64}$/.test(limit)) throw setupUsage('Credential ceilings must be positive exact decimal atomic strings.');
   }
   const publish=scopes.includes('tasks:publish'); const productPublish=scopes.includes('products:publish');
-  const apply=scopes.includes('applications:apply');
   const purchase=scopes.includes('products:purchase');
-  if (publish!==Boolean(options.publishAttoLimit||options.publishXnoLimit) || apply!==Boolean(options.applyAttoLimit||options.applyXnoLimit)
+  if (publish!==Boolean(options.publishAttoLimit||options.publishXnoLimit)
     || (Boolean(options.productPublishAttoLimit||options.productPublishXnoLimit) && !productPublish)
     || purchase!==Boolean(options.purchaseAttoLimit||options.purchaseXnoLimit)) {
-    throw setupUsage('tasks:publish, applications:apply, and products:purchase require their matching ATTO and/or XNO ceiling; product publication ceilings require products:publish. Irrelevant ceilings are rejected.');
+    throw setupUsage('tasks:publish and products:purchase require their matching ATTO and/or XNO ceiling; product publication ceilings require products:publish. Irrelevant ceilings are rejected.');
   }
   return {name,expiresInDays,scopes:[...scopes].sort(),...(options.publishAttoLimit?{publishAttoLimit:options.publishAttoLimit}:{}),
-    ...(options.publishXnoLimit?{publishXnoLimit:options.publishXnoLimit}:{}),...(options.applyAttoLimit?{applyAttoLimit:options.applyAttoLimit}:{}),
+    ...(options.publishXnoLimit?{publishXnoLimit:options.publishXnoLimit}:{}),
     ...(options.productPublishAttoLimit?{productPublishAttoLimit:options.productPublishAttoLimit}:{}),
     ...(options.productPublishXnoLimit?{productPublishXnoLimit:options.productPublishXnoLimit}:{}),
-    ...(options.applyXnoLimit?{applyXnoLimit:options.applyXnoLimit}:{}),
     ...(options.purchaseAttoLimit?{purchaseAttoLimit:options.purchaseAttoLimit}:{}),
     ...(options.purchaseXnoLimit?{purchaseXnoLimit:options.purchaseXnoLimit}:{})};
 }
@@ -476,8 +469,6 @@ function parseSetupArgs(argv:string[]):SetupOptions {
       case '--publish-xno-limit': result.publishXnoLimit=value(); break;
       case '--product-publish-atto-limit': result.productPublishAttoLimit=value(); break;
       case '--product-publish-xno-limit': result.productPublishXnoLimit=value(); break;
-      case '--apply-atto-limit': result.applyAttoLimit=value(); break;
-      case '--apply-xno-limit': result.applyXnoLimit=value(); break;
       case '--purchase-atto-limit': result.purchaseAttoLimit=value(); break;
       case '--purchase-xno-limit': result.purchaseXnoLimit=value(); break;
       default: throw setupUsage(`Unknown setup option: ${arg}`);

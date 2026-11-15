@@ -1,3 +1,5 @@
+import {fileURLToPath,pathToFileURL} from 'node:url';
+const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??fileURLToPath(new URL('../',import.meta.url));
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
@@ -7,7 +9,7 @@ import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
-import { MarketplaceProfileStore } from '../dist/profile-store.js';
+const { MarketplaceProfileStore }=await import(pathToFileURL(join(packageDirectory,'dist/profile-store.js')).href);
 
 const accountId='11111111-1111-4111-8111-111111111111';
 const agentId='22222222-2222-4222-8222-222222222222';
@@ -16,8 +18,12 @@ const productId='44444444-4444-4444-8444-444444444444';
 const releaseId='55555555-5555-4555-8555-555555555555';
 const fileId='66666666-6666-4666-8666-666666666666';
 const contentVersionId='77777777-7777-4777-8777-777777777777';
+const publicationId='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const feeId='cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+const paymentId='dddddddd-dddd-4ddd-8ddd-dddddddddddd';
+const publication=()=>({publicationId,productId,releaseId,feeId,paymentRequirementId:paymentId,state:published?'OPEN':'CLOSED',quantity:3,sold:0,reserved:0,sellerAddress:'seller-wallet',priceAtomic:'1000000000'});
 const uploadId='88888888-8888-4888-8888-888888888888';
-const serverMain=join(import.meta.dirname,'../dist/main.js');
+const serverMain=join(packageDirectory,'dist/main.js');
 const bytes=Buffer.from('product source bytes\n');
 const sha256=createHash('sha256').update(bytes).digest('hex');
 const file={ordinal:0,fileId,contentVersionId,filename:'source.txt',byteLength:bytes.length,mediaType:'text/plain',sha256};
@@ -27,7 +33,7 @@ const publicProduct={productId,releaseId,releaseSequence:1,releaseHash:'a'.repea
   files:[{fileId,filename:'source.txt',byteLength:bytes.length,mediaType:'text/plain'}]};
 let sellerVersion=2;
 let published=false;
-const detail=()=>({productId,sellerAgentId:agentId,published,currentReleaseId:published?releaseId:null,
+const detail=()=>({publication:publication(),productId,sellerAgentId:agentId,published,currentReleaseId:published?releaseId:null,
   currentReleaseHash:published?'a'.repeat(64):null,
   draft:{version:sellerVersion,title:'Research bundle',summaryMarkdown:'## Public overview',paidMarkdown:'Seller-only notes',
     licenseText:'Personal use',asset:'ATTO',priceAtomic:'1000000000',fileIds:[fileId],files:[file]},
@@ -60,17 +66,17 @@ test('stdio Shop clients expose bounded public reads, scoped seller mutations, a
       createdAt:'2026-10-01T10:00:00Z',updatedAt:'2026-10-02T10:00:00Z'}]);
     if(req.method==='GET'&&req.url.startsWith(`/v1/agent/products/${productId}`)) return json(res,200,detail());
     if(req.method==='POST'&&req.url==='/v1/agent/products') {
-      return json(res,201,{productId,draftVersion:0,published:false,releaseId:null,releaseHash:null});
+      return json(res,201,{productId,draftVersion:0,published:false,releaseId:null,releaseHash:null,publication:null});
     }
     if(req.method==='PUT'&&req.url===`/v1/agent/products/${productId}/draft`) {
       sellerVersion=Number(parsedBody.expectedVersion)+1;
-      return json(res,200,{productId,draftVersion:sellerVersion,published:false,releaseId:null,releaseHash:null});
+      return json(res,200,{productId,draftVersion:sellerVersion,published:false,releaseId:null,releaseHash:null,publication:null});
     }
     if(req.method==='POST'&&req.url===`/v1/agent/products/${productId}/publish`) {
       const key=req.headers['idempotency-key'];
       if(publishResults.has(key)) return json(res,200,publishResults.get(key));
       published=true;
-      const result={productId,draftVersion:sellerVersion,published:true,releaseId,releaseHash:'a'.repeat(64)};
+      const result={productId,draftVersion:sellerVersion,published:false,releaseId,releaseHash:'a'.repeat(64),publication:{...publication(),state:'AWAITING_FEE'}};
       publishResults.set(key,result);
       if(key==='99999999-9999-4999-8999-999999999996'&&losePublishResponseOnce) {
         losePublishResponseOnce=false;
@@ -80,7 +86,7 @@ test('stdio Shop clients expose bounded public reads, scoped seller mutations, a
     }
     if(req.method==='POST'&&req.url===`/v1/agent/products/${productId}/unpublish`) {
       published=false;
-      return json(res,200,{productId,draftVersion:sellerVersion,published:false,releaseId,releaseHash:'a'.repeat(64)});
+      return json(res,200,{productId,draftVersion:sellerVersion,published:false,releaseId,releaseHash:'a'.repeat(64),publication:publication()});
     }
     if(req.method==='POST'&&req.url==='/v1/agent/files/uploads') return json(res,201,{uploadId,state:uploadState,expiresAt:'2026-10-17T00:00:00Z'});
     if(req.method==='GET'&&req.url===`/v1/agent/files/uploads/${uploadId}`) return json(res,200,{uploadId,state:uploadState,file:uploadState==='READY'?readyFile:null});
@@ -99,10 +105,10 @@ test('stdio Shop clients expose bounded public reads, scoped seller mutations, a
   const store=await MarketplaceProfileStore.open(home);
   const scopes=['products:read','products:write','products:publish','files:read','files:write'];
   store.createProfile({id:'seller',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
-    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',apiKey:'seller-key',apiScopes:scopes});
+    controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',apiKey:'seller-key',apiScopes:scopes,productPublishAttoLimit:'3000000000'});
   store.createProfile({id:'no-file-write',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
     controllerNetwork:'ATTO',controllerAddress:`atto://${'a'.repeat(61)}`,authMode:'scoped-api-key',apiKey:'limited-key',
-    apiScopes:['products:read','products:write','products:publish','files:read']});
+    productPublishAttoLimit:'3000000000',apiScopes:['products:read','products:write','products:publish','files:read']});
   const client=await connect(home,'seller',filesDirectory);
   try {
     const tools=await client.listTools();
@@ -142,15 +148,15 @@ test('stdio Shop clients expose bounded public reads, scoped seller mutations, a
     const missingRights=await client.callTool({name:'marketplace_product_publish',arguments:{productId,requestId:publishId,expectedVersion:2}});
     assert.equal(missingRights.isError,true);
     assert.equal(requests.some(item=>item.path===`/v1/agent/products/${productId}/publish`),false);
-    const published=await client.callTool({name:'marketplace_product_publish',arguments:{productId,requestId:publishId,expectedVersion:2,confirmsDistributionRights:true}});
+    const published=await client.callTool({name:'marketplace_product_publish',arguments:{productId,requestId:publishId,expectedVersion:2,confirmsDistributionRights:true,quantity:3}});
     assert.equal(published.isError,undefined,contentText(published));
     const publishRequest=requests.find(item=>item.path===`/v1/agent/products/${productId}/publish`);
-    assert.deepEqual(publishRequest.body,{expectedVersion:2,confirmsDistributionRights:true});
+    assert.deepEqual(publishRequest.body,{expectedVersion:2,confirmsDistributionRights:true,quantity:3});
     assert.equal(publishRequest.idempotency,publishId);
     const completeReplayRequestCount=requests.length;
     sellerVersion=3; // A later draft edit must not invalidate replay of this completed publication.
     const completeReplay=await client.callTool({name:'marketplace_product_publish',arguments:{productId,requestId:publishId,
-      expectedVersion:2,confirmsDistributionRights:true}});
+      expectedVersion:2,confirmsDistributionRights:true,quantity:3}});
     assert.equal(completeReplay.isError,undefined,contentText(completeReplay));
     assert.equal(JSON.parse(contentText(completeReplay)).result.recovered,true);
     assert.equal(requests.length,completeReplayRequestCount);
@@ -160,26 +166,26 @@ test('stdio Shop clients expose bounded public reads, scoped seller mutations, a
     const pendingPublishId='99999999-9999-4999-8999-999999999996';
     const beforePendingPublish=requests.length;
     const uncertain=await client.callTool({name:'marketplace_product_publish',arguments:{productId,requestId:pendingPublishId,
-      expectedVersion:3,confirmsDistributionRights:true}});
+      expectedVersion:3,confirmsDistributionRights:true,quantity:3}});
     assert.equal(uncertain.isError,true);
     const firstPendingRequests=requests.slice(beforePendingPublish);
     assert.deepEqual(firstPendingRequests.map(item=>item.path),[
       `/v1/agent/products/${productId}?limit=1`, `/v1/agent/products/${productId}/publish`,
     ]);
-    assert.deepEqual(firstPendingRequests[1].body,{expectedVersion:3,confirmsDistributionRights:true});
+    assert.deepEqual(firstPendingRequests[1].body,{expectedVersion:3,confirmsDistributionRights:true,quantity:3});
     assert.equal(firstPendingRequests[1].idempotency,pendingPublishId);
     sellerVersion=4; // Simulate another edit after the backend committed but before the client saw the result.
     const beforePendingReplay=requests.length;
     const pendingReplay=await client.callTool({name:'marketplace_product_publish',arguments:{productId,requestId:pendingPublishId,
-      expectedVersion:3,confirmsDistributionRights:true}});
+      expectedVersion:3,confirmsDistributionRights:true,quantity:3}});
     assert.equal(pendingReplay.isError,undefined,contentText(pendingReplay));
-    assert.equal(JSON.parse(contentText(pendingReplay)).result.published,true);
+    assert.equal(JSON.parse(contentText(pendingReplay)).result.publication.paymentRequirementId,paymentId);
     const replayRequests=requests.slice(beforePendingReplay);
     assert.deepEqual(replayRequests.map(item=>item.path),[`/v1/agent/products/${productId}/publish`]);
-    assert.deepEqual(replayRequests[0].body,{expectedVersion:3,confirmsDistributionRights:true});
+    assert.deepEqual(replayRequests[0].body,{expectedVersion:3,confirmsDistributionRights:true,quantity:3});
     assert.equal(replayRequests[0].idempotency,pendingPublishId);
     const unpublished=await client.callTool({name:'marketplace_product_unpublish',arguments:{productId,
-      requestId:'99999999-9999-4999-8999-999999999993',expectedVersion:4}});
+      requestId:'99999999-9999-4999-8999-999999999993',expectedVersion:4,publicationId}});
     assert.equal(unpublished.isError,undefined,contentText(unpublished));
 
     // The product-file flow uses explicit local selection, returns unattached READY metadata, and verifies an exact release download.
@@ -203,7 +209,7 @@ test('stdio Shop clients expose bounded public reads, scoped seller mutations, a
       assert.equal(requests.length,beforeDenied);
       const beforeFilePublish=requests.length;
       const deniedPublish=await limited.callTool({name:'marketplace_product_publish',arguments:{productId,
-        requestId:'99999999-9999-4999-8999-999999999997',expectedVersion:4,confirmsDistributionRights:true}});
+        requestId:'99999999-9999-4999-8999-999999999997',expectedVersion:4,confirmsDistributionRights:true,quantity:3}});
       assert.equal(deniedPublish.isError,true);
       assert.equal(JSON.parse(contentText(deniedPublish)).error.code,'SCOPE_REQUIRED');
       assert.equal(requests.slice(beforeFilePublish).filter(item=>item.path===`/v1/agent/products/${productId}/publish`).length,0);

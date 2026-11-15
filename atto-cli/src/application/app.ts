@@ -30,7 +30,7 @@ import { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import { runDoctor } from '../doctor/doctor.js';
 import { validateMarketplaceUserProofApproval, createMarketplaceProofApprovalResponse } from '../marketplace/proof-approval.js';
-import { MarketplaceTopUpClient } from '../marketplace/topups.js';
+import { MarketplaceConnectionClient } from '../marketplace/connection.js';
 
 const RESET_KEY = 'wallet.reset';
 
@@ -56,7 +56,7 @@ export class AttoApplication {
   private preparation?: Promise<void>;
   private readonly preparationAbort = new AbortController();
   private readonly payments: Payments;
-  private readonly topUps: MarketplaceTopUpClient;
+  private readonly marketplaceConnection: MarketplaceConnectionClient;
   private watchManager?: WatchManager;
   private watchConfiguration = '';
   private watchQueue: Promise<void> = Promise.resolve();
@@ -90,7 +90,7 @@ export class AttoApplication {
       this.work = new WalletWork(this.store, () => this.settings(), options.workExecution);
       this.background = new BackgroundReceiver(this.store);
       this.receivingAllowed = options.receivingAllowed ?? (() => true);
-      this.topUps = new MarketplaceTopUpClient(this.store, {
+      this.marketplaceConnection = new MarketplaceConnectionClient(this.store, {
         settings: () => this.settings(), addresses: () => this.addresses(), seed: () => this.seed(), mcp: this.mcp,
       });
       this.receiver = new WalletReceiver({
@@ -103,7 +103,7 @@ export class AttoApplication {
         settings: () => this.settings(), addresses: () => this.addresses(), seed: () => this.seed(),
         requireWrite: () => this.requireMcpWrite(), mcp: this.mcp,
         ...(this.internalMarketplaceReceiveSafety ? { requireAccountsAvailable: (indexes: number[]) => this.receiver.requireReceivesResolved(indexes) } : {}),
-      }, this.market, this.work, options.sendRetry, options.onDestination, this.topUps, this.internalMarketplacePayment);
+      }, this.market, this.work, options.sendRetry, options.onDestination);
       this.auto = new AutoReceiver(() => ({
         settings: !this.receivingAllowed() || (this.mcp && this.ledger.mcpAccess() !== 'spend') ? { ...this.settings(), autoReceive: false } : this.settings(),
         addresses: this.addresses(),
@@ -503,16 +503,6 @@ export class AttoApplication {
       case 'send': return this.payments.send({ ...args,
         destination: args.destinationIndex !== undefined ? this.address(args.destinationIndex as number).address : args.destination,
       } as SendRequest);
-      case 'marketplace_topup': return this.payments.marketplaceTopUp(args as { amount: string; unit: 'ATTO' | 'RAW'; requestId: string; index?: number });
-      case 'marketplace_topup_status': return this.payments.marketplaceTopUpStatus(args.requestId as string);
-      case 'marketplace_pay_intent': {
-        if (!this.internalMarketplacePayment) throw new AttoError('INTERNAL_ONLY', 'This operation is available only to the configured private Marketplace wallet child.');
-        return this.payments.marketplacePayIntent(args as unknown as import('../spending/payments.js').MarketplacePayIntentRequest);
-      }
-      case 'marketplace_pay_intent_status': {
-        if (!this.internalMarketplacePayment) throw new AttoError('INTERNAL_ONLY', 'This operation is available only to the configured private Marketplace wallet child.');
-        return this.payments.marketplacePayIntentStatus(args.requestId as string);
-      }
       case 'receive': return this.receiver.receive(args as unknown as ReceiveRequest);
       case 'receive_all': return this.receiver.receiveAll(args);
       case 'representative_change': return this.changeRepresentative(args.index as number, args.representative as string);
@@ -572,10 +562,21 @@ export class AttoApplication {
     try { return await call; } finally { this.calls.delete(call); }
   }
 
+  /** Private installed Marketplace adapter; absent from the public CLI/MCP operation catalog. */
+  async marketplaceRelay(name: string, input: Record<string, unknown>): Promise<unknown> {
+    this.requireReady();
+    if (!this.internalMarketplaceAuthorizeWrite) throw new AttoError('UNKNOWN_OPERATION', 'Private wallet operation unavailable.');
+    const call = name === 'payment_prepare' ? this.payments.prepareRelay(input)
+      : name === 'payment_authorize' ? this.payments.authorizeRelay(input)
+      : name === 'payment_status' ? this.payments.relayStatus(input) : Promise.reject(new AttoError('UNKNOWN_OPERATION', 'Unknown private wallet operation.'));
+    this.calls.add(call);
+    try { return await call; } finally { this.calls.delete(call); }
+  }
+
   /** Terminal-only Marketplace controller connection; session tokens remain in memory. */
   async connectMarketplace(input: { apiUrl: string; audience: string; controllerIndex: number; browserOrigins?: string[] }) {
     this.requireReady();
-    const connection = await this.store.withWalletLock(() => this.topUps.connect(input));
+    const connection = await this.store.withWalletLock(() => this.marketplaceConnection.connect(input));
     return { connected: true, apiUrl: connection.apiUrl, audience: connection.audience,
       controllerIndex: connection.controllerIndex, accountId: connection.accountId, identityId: connection.identityId,
       ...(connection.browserOrigins ? { browserOrigins: connection.browserOrigins } : {}) };
@@ -583,12 +584,12 @@ export class AttoApplication {
 
   inspectMarketplaceProofApproval(input: unknown) {
     this.requireReady();
-    return this.topUps.inspectProofApproval(input);
+    return this.marketplaceConnection.inspectProofApproval(input);
   }
 
   async approveMarketplaceProof(input: unknown) {
     this.requireReady();
-    return this.store.withWalletLock(() => this.topUps.signProofApproval(input));
+    return this.store.withWalletLock(() => this.marketplaceConnection.signProofApproval(input));
   }
 
   /** Private Marketplace terminal signing: no standalone connection is read or changed. */
