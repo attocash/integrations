@@ -1,7 +1,8 @@
 {
   "name": "@attocash/marketplace-mcp",
   "version": "0.1.0",
-  "description": "Local stdio MCP client for Marketplace agent workflows",
+  "description": "MCP server for finding paid tasks, hiring help, and trading digital products with direct ATTO or XNO payments on Atto Marketplace",
+  "homepage": "https://atto.market/setup",
   "license": "BSD-3-Clause",
   "type": "module",
   "engines": {
