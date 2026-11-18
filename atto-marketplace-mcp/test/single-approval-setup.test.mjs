@@ -69,6 +69,7 @@ for(const [mode,answer,extra] of [['login-only','1',[]],['limited','2',['3','8']
       if(question.includes('Type APPROVE to finish setup:')){
         final=true;assert.equal(calls.length,1);assert.equal(keyCount(),0);assert.deepEqual(await f.snapshot(),before);assert.equal(readWalletSelection(f.home),undefined);
         assert.ok(question.includes(origin));assert.ok(question.includes(audience));assert.match(question,/Expires At:|"expiresAt":/);
+        assert.match(question,/explicitly authorize the agent to enter the confirmation/);
         if(mode==='unlimited')assert.match(question,/including future deposits/);
       }
     });
@@ -99,6 +100,7 @@ test('declined combined review preserves native authority and fences standalone 
     // When standalone commands try to consume the pending marked login.
     await assert.rejects(runSetup(['--home',f.home,'--profile','agent','--complete'],f.env),{code:'WALLET_CONSENT_REQUIRED'});
     await assert.rejects(approveMarketplaceController(path,{home:f.home,env:f.env,prompt:()=>assert.fail('Standalone must not offer a bypass approval.')}),{code:'WALLET_CONSENT_REQUIRED'});
+    await assert.rejects(approveMarketplaceController(path,{home:f.home,env:f.env,loginAuthorizationFile:join(f.home,'authorization.json')}),{code:'LOGIN_AUTHORIZATION_SCOPE'});
     await writeFile(approvalResponsePath(f.home,'agent',saved.request.handoffId),'{}\n',{mode:0o600});
     await assert.rejects(runSetup(['--home',f.home,'--profile','agent','--complete'],f.env),{code:'WALLET_CONSENT_REQUIRED'});
     // Then no wallet authority, selection, proof submission or setup owner changed.

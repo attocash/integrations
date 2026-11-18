@@ -72,6 +72,9 @@ test('explicit setup prepares a typed login handoff without signing or submittin
       '--audience','marketplace','--controller-address',controllerAddress,'--controller-index','7','--mode','controller-session'];
     const output=await withoutSetupOutput(()=>runJsonSetupCommand(args,{MARKETPLACE_MCP_WALLET_HOST_COMMAND:'/never-run-a-raw-signer'}));
     const result=JSON.parse(output.trim());assert.equal(result.status,'approval_required');
+    assert.equal(result.purpose,'login');
+    assert.match(result.next,/after explicit authorization, the agent may enter the confirmation/i);
+    assert.match(result.preauthorizedLogin,/--login-authorization/);
     const command=`${process.platform==='win32'?'& ':''}${shellQuote(process.execPath)} ${shellQuote(join(packageDirectory,'dist/main.js'))}`;
     const requestPath=join(home,'approvals','agent',`${result.handoffId}.request.json`);
     assert.equal(result.walletCommand,`${command} approve ${shellQuote(requestPath)} --home ${shellQuote(home)}`);
@@ -81,6 +84,7 @@ test('explicit setup prepares a typed login handoff without signing or submittin
     assert.deepEqual(requests,['/v1/agent/auth/challenges']);
     const status=JSON.parse((await withoutSetupOutput(()=>runJsonSetupCommand(['--profile','agent','--home',home,'--status'],{}))).trim());
     assert.equal(status.status,'LOGIN_APPROVAL');assert.equal(status.walletCommand,result.walletCommand);
+    assert.equal(status.purpose,'login');
     // When the same pending setup is inspected without a JSON flag.
     const readable=await withoutSetupOutput(()=>runSetupCommand(['--profile','agent','--home',home,'--status'],{}));
     // Then public status and the exact next command are readable, with no credentials or JSON object.

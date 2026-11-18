@@ -149,8 +149,10 @@ async function completeSetup(store:MarketplaceProfileStore,profileId:string,home
       throw new ProfileError('SETUP_BUSY','Another local setup process is preparing this exact login challenge. Retry after it finishes.');
     }
     const path=await writeApprovalRequest(home,profileId,handle,request);
-    if(saved.walletConsent)print({status:'wallet_consent_required',profileId,resumeCommand:`${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)}`,next:'Review wallet permissions and the exact login together in guided setup.'});
-    else printApprovalInstructions(profileId,handle,path,home,'Approve the exact login in the local Marketplace wallet terminal, then complete this same setup.',print);
+    if(saved.walletConsent)print({status:'wallet_consent_required',profileId,resumeCommand:`${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)}`,next:'Ask the operator to approve the reviewed wallet permissions and exact login in guided setup.'});
+    else printApprovalInstructions(request,path,home,
+      'Ask the operator to approve this exact login. After explicit authorization, the agent may enter the confirmation and complete this setup.',
+      print,saved.mode==='controller-session'&&controllerNetwork==='ATTO');
     return;
   }
   if (pending.state==='LOGIN_APPROVAL') {
@@ -268,7 +270,7 @@ async function continueScopedSetup(store:MarketplaceProfileStore,profileId:strin
     throw new ProfileError('SETUP_BUSY','The challenge response no longer owns this setup. Inspect local setup state.');
   }
   const path=await writeApprovalRequest(home,profileId,handle,request);
-  printApprovalInstructions(profileId,handle,path,home,'Sign the exact scoped credential grant in the local wallet terminal. Marketplace MCP stores the returned API key directly in this private profile; no secret is printed.',print);
+  printApprovalInstructions(request,path,home,'Sign the exact scoped credential grant in the local wallet terminal. Marketplace MCP stores the returned API key directly in this private profile; no secret is printed.',print);
 }
 
 function activateCredential(store:MarketplaceProfileStore,options:SetupOptions,print:Output):void {
@@ -303,7 +305,7 @@ function reportSetupStatus(store:MarketplaceProfileStore,profileId:string,home:s
   }
   const saved=asRecord(JSON.parse(state.privatePayload));
   const request=saved.request?parseApprovalRequest(saved.request):undefined;
-  print({status:state.state,profileId,...(saved.walletConsent?{walletConsentPending:true,resumeCommand:`${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)}`}:{}) ,...(request?{handoffId:request.handoffId,expiresAt:request.challenge.expiresAt,
+  print({status:state.state,profileId,...(saved.walletConsent?{walletConsentPending:true,resumeCommand:`${marketplaceCommand} setup --home ${shellQuote(home)} --profile ${shellQuote(profileId)}`}:{}) ,...(request?{handoffId:request.handoffId,purpose:request.purpose,expiresAt:request.challenge.expiresAt,
     ...(!saved.walletConsent?{walletCommand:`${marketplaceCommand} approve ${shellQuote(approvalRequestPath(home,profileId,request.handoffId))} --home ${shellQuote(home)}`}:{})}:{}) ,
     ...(state.state==='LOGIN_READY'?{resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`}:{}),
     ...(typeof saved.controllerNetwork==='string'?{controllerNetwork:saved.controllerNetwork}:{})});
@@ -510,9 +512,12 @@ function timestampMillis(value:unknown):number {if(typeof value==='number'&&Numb
 function isUuid(value:unknown):value is string {return typeof value==='string'&&/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);}
 function asRecord(value:unknown):Record<string,unknown>{if(value===null||typeof value!=='object'||Array.isArray(value))throw setupFailure();return value as Record<string,unknown>;}
 function required(value:string|undefined,label:string):string{if(!value)throw setupUsage(`Provide --${label.replaceAll(' ','-')}.`);return value;}
-function printApprovalInstructions(profileId:string,handle:string,path:string,home:string,next:string,print:Output):void {
-  print({status:'approval_required',profileId,handoffId:handle,walletCommand:`${marketplaceCommand} approve ${shellQuote(path)} --home ${shellQuote(home)}`,
-    resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`,next});
+function printApprovalInstructions(request:MarketplaceProofApprovalRequest,path:string,home:string,next:string,print:Output,preauthorizedLoginSupported=false):void {
+  const {profileId,handoffId,purpose}=request;
+  print({status:'approval_required',profileId,handoffId,purpose,
+    walletCommand:`${marketplaceCommand} approve ${shellQuote(path)} --home ${shellQuote(home)}`,
+    resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`,next,
+    ...(preauthorizedLoginSupported?{preauthorizedLogin:'If your deployment provides a matching Login only authorization, add --login-authorization <deployment-file> to the approval command.'}:{})});
 }
 function setupUsage(message:string):ProfileError{return new ProfileError('SETUP_USAGE',message);}
 function setupFailure():ProfileError{return new ProfileError('SETUP_PROTOCOL','Marketplace setup returned an invalid response. Check the pinned origin and repeat only after confirming the previous action had no effect.');}

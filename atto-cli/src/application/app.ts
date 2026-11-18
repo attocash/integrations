@@ -30,6 +30,7 @@ import { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import { runDoctor } from '../doctor/doctor.js';
 import { validateMarketplaceUserProofApproval, createMarketplaceProofApprovalResponse } from '../marketplace/proof-approval.js';
+import { requireMarketplaceLoginAuthorization } from '../marketplace/login-authorization.js';
 import { MarketplaceConnectionClient } from '../marketplace/connection.js';
 
 const RESET_KEY = 'wallet.reset';
@@ -602,18 +603,33 @@ export class AttoApplication {
     }
     return this.store.withWalletLock(async () => {
       const request = validateMarketplaceUserProofApproval(input, { network: 'ATTO', nativeNetwork: 'live' });
-      if (this.addresses().find(address => address.index === request.controller.index)?.address !== request.controller.address) {
-        throw new AttoError('WALLET_MISMATCH', 'The Marketplace controller does not match this selected wallet and index.');
-      }
-      const seed = await this.seed();
-      try {
-        const signer = await derivedSigner(seed, request.controller.index);
-        if (signer.address.value !== request.controller.address) throw new AttoError('WALLET_MISMATCH', 'The selected controller key changed.');
-        validateMarketplaceUserProofApproval(input, { network: 'ATTO', nativeNetwork: 'live' });
-        const signature = (await signer.signMessage(new Int8Array(Buffer.from(request.challenge.message, 'utf8')))).toString();
-        return createMarketplaceProofApprovalResponse(request as import('../marketplace/proof-approval.js').MarketplaceProofApprovalRequest, signature);
-      } finally { seed.value.fill(0); }
+      return this.#signMarketplaceOwnedProof(request);
     });
+  }
+
+  async approvePreauthorizedMarketplaceLogin(input: unknown, marketplaceHome: string, authorizationFile: string) {
+    this.requireReady();
+    if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Use the deployment-provisioned Marketplace login command.');
+    const snapshot = structuredClone(input);
+    return this.store.withWalletLock(async () => {
+      const request = validateMarketplaceUserProofApproval(snapshot, { network: 'ATTO', nativeNetwork: this.settings().network.toLowerCase() });
+      requireMarketplaceLoginAuthorization(request, this.store.directory, marketplaceHome, authorizationFile);
+      return this.#signMarketplaceOwnedProof(request);
+    });
+  }
+
+  async #signMarketplaceOwnedProof(request: ReturnType<typeof validateMarketplaceUserProofApproval>) {
+    if (this.addresses().find(address => address.index === request.controller.index)?.address !== request.controller.address) {
+      throw new AttoError('WALLET_MISMATCH', 'The Marketplace controller does not match this selected wallet and index.');
+    }
+    const seed = await this.seed();
+    try {
+      const signer = await derivedSigner(seed, request.controller.index);
+      if (signer.address.value !== request.controller.address) throw new AttoError('WALLET_MISMATCH', 'The selected controller key changed.');
+      validateMarketplaceUserProofApproval(request, { network: 'ATTO', nativeNetwork: 'live' });
+      const signature = (await signer.signMessage(new Int8Array(Buffer.from(request.challenge.message, 'utf8')))).toString();
+      return createMarketplaceProofApprovalResponse(request as import('../marketplace/proof-approval.js').MarketplaceProofApprovalRequest, signature);
+    } finally { seed.value.fill(0); }
   }
 
   // The receiver observes current MCP access on every snapshot, and receive()

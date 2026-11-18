@@ -40,6 +40,15 @@ export async function signMarketplaceAttoController(options: { directory: string
   finally { await application.close(); }
 }
 
+/** Private deployment path for a typed login to one preauthorized profile. */
+export async function signPreauthorizedMarketplaceAttoLogin(options: {
+  directory: string; marketplaceHome: string; request: unknown; authorizationFile: string;
+}) {
+  const application = new AttoApplication({ directory: options.directory });
+  try { return await application.approvePreauthorizedMarketplaceLogin(options.request, options.marketplaceHome, options.authorizationFile); }
+  finally { await application.close(); }
+}
+
 export { inspectMarketplaceWalletSetup, withUnchangedMarketplaceWalletSetup, marketplacePaymentsUsable,
   marketplaceSpendingPolicyBounded, validateMarketplacePaymentCap, inspectMarketplacePaymentIntent, prepareMarketplacePayments,
   type MarketplaceWalletSetupSnapshot, type MarketplacePaymentMode, type MarketplacePaymentIntent, type MarketplacePaymentPlan } from './marketplace/wallet-setup.js';

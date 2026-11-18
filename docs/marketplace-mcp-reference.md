@@ -6,6 +6,8 @@ Use `atto-marketplace-mcp setup` in a terminal for wallet/controller profile set
 
 ## Terminal setup and output
 
+The operator reviews the exact pending login and can explicitly authorize the agent to enter that confirmation. For an unattended deployment using an existing dedicated Atto wallet, see [preauthorizing Login only](../atto-marketplace-mcp/README.md#preauthorize-login-only-for-a-dedicated-atto-wallet). That grant covers one pinned profile's login or reauthentication.
+
 Run `npx --yes @attocash/marketplace-mcp@latest setup` in a local terminal. Basic setup chooses ATTO, Nano or both, continues/creates/imports the selected wallets, and offers Login only, Limited spending or Unlimited spending. New-wallet access defaults to Login only; existing defaults follow saved access. Production networks and managed paths are automatic. `setup --advanced`, `wallet setup --advanced` and explicit wallet flags retain custom endpoints, indexes and native settings. New/imported recovery material still needs protected-storage consent; imported words are hidden and creation displays backup words privately. Both currencies can share the selected recovery root.
 
 Limited spending preserves suitable saved caps; when configuration is needed, it asks for positive per-payment and rolling 24-hour amounts. Amount validation retains ATTO nine-decimal and Nano thirty-decimal/raw-range rules. Incorrect input repeats only the affected question; an accepted first amount is retained during daily-cap correction. Nano's finite daily cap must be at least the finite per-payment cap. Cancellation and terminal failures stop promptly. Existing zero caps are never interpreted as unlimited.

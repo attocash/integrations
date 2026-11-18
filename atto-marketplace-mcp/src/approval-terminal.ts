@@ -4,7 +4,7 @@ import { existsSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { createApplication } from '@attocash/cli/core';
-import { signMarketplaceAttoController } from '@attocash/cli/internal-marketplace';
+import { signMarketplaceAttoController, signPreauthorizedMarketplaceAttoLogin } from '@attocash/cli/internal-marketplace';
 import { loadConfiguration, signMarketplaceNanoController } from '@attocash/atto-marketplace-nano-adapter';
 import { MarketplaceProfileStore, ProfileError } from './profile-store.js';
 import { managedWalletEnvironment } from './wallet-home.js';
@@ -14,7 +14,7 @@ import { validateTypedApproval } from './approval-validation.js';
 import { approvalRequestDigest, approvalRequestPath, approvalResponsePath, approvalResponseIsAbsent, readApprovalRequest, readApprovalResponse,
   validateApprovalResponse, verifyApprovalSignature, writeApprovalResponse, type MarketplaceProofApprovalRequest } from './approval-files.js';
 
-export const approvalUsage = 'atto-marketplace-mcp approve <private-request-file> [--home <private-home>] [--json]';
+export const approvalUsage = 'atto-marketplace-mcp approve <private-request-file> [--home <private-home>] [--login-authorization <deployment-file>] [--json]';
 
 export interface CombinedWalletConsent {
   expectedPayload:string;
@@ -24,11 +24,13 @@ export interface CombinedWalletConsent {
   commit(assertCurrent:()=>Promise<void>):Promise<void>;
 }
 
-/** A one-off local typed approval; no raw signing or standalone wallet connection is involved. */
+/** Approve the pinned typed request through operator review or a deployment-authorized Atto login. */
 export async function approveMarketplaceController(requestPath: string, options: {
-  home: string; env: NodeJS.ProcessEnv; json?: boolean; walletConsent?:CombinedWalletConsent; prompt?: (preview: string) => boolean | Promise<boolean>;
+  home: string; env: NodeJS.ProcessEnv; json?: boolean; loginAuthorizationFile?: string;
+  walletConsent?:CombinedWalletConsent; prompt?: (preview: string) => boolean | Promise<boolean>;
 }): Promise<{ responsePath: string; recovered: boolean }> {
-  requireTerminal();
+  const loginAuthorizationFile = options.loginAuthorizationFile;
+  if (loginAuthorizationFile === undefined) requireTerminal();
   const home = resolve(options.home);
   const path = resolve(requestPath);
   const match = /\/approvals\/([A-Za-z0-9][A-Za-z0-9_-]{0,47})\/([a-f0-9]{32})\.request\.json$/.exec(path.split(sep).join('/'));
@@ -44,7 +46,13 @@ export async function approveMarketplaceController(requestPath: string, options:
   let consentPayload:string|undefined;
   try{
     const setup=consentStore.getSetupState(profileId);
-    if(setup&&JSON.parse(setup.privatePayload).walletConsent){
+    const saved = setup && JSON.parse(setup.privatePayload);
+    if (loginAuthorizationFile !== undefined && (consent || setup?.state !== 'LOGIN_APPROVAL'
+      || saved.mode !== 'controller-session' || saved.walletConsent || request.purpose !== 'login'
+      || request.action.kind !== 'login' || request.controller.network !== 'ATTO')) {
+      throw new ProfileError('LOGIN_AUTHORIZATION_SCOPE', 'Deployment authorization covers only an Atto controller login or reauthentication with existing wallet settings. Use operator review for this request.');
+    }
+    if(setup&&saved?.walletConsent){
       if(!consent||consent.expectedPayload!==setup.privatePayload||request.purpose!=='login')throw walletConsentRequired(home,profileId);
       consentPayload=setup.privatePayload;
     }else if(consent)throw new ProfileError('APPROVAL_CHANGED','This wallet review no longer owns the pending login.');
@@ -72,11 +80,16 @@ export async function approveMarketplaceController(requestPath: string, options:
     nativeNetwork: native.network, controllerAddress: request.controller.address, controllerIndex: request.controller.index,
     purpose: request.purpose, action: request.action, expiresAt: request.challenge.expiresAt };
   const terms=options.json?JSON.stringify(details,null,2):terminalFields(summary);
-  const preview=consent
-    ? `${consent.review}\n\nReview Marketplace setup:\n${terms}\nThis approval saves the wallet permissions above and signs in to Marketplace with this exact request.`
-    : `Review this exact Marketplace controller action:\n${terms}\nThis one-off terminal approval authorizes only these exact typed terms.`;
-  if (!await (options.prompt ?? confirm)(preview)) throw new ProfileError('APPROVAL_DECLINED', 'The Marketplace controller approval was declined.');
-  requireTerminal();
+  if (loginAuthorizationFile === undefined) {
+    const preview=consent
+      ? `${consent.review}\n\nReview Marketplace setup:\n${terms}\nThis approval saves the wallet permissions above and signs in to Marketplace with this exact request.`
+      : `Review this exact Marketplace controller action:\n${terms}\nThis one-off terminal approval authorizes only these exact typed terms.`;
+    const loginReview = request.purpose === 'login'
+      ? '\nThe operator can approve this exact request directly or explicitly authorize the agent to enter the confirmation.'
+      : '';
+    if (!await (options.prompt ?? confirm)(preview + loginReview)) throw new ProfileError('APPROVAL_DECLINED', 'The Marketplace controller approval was declined.');
+    requireTerminal();
+  }
   const currentRequest = await assertUnchanged();
   await validateFresh(currentRequest, native.network);
   if(consent&&consentPayload){
@@ -106,7 +119,12 @@ export async function approveMarketplaceController(requestPath: string, options:
     return { responsePath, recovered: true };
   }
   let signature: string;
-  if (request.controller.network === 'ATTO') {
+  if (loginAuthorizationFile !== undefined) {
+    const response = await signPreauthorizedMarketplaceAttoLogin({
+      directory: native.directory, marketplaceHome: home, request: currentRequest, authorizationFile: loginAuthorizationFile,
+    });
+    signature = response.signature;
+  } else if (request.controller.network === 'ATTO') {
     const response = await signMarketplaceAttoController({ directory: native.directory, request: currentRequest, terminalConfirmed: true });
     signature = response.signature;
   } else {
@@ -174,13 +192,18 @@ export async function runApproval(argv: string[], env: NodeJS.ProcessEnv): Promi
   const path = argv[0];
   if (!path) throw new ProfileError('SETUP_USAGE', approvalUsage);
   let home: string | undefined;
+  let loginAuthorizationFile: string | undefined;
   for (let index = 1; index < argv.length; index++) {
-    if (argv[index] !== '--home' || home || !argv[index + 1]) throw new ProfileError('SETUP_USAGE', approvalUsage);
-    home = argv[++index];
+    const option = argv[index];
+    const value = argv[++index];
+    if (!value || value.startsWith('--')) throw new ProfileError('SETUP_USAGE', approvalUsage);
+    if (option === '--home' && home === undefined) home = value;
+    else if (option === '--login-authorization' && loginAuthorizationFile === undefined) loginAuthorizationFile = value;
+    else throw new ProfileError('SETUP_USAGE', approvalUsage);
   }
   home ??= env.MARKETPLACE_MCP_HOME ?? (resolve(path).includes(`${sep}approvals${sep}`)
     ? dirname(dirname(dirname(resolve(path)))) : defaultMarketplaceHome(env));
-  const result = await approveMarketplaceController(path, { home, env, json: selected.json });
+  const result = await approveMarketplaceController(path, { home, env, json: selected.json, ...(loginAuthorizationFile === undefined ? {} : { loginAuthorizationFile }) });
   writeTerminalResult(result, selected.json);
 }
 
