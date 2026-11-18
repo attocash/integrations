@@ -12,7 +12,7 @@ import {setupNanoWalletInteractive,prepareNanoWalletInteractive} from './nano-se
 import {runSetup,isUnknownSetupState,unknownSetupOutcome,expiredUnsignedLoginApproval,type WalletConsentIntent} from './setup.js';
 import {marketplaceCommand,shellQuote} from './shell-quote.js';
 import {inspectMarketplaceWalletSetup,marketplacePaymentsUsable} from '@attocash/cli/internal-marketplace';
-import {defaultMarketplaceHome,defaultMarketplaceProfile,marketplaceConnection} from './defaults.js';
+import {defaultMarketplaceHome,defaultMarketplaceProfile,marketplaceConnection,productionMarketplaceOrigin} from './defaults.js';
 import {approveMarketplaceController} from './approval-terminal.js';
 import {approvalRequestPath} from './approval-files.js';
 import {absoluteDirectory,requireSetupTerminal,terminalPrompt,yesNo,menuChoice,type Prompt} from './terminal-input.js';
@@ -105,7 +105,7 @@ export async function runGuidedSetup(argv:string[],env:NodeJS.ProcessEnv,prompt:
     return;
   }
   const {origin,audience}=marketplaceConnection(options);
-  process.stderr.write(`Marketplace: ${terminalText(origin)}\nProfile: ${profile}\nConfiguration: ${terminalText(home)}\n`);
+  process.stderr.write(`Marketplace [${productionMarketplaceOrigin}]: ${terminalText(origin)}\nProfile: ${profile}\nConfiguration: ${terminalText(home)}\n`);
   if(!options.advanced){
     await runSingleApprovalSetup({home,profile,env:effectiveEnv,prompt,json:selected.json,origin,audience});
     await reportReady(home,profile,selected.json);return;

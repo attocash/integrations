@@ -2,7 +2,7 @@ import {existsSync,readdirSync} from 'node:fs';
 import {join} from 'node:path';
 import {createApplication} from '@attocash/cli/core';
 import {defaultCliDirectory} from '@attocash/cli/profiles';
-import {setupMarketplaceWallet} from '@attocash/cli/terminal';
+import {defaultLiveEndpoints,setupMarketplaceWallet} from '@attocash/cli/terminal';
 import {managedWalletEnvironment} from './wallet-home.js';
 import {readWalletSelection,saveWalletSelection,type WalletSelection} from './wallet-preferences.js';
 import {isDeepStrictEqual} from 'node:util';
@@ -176,8 +176,9 @@ async function setupAttoWalletAdvanced(options:AttoSetupOptions):Promise<AttoSet
   if(!reuse){
     network=await requiredText(prompt,'Atto network (atto:live, atto:beta, atto:dev or atto:local)',network??'atto:live');
     if(!/^atto:(live|beta|dev|local)$/.test(network))throw new ProfileError('SETUP_USAGE','Choose the exact Atto network.');
-    nodeUrl=httpUrl(await requiredText(prompt,'Trusted Atto node URL',nodeUrl));
-    workerUrl=httpUrl(await requiredText(prompt,'Trusted Atto work-service URL',workerUrl));
+    const defaults=network==='atto:live'?defaultLiveEndpoints:undefined;
+    nodeUrl=httpUrl(await requiredText(prompt,'Trusted Atto node URL',nodeUrl??defaults?.nodeUrl));
+    workerUrl=httpUrl(await requiredText(prompt,'Trusted Atto work-service URL',workerUrl??defaults?.workerUrl));
     const review={directory,network,nodeUrl,workerUrl};
     process.stderr.write(`${options.json?JSON.stringify(review,null,2):terminalFields(review)}\n`);
     if(await prompt('Type APPROVE to configure this dedicated Atto wallet: ')!=='APPROVE')throw new ProfileError('CANCELLED','Atto wallet setup was cancelled.');

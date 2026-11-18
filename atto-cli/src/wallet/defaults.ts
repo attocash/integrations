@@ -17,11 +17,15 @@ export const representativePublicKeys = [
   '096523285e1fe5755daabb94ecab124d0e395e1d2e613e97d10aa2717b82a4ce',
 ];
 
+export const defaultLiveEndpoints = {
+  nodeUrl: 'https://gatekeeper.live.application.atto.cash',
+  workerUrl: 'https://gatekeeper.live.application.atto.cash',
+} as const;
+
 export function defaultSettings(): WalletSettings {
   return {
     network: 'LIVE',
-    nodeUrl: 'https://gatekeeper.live.application.atto.cash',
-    workerUrl: 'https://gatekeeper.live.application.atto.cash',
+    ...defaultLiveEndpoints,
     representative: new AttoAddress(AttoAlgorithm.V1, AttoPublicKey.Companion.parse(representativePublicKeys[Math.floor(Math.random() * representativePublicKeys.length)]!)).value,
     autoReceive: true,
     minReceiveRaw: '1',

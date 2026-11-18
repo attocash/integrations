@@ -11,6 +11,7 @@ import { hiddenPrompt, requireTerminal, showRecovery, terminalPrompt } from './t
 import { formatHumanResult } from './output.js';
 export { formatHumanResult } from './output.js';
 export { configureHelp, commandErrorMessage } from './help.js';
+export { defaultLiveEndpoints } from '../wallet/defaults.js';
 
 interface ProposalOptions { id: string; directory?: string }
 

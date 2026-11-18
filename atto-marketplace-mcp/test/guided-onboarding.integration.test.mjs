@@ -199,6 +199,8 @@ test(`${production ? 'bare production' : 'custom override'} guided setup verifie
   const result = await terminalRun({...f.env, MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR:f.wallet, ...(production ? {ATTO_TEST_PRODUCTION_TRANSPORT: http.origin} : {})},
     production ? ['setup'] : ['setup', '--home', f.home, '--profile', profileId, '--origin', http.origin, '--audience', audience], steps, {json: !production});
   // Then the default private profile binds production and survives a runtime start without --profile.
+  const selectedOrigin = production ? 'https://api.atto.market' : http.origin;
+  assert.ok(result.stderr.includes(`Marketplace [https://api.atto.market]: ${selectedOrigin}\n`));
   assert.doesNotMatch(result.stderr, /Marketplace configuration directory|Marketplace profile name|Marketplace origin \[|Agent API audience/);
   assert.equal(result.code, 0); assert.equal(result.index, steps.length); assert.equal(result.output.some(value => value.testError), false, result.stderr);
   assert.equal((result.stderr.match(/Type APPROVE/g) ?? []).length,1);
@@ -440,6 +442,22 @@ test('setup --advanced dispatches to the preserved wallet and account chooser',a
   assert.deepEqual(await attoSnapshot(f),before);assert.equal(readWalletSelection(f.home),undefined);
 });
 
+test('setup --advanced displays and accepts LIVE endpoints for a new dedicated wallet', async t => {
+  const f = await fixture(t);
+  const liveUrl = 'https://gatekeeper.live.application.atto.cash';
+  const steps = [step('Configure an Atto wallet?'), step('Atto wallet:'), step('Dedicated Atto wallet directory'),
+    step('Atto controller account index'), step('[atto:live]:'),
+    step(`Trusted Atto node URL [${liveUrl}]:`), step(`Trusted Atto work-service URL [${liveUrl}]:`),
+    step('Type APPROVE to configure this dedicated Atto wallet:', 'NO')];
+
+  const result = await terminalRun(f.env, ['setup', '--home', f.home, '--advanced'], steps);
+
+  assert.equal(result.index, steps.length);
+  assert.deepEqual(result.output, [{testError: 'CANCELLED'}]);
+  assert.ok(result.stderr.includes(`"nodeUrl": "${liveUrl}"`));
+  assert.ok(result.stderr.includes(`"workerUrl": "${liveUrl}"`));
+});
+
 test('interactive setup cancellation preserves shared ATTO authority and its existing wallet pointer', async t => {
   // Given the existing wallet and its saved authority.
   const f = await fixture(t), before = await existingAtto(f);
@@ -584,7 +602,7 @@ test('bare setup reaches wallet decisions on a real terminal using production de
   const transcript = stripVTControlCharacters(Buffer.from(metadata.transcriptBase64,'base64').toString('utf8'));
   // Then no technical configuration questions or wallet mutation precede those decisions.
   assert.equal(metadata.timedOut,false,transcript); assert.equal(metadata.stepsAnswered,2,transcript);
-  assert.match(transcript,/Marketplace: https:\/\/api\.atto\.market/); assert.match(transcript,/Profile: main/);
+  assert.ok(transcript.includes('Marketplace [https://api.atto.market]: https://api.atto.market')); assert.match(transcript,/Profile: main/);
   assert.ok(transcript.includes(join(f.env.ATTO_TEST_HOME,'.config','atto','marketplace-mcp')));
   assert.doesNotMatch(transcript,/Marketplace configuration directory|Marketplace profile name|Agent API audience/);
   assert.match(transcript,/Fixture result: CANCELLED/);
