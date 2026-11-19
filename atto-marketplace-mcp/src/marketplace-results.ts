@@ -1,4 +1,13 @@
+import { z } from 'zod';
 import { MarketplaceApiError } from './marketplace-api.js';
+
+export const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+
+export function parseMarketplaceDto<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
+  const parsed = schema.safeParse(value);
+  if (!parsed.success) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL', `Marketplace returned an invalid ${label}.`);
+  return parsed.data;
+}
 
 export function asRecord(value: unknown): Record<string, unknown> {
   if (value===null || typeof value!=='object' || Array.isArray(value)) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace returned an unexpected response.');

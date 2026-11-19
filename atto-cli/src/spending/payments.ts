@@ -15,13 +15,13 @@ import type { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import type { StateStore } from '../storage/state.js';
 import { derivedSigner, signingWallet, publishTransaction } from '../wallet/signing.js';
-import type { SendRequest, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
+import type { SendRequest, WalletAddress, WalletSettings } from '../wallet/types.js';
 import type { WalletWork } from '../wallet/work.js';
-import { SpendLedger, type ConsolidationStep, type ExternalPaymentRecord, type ExternalPaymentSecrets, type SendRecord } from './ledger.js';
+import { SpendLedger, type ConsolidationStep, type SendRecord } from './ledger.js';
 import { planPayment, type PoolAccount } from './pool.js';
 import { reconcileBlock, reconcileSend } from './reconcile.js';
-import { wireTransaction, type AttoPaymentNetwork } from './atto-x402.js';
-import { parseRelayOffer, relayPaymentPayload, relayProofFromHeader, validateRelayProof, type RelayRequest, type RelayProof } from '../marketplace/relay.js';
+import { wireTransaction } from './atto-x402.js';
+import { parseRelayOffer, relayPaymentPayload, relayProofFromHeader, validateRelayChallenge, validateRelayProof, type RelayRequest } from '../marketplace/relay.js';
 
 interface PaymentWallet {
   settings(): WalletSettings;
@@ -32,73 +32,6 @@ interface PaymentWallet {
   mcp: boolean;
 }
 type Quote = Awaited<ReturnType<MarketData['quoteUsd']>>;
-
-export interface MarketplaceTopUpRequest {
-  amount: string;
-  unit: 'ATTO' | 'RAW';
-  requestId: string;
-  index?: number;
-}
-
-export interface InternalMarketplacePaymentConfig {
-  apiUrl: string;
-  audience: string;
-}
-
-export interface MarketplacePayIntentRequest {
-  requestId: string;
-  intentId: string;
-  amountAtomic: string;
-  paymentIdentifier: string;
-  paymentRequired: string;
-  apiUrl: string;
-  audience: string;
-  resourceUrl: string;
-  expiresAt: string;
-  index?: number;
-}
-
-/** Canonical private-child DTOs; public wallet projections retain their normal presentation metadata. */
-export interface MarketplaceIntentPayment {
-  requestId: string;
-  intentId: string;
-  paymentIdentifier: string;
-  network: string;
-  amountAtomic: string;
-  payer: string;
-  hash: string;
-  paymentSignature: string;
-  paymentState: 'READY';
-  reused: boolean;
-  nativeState?: 'unknown' | 'confirmed';
-}
-
-interface MarketplaceIntentFailureIdentity {
-  requestId: string;
-  intentId: string;
-  paymentIdentifier: string;
-  network: string;
-  amountAtomic: string;
-  payer: string;
-  paymentState: 'FAILED';
-}
-export type MarketplaceIntentPaymentFailure = MarketplaceIntentFailureIdentity & (
-  { hash: string; nativeState: 'rejected'; failureReason: 'NATIVE_TRANSACTION_REJECTED' }
-  | { hash: null; nativeState: 'challenged'; failureReason: 'MARKETPLACE_CHALLENGE_EXPIRED' }
-);
-export interface MarketplaceIntentPendingSignature {
-  requestId: string;
-  intentId: string;
-  network: string;
-  amountAtomic: string;
-  paymentState: 'PENDING_SIGNATURE';
-  nativeState: 'challenged';
-}
-export type MarketplaceIntentPaymentStatus = { requestId: string; paymentState: 'NOT_FOUND' }
-  | MarketplaceIntentPayment | MarketplaceIntentPaymentFailure | MarketplaceIntentPendingSignature;
-
-const MARKETPLACE_INTENT_SWEEP_TIMEOUT_MS = 1_000;
-const MARKETPLACE_INTENT_SWEEP_CONCURRENCY = 16;
 
 /** Owns payment selection, reservations, publication and recovery as one workflow. */
 export class Payments {
@@ -541,7 +474,7 @@ export class Payments {
       if (record.relay!.paymentSignature) return this.relayResult(record);
       const transaction = await this.retainedTransaction(record), offer = parseRelayOffer(record.relay!);
       // Validate the complete typed frame before key access. This authorizes no general message signing.
-      validateRelayProof(offer, record.hash!, record.relay!.audience, { ...suppliedProof, signature: suppliedProof.signature ?? '0'.repeat(128) });
+      validateRelayChallenge(offer.terms, record.hash!, record.relay!.audience, suppliedProof);
       let signature = suppliedProof.signature;
       if (!signature) {
         await this.store.withWalletLock(async () => this.requireApproved(this.ledger.get(record.id)!));

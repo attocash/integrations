@@ -30,9 +30,8 @@ proposal in either mode.
 
 The entry point also exports `operations`, `errorResult`, and `runDoctor`, plus
 the `Operation`, `ApplicationOptions`, `ApplicationSession`, `DoctorOptions`,
-`DoctorReport`, `DoctorCheck`, and `DoctorStatus` types. `operations` contains the
-40 public operations in this checkout; adapters can use their schemas and
-descriptions rather than maintaining a separate operation list. Installed npm
+`DoctorReport`, `DoctorCheck`, and `DoctorStatus` types. The `operations` catalog
+contains the schemas and descriptions for the 38 public operations. Installed npm
 releases may expose an earlier set.
 
 `runDoctor({ directory, access: 'mcp' })` runs diagnostics without opening a
@@ -48,7 +47,7 @@ connection. `@attocash/cli/profiles` provides shared directory resolution;
 `@attocash/cli/terminal` provides interactive setup and proposal review for the
 terminal executables.
 
-`@attocash/cli/internal-marketplace` is an internal integration boundary for the
-Marketplace workspaces. Use `@attocash/cli/core` for other adapters; the ordinary
-MCP server does not register the private signed-intent operations.
+`@attocash/cli/internal-marketplace` provides the Marketplace workspaces with
+private payment preparation, authorization, and recovery. Other wallet adapters
+use `@attocash/cli/core`.
 

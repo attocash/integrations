@@ -75,6 +75,21 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   }
 });
 
+test('MCP rejects receiving in a read-only profile before selecting or querying an account', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'atto-mcp-receive-access-'));
+  const app = createApplication({ directory, access: 'mcp' });
+  t.after(async () => { await app.close(); await rm(directory, { recursive: true, force: true }); });
+  const client = await connected(app, t);
+  const tools = (await client.listTools()).tools;
+  for (const [name, args] of [['receive', { hash: 'A'.repeat(64) }], ['receive_all', {}]]) {
+    const { annotations } = tools.find(tool => tool.name === name);
+    assert.equal(annotations.openWorldHint, true);
+    assert.equal(annotations.readOnlyHint, false);
+    const result = await client.callTool({ name, arguments: args });
+    assert.equal(result.structuredContent.error.code, 'MCP_READ_ONLY');
+  }
+});
+
 test('retired customer payment tools are absent from the wallet catalog', async t => {
   // Given / When
   const client = await connected({ call: async () => null }, t);

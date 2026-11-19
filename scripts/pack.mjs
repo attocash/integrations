@@ -1,10 +1,11 @@
 import { execFile } from 'node:child_process';
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { installedPackage, localCommonsVersion } from './installed-package.mjs';
 
 const execute = promisify(execFile);
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
@@ -12,23 +13,12 @@ const bundled = [
   '@attocash/commons-core', '@attocash/commons-node', '@attocash/commons-node-remote',
   '@attocash/commons-worker-remote',
 ];
-const localCommonsVersion = process.env.ATTO_COMMONS_LOCAL_VERSION;
-
-async function packageDirectory(name, parent) {
+async function resolveDependency(name, parent) {
   const require = createRequire(join(parent, 'package.json'));
   let entry;
   try { entry = require.resolve(`${name}/package.json`); }
   catch { entry = require.resolve(name); }
-  let directory = dirname(await realpath(entry));
-  for (;;) {
-    try {
-      const manifest = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
-      if (manifest.name === name) return directory;
-    } catch {}
-    const next = dirname(directory);
-    if (next === directory) throw new Error(`Cannot locate the installed manifest for ${name}.`);
-    directory = next;
-  }
+  return installedPackage(name, entry);
 }
 
 async function pack() {
@@ -66,27 +56,23 @@ async function pack() {
   const pending = bundled.map(name => ({ name, parent: cliDirectory }));
   while (pending.length) {
     const { name, parent } = pending.pop();
-    const directory = await packageDirectory(name, parent);
+    const dependency = await resolveDependency(name, parent);
+    const { directory, manifest } = dependency;
     const previous = packages.get(name);
     if (previous) {
-      if (previous !== directory) throw new Error(`Packaging requires one resolved copy of ${name}; run npm ci and check the dependency tree.`);
+      if (previous.directory !== directory) throw new Error(`Packaging requires one resolved copy of ${name}; run npm ci and check the dependency tree.`);
       continue;
     }
-    packages.set(name, directory);
-    const dependency = JSON.parse(await readFile(join(directory, 'package.json'), 'utf8'));
-    for (const child of Object.keys(dependency.dependencies ?? {})) pending.push({ name: child, parent: directory });
+    packages.set(name, dependency);
+    for (const child of Object.keys(manifest.dependencies ?? {})) pending.push({ name: child, parent: directory });
   }
-  const ws = JSON.parse(await readFile(join(packages.get('ws'), 'package.json'), 'utf8'));
+  const ws = packages.get('ws').manifest;
   if (ws.version !== rootManifest.overrides.ws) throw new Error('Installed ws does not match the patched override; run npm ci before packaging.');
-  if (localCommonsVersion) {
-    if (!/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(localCommonsVersion)) {
-      throw new Error('ATTO_COMMONS_LOCAL_VERSION must be an exact semantic version, such as 8.1.0.');
-    }
+  const commonsVersion = localCommonsVersion();
+  if (commonsVersion) {
     const commonsPackages = [...packages.entries()].filter(([name]) => name.startsWith('@attocash/commons-'));
-    const commonsVersions = await Promise.all(commonsPackages.map(async ([, directory]) =>
-      JSON.parse(await readFile(join(directory, 'package.json'), 'utf8')).version));
-    if (!commonsPackages.length || commonsVersions.some(version => version !== localCommonsVersion)) {
-      throw new Error(`The installed Commons dependency closure must contain one version (${localCommonsVersion}); install the complete local Commons package set before packaging.`);
+    if (!commonsPackages.length || commonsPackages.some(([, { manifest }]) => manifest.version !== commonsVersion)) {
+      throw new Error(`The installed Commons dependency closure must contain one version (${commonsVersion}); install the complete local Commons package set before packaging.`);
     }
   }
 
@@ -100,7 +86,7 @@ async function pack() {
       await mkdir(target, { recursive: true });
       for (const file of ['dist', 'README.md', 'LICENSE']) await cp(join(source, file), join(target, file), { recursive: true });
     }
-    for (const [name, directory] of packages) {
+    for (const [name, { directory }] of packages) {
       const target = join(cliStage, 'node_modules', name);
       await mkdir(dirname(target), { recursive: true });
       // Copy only resolved production packages. Dev packages and native keyring
@@ -112,13 +98,13 @@ async function pack() {
       const { scripts, devDependencies, overrides, bundleDependencies, bundledDependencies, ...published } = manifest;
       if (manifest === cli) {
         published.bundleDependencies = bundled;
-        if (localCommonsVersion) {
+        if (commonsVersion) {
           for (const name of bundled.filter(name => name.startsWith('@attocash/commons-'))) {
             if (!published.dependencies?.[name]) throw new Error(`The CLI source manifest does not declare bundled dependency ${name}.`);
             // The local 8.1.0 package is private and unpublished. Keep source
             // manifests pinned to registry versions, but align this artifact's
             // dependencies with the exact Commons packages copied into it.
-            published.dependencies[name] = localCommonsVersion;
+            published.dependencies[name] = commonsVersion;
           }
         }
       }

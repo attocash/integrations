@@ -82,13 +82,16 @@ a package.
 
 | Responsibility | Owner |
 | --- | --- |
-| Released wallet operations and session lifecycle | `atto-cli/src/application/`; public library entry point `core.ts` |
+| Wallet operation schemas, write approval, and MCP tool hints | `atto-cli/src/application/operations.ts` |
+| Wallet dispatch and session lifecycle | `atto-cli/src/application/app.ts`; public library entry point `core.ts` |
 | Receive candidates, recovery, and unresolved receive fences | `atto-cli/src/wallet/receive.ts`, shared by explicit and automatic receiving |
 | Spending policy, reservations, and account availability | `atto-cli/src/spending/ledger.ts`; `payments.ts` owns selection, signing, publication, and reconciliation |
 | Terminal Marketplace approval presentation | `atto-cli/src/marketplace/approval-preview.ts`; all rendered fields pass through terminal escaping |
 | Wallet MCP protocol and transport | `atto-mcp/src/`, using the released CLI engine |
 | Marketplace tools and resource-specific commands | `atto-marketplace-mcp/src/server.ts` |
-| Direct wallet payment and hash-bound evidence | `atto-marketplace-mcp/src/direct-payments.ts` |
+| Direct payment negotiation and recovery | `atto-marketplace-mcp/src/direct-payments.ts` |
+| Shared x402 offer, challenge, and proof validation | `atto-cli/src/marketplace/relay.ts`, used by Marketplace MCP and both wallets |
+| Durable Marketplace mutations and private file uploads | `atto-marketplace-mcp/src/marketplace-mutation.ts` and `private-upload.ts` |
 | Protected Marketplace mutations and terminal approval recovery | `atto-marketplace-mcp/src/protected-mutation.ts` |
 | Marketplace profile persistence and submission claims | `atto-marketplace-mcp/src/profile-store.ts` |
 | Marketplace canonical serialization and asset/network rules | `atto-marketplace-mcp/src/canonical-json.ts` and `asset-network.ts` |

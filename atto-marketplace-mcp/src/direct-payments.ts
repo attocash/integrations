@@ -1,4 +1,4 @@
-import { parseRelayOffer, decodePaymentHeader, relayEvidenceBinding, validateRelayProof, relayProofFromHeader, relayPaymentPayload, type RelayTerms, type RelayRequest } from '@attocash/cli/internal-marketplace';
+import { parseRelayOffer, decodePaymentHeader, relayEvidenceBinding, validateRelayChallenge, validateRelayProof, relayProofFromHeader, relayPaymentPayload, type RelayTerms, type RelayOffer } from '@attocash/cli/internal-marketplace';
 import { z } from 'zod';
 import { MarketplaceApiClient, MarketplaceApiError, type ApiResponse } from './marketplace-api.js';
 import type { MarketplaceProfile } from './profile-store.js';
@@ -39,16 +39,17 @@ export function paymentEvidenceBinding(p:PaymentRequirement,transactionHash:stri
 export function validatePaymentChallenge(value:unknown,p:PaymentRequirement,transactionHash:string,audience:string,now=Date.now()) {
   const parsed=z.object({challengeId:z.string().uuid(),message:z.string().min(1).max(4096),issuedAt:z.string(),expiresAt:z.string()}).safeParse(value);
   if(!parsed.success) return invalid('Invalid payment proof challenge.');
-  const c=parsed.data,lines=c.message.split('\n');
-  if(lines.length!==10 || lines[0]!==`${p.asset==='ATTO'?'':'Nano '}Marketplace Agent Controller Proof v1`
-    || lines[1]!==`Audience: ${audience}` || lines[2]!==`Network: ${p.asset==='ATTO'?'live':p.network}` || lines[3]!==`Address: ${p.senderAddress}`
-    || lines[4]!=='Purpose: payment evidence' || lines[5]!==`Request ID: ${c.challengeId}`
-    || lines[6]!==`Binding Hash: ${paymentEvidenceBinding(p,transactionHash)}` || !/^Nonce: [a-f0-9]{64}$/.test(lines[7]??'')
-    || lines[8]!==`Issued At: ${c.issuedAt}` || lines[9]!==`Expiration Time: ${c.expiresAt}`
-    || !Number.isFinite(Date.parse(c.issuedAt)) || Date.parse(c.issuedAt)>now+30000
-    || !Number.isFinite(Date.parse(c.expiresAt)) || Date.parse(c.expiresAt)<=Date.parse(c.issuedAt)
-    || Date.parse(c.expiresAt)<=now || Date.parse(c.expiresAt)>Date.parse(c.issuedAt)+300000) invalid('Payment challenge differs from the exact requirement, hash or wallet audience.');
-  return c;
+  const { challengeId, message, issuedAt, expiresAt } = parsed.data;
+  let frame;
+  try {
+    frame = validateRelayChallenge(relayTerms(p), transactionHash, audience, { challengeId, message }, now);
+  } catch {
+    return invalid('Payment challenge differs from the exact requirement, hash or wallet audience.');
+  }
+  if (issuedAt !== frame.issuedAt || expiresAt !== frame.expiresAt) {
+    return invalid('Payment challenge differs from its signed timestamps.');
+  }
+  return parsed.data;
 }
 /** The wallet retains the native candidate and final header; only Market publishes it. */
 export async function payRequirement(input:{api:MarketplaceApiClient;profile:MarketplaceProfile;env:NodeJS.ProcessEnv;paymentId:string},native={callWallet}) {
@@ -59,32 +60,24 @@ export async function payRequirement(input:{api:MarketplaceApiClient;profile:Mar
   const identity=await native.callWallet(env,{asset:p.asset,operation:'identity.list',input:{}});
   if(identity.address!==p.senderAddress || identity.network!==p.network || !Number.isSafeInteger(identity.index)) invalid('The selected local wallet differs from the frozen sender or network.');
   let saved=await native.callWallet(env,{asset:p.asset,operation:'payment.status',input:{requestId:p.id}});
-  let request:RelayRequest;
-  if(saved.state==='NOT_FOUND') {
+  const binding = { requestId: p.id, origin: profile.origin, audience: profile.audience, terms: relayTerms(p) };
+  const needsCandidate = saved.state === 'NOT_FOUND' || saved.hash === null;
+  let offer: RelayOffer | undefined;
+  if (saved.state !== 'NOT_FOUND') {
+    if (typeof saved.paymentRequired !== 'string') invalid('The wallet did not retain its original x402 offer.');
+    offer = parseRelayOffer({ ...binding, paymentRequired: saved.paymentRequired }, true);
+  }
+  if (!offer || (needsCandidate && offer.expiresAt <= Date.now())) {
     const response=await api.request(path,{method:'POST',headers:{'Idempotency-Key':p.id},allowStatus:[200,202,402]});
     if(response.status===200) return confirmedResponse(response,p,profile.accountId);
     if(response.status===202) return pendingResponse(response,p,profile.accountId,profile.origin);
     const paymentRequired=response.headers.get('PAYMENT-REQUIRED');
-    if(!paymentRequired)invalid('Marketplace omitted the x402 payment offer.');
-    request={requestId:p.id,origin:profile.origin,audience:profile.audience,terms:relayTerms(p),paymentRequired};
-    parseRelayOffer(request);
-    saved=await native.callWallet(env,{asset:p.asset,operation:'payment.prepare',input:request as unknown as Record<string,unknown>});
-  } else {
-    if(typeof saved.paymentRequired!=='string')invalid('The wallet did not retain its original x402 offer.');
-    request={requestId:p.id,origin:profile.origin,audience:profile.audience,terms:relayTerms(p),paymentRequired:saved.paymentRequired};
-    const retainedOffer=parseRelayOffer(request,true);
-    if(saved.hash===null) {
-      if(retainedOffer.expiresAt<=Date.now()) {
-        const response=await api.request(path,{method:'POST',headers:{'Idempotency-Key':p.id},allowStatus:[200,202,402]});
-        if(response.status===200)return confirmedResponse(response,p,profile.accountId);
-        if(response.status===202)return pendingResponse(response,p,profile.accountId,profile.origin);
-        const paymentRequired=response.headers.get('PAYMENT-REQUIRED');
-        if(!paymentRequired)invalid('Marketplace omitted the refreshed unused x402 offer.');
-        request={...request,paymentRequired};
-        parseRelayOffer(request);
-      }
-      saved=await native.callWallet(env,{asset:p.asset,operation:'payment.prepare',input:request as unknown as Record<string,unknown>});
-    }
+    if (!paymentRequired) invalid(offer ? 'Marketplace omitted the refreshed unused x402 offer.' : 'Marketplace omitted the x402 payment offer.');
+    offer = parseRelayOffer({ ...binding, paymentRequired });
+  }
+  const request = { ...binding, paymentRequired: offer.header };
+  if (needsCandidate) {
+    saved = await native.callWallet(env, { asset: p.asset, operation: 'payment.prepare', input: request });
   }
   validateSaved(saved,p);
   if(saved.state==='failed'||saved.state==='COMPETING')return {requirement:p,wallet:saved};
@@ -92,16 +85,16 @@ export async function payRequirement(input:{api:MarketplaceApiClient;profile:Mar
   if(saved.paymentSignature===null) {
     const challenge=validatePaymentChallenge((await api.request(`${path}/challenge`,{method:'POST',body:{transactionHash}})).json,p,transactionHash,profile.audience);
     const proof={challengeId:challenge.challengeId,message:challenge.message};
-    validateRelayProof(parseRelayOffer(request),transactionHash,profile.audience,{...proof,signature:'0'.repeat(128)});
+    parseRelayOffer(request); // Recheck offer expiry after fetching the challenge.
     saved=await native.callWallet(env,{asset:p.asset,operation:'payment.authorize',input:{requestId:p.id,proof}});
     validateSaved(saved,p);
   }
   if(typeof saved.paymentSignature!=='string')invalid('The wallet did not durably retain its payment authorization.');
   // The saved header includes the original proof. Never obtain fresh terms after an uncertain submission.
-  const payload=decodePaymentHeader(saved.paymentSignature),proof=relayProofFromHeader(saved.paymentSignature),offered=parseRelayOffer(request,true);
-  validateRelayProof(offered,transactionHash,profile.audience,proof,true);
+  const payload=decodePaymentHeader(saved.paymentSignature),proof=relayProofFromHeader(saved.paymentSignature);
+  validateRelayProof(offer,transactionHash,profile.audience,proof,true);
   const nativePayload=z.record(z.string(),z.unknown()).safeParse(payload.payload);
-  if(!nativePayload.success||relayPaymentPayload(offered,p.id,nativePayload.data,proof)!==saved.paymentSignature)invalid('The saved x402 envelope differs from its original offer or proof.');
+  if(!nativePayload.success||relayPaymentPayload(offer,p.id,nativePayload.data,proof)!==saved.paymentSignature)invalid('The saved x402 envelope differs from its original offer or proof.');
   const response=await api.request(path,{method:'POST',headers:{'Idempotency-Key':p.id,'PAYMENT-SIGNATURE':saved.paymentSignature},allowStatus:[200,202,402]});
   if(response.status===402)invalid('The original relay was not settled. Preserve its wallet candidate and recover this payment ID; do not prepare another payment.');
   if(response.status===200) return confirmedResponse(response,p,profile.accountId,transactionHash);

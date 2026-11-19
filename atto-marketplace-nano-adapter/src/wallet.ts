@@ -1,11 +1,12 @@
 import { parseJsonObject } from './json.js';
-import { NanoStateBlock, MAX_RAW, ZERO_HASH, addressPublicKey, canonicalAddress, canonicalHash, upperHex, validWork, offchainVerify, offchainSign, type NanoNetwork } from './protocol.js';
-import { parseRelayOffer, relayPaymentPayload, relayProofFromHeader, validateRelayProof, type RelayRequest, type RelayProof } from '@attocash/cli/internal-marketplace';
+import { NanoStateBlock, MAX_RAW, ZERO_HASH, addressPublicKey, canonicalAddress, canonicalHash, upperHex, validWork, offchainSign, type NanoNetwork } from './protocol.js';
+import { parseRelayOffer, relayPaymentPayload, validateRelayChallenge, type RelayRequest, type RelayProof } from '@attocash/cli/internal-marketplace';
 import { NanoRpcClient, DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, requireConfirmedFrontier, type NanoAccountSnapshot } from './rpc.js';
 import { canonical, defaultDataDirectory, exactKeys, loadConfiguration, positiveRaw, sha256, text, withPrivateKey, type NanoWalletConfiguration } from './configuration.js';
 import { signControllerProof, validateControllerProof, verifyNanoMessage, type ControllerProofRequest } from './controller.js';
 import { NanoJournal, type JournalRecord } from './journal.js';
 import { fail } from './errors.js';
+import { checkRelayCandidateTerms, verifyRelayAuthorization, verifyRelayHeader, walletRelayOffer } from './relay.js';
 export type NanoRpc = Pick<NanoRpcClient, 'requirePinnedNetwork' | 'accountSnapshot' | 'accountSnapshotOrNotFound' | 'blockInfo' | 'generateWork' | 'generateOpenWork' | 'process' | 'processDevOpen' | 'receivable' | 'receivableExists' | 'verifyFrontierState' | 'validSourceBlock' | 'validConfirmedBlock' | 'requireLoopbackDevelopmentEndpoint'>;
 export interface NanoWalletOpenOptions {
     dataDir?: string;
@@ -171,17 +172,11 @@ export class NanoWallet {
             case 'payment.authorize': return await this.locked(() => this.authorizeRelay(args));
             case 'payment.status': {
                 exactKeys(args, ['requestId']);
-                const id = `transfer:${this.requestId(args.requestId)}`, prior = this.journal.find(id);
-                if (!prior) return { requestId: args.requestId, state: 'NOT_FOUND' };
-                return await this.locked(async () => {
-                    if (prior.state === 'PREPARING') return this.relayResult(prior);
-                    await this.status(id);
-                    return this.relayResult(this.journal.find(id)!);
-                });
+                return this.relayStatus(this.requestId(args.requestId));
             }
             case 'transfer.status':
                 exactKeys(args, ['requestId']);
-                return await this.locked(() => this.status(`transfer:${this.requestId(args.requestId)}`));
+                return await this.locked(() => this.transferStatus(this.requestId(args.requestId)));
             case 'receive':
                 this.requireNetwork(args, ['network', 'hash']);
                 return await this.locked(() => this.receive(canonicalHash(text(args.hash, 64))));
@@ -233,11 +228,8 @@ export class NanoWallet {
         const previousBalance = positiveRaw(record.previousBalance, true), terms = parseJsonObject(record.requestJson);
         if (record.kind === 'transfer') {
             exactKeys(terms, terms.relay === undefined ? ['network', 'destination', 'amountAtomic', 'requestId'] : ['network', 'destination', 'amountAtomic', 'requestId', 'relay']);
-            if (terms.relay !== undefined) {
-                const offer = parseRelayOffer(terms.relay as RelayRequest, true);
-                if (offer.terms.senderAddress !== record.source || offer.terms.network !== record.network || offer.terms.recipientAddress !== record.destination
-                    || offer.terms.amountAtomic !== record.amount || offer.terms.asset !== 'XNO') fail('JOURNAL_CONFLICT');
-            }
+            if (terms.relay !== undefined)
+                checkRelayCandidateTerms(terms.relay as RelayRequest, record);
             if (terms.network !== record.network ||
                 terms.destination !== record.destination ||
                 terms.amountAtomic !== record.amount ||
@@ -282,37 +274,13 @@ export class NanoWallet {
         const reservation = this.journal.begin(input, this.now(), this.rollingLimit());
         if (reservation.state !== 'PREPARING')
             return relay ? this.relayResult(reservation) : await this.publishNative(reservation, true);
-        let durable = false;
-        try {
-            const account = requireConfirmedFrontier(await this.rpc.accountSnapshot(this.configuration.sourceAddress));
-            await this.rpc.verifyFrontierState(account, this.configuration.sourceAddress);
-            if (account.balance < amount)
-                fail('INSUFFICIENT_FUNDS');
-            const work = await this.rpc.generateWork(account.frontier, 2);
-            this.requireSigningAuthority(amount);
-            const block = await withPrivateKey(this.configuration, key => {
-                this.requireSigningAuthority(amount);
-                return NanoStateBlock.signed(key, account.frontier, account.representative, account.balance - amount, upperHex(addressPublicKey(destination)), work);
-            });
-            if (!validWork(this.configuration.network, 2, false, block.workRoot(), block.work))
-                fail('RPC_UNAVAILABLE');
-            if (relay) parseRelayOffer(relay);
-            const record = this.journal.save(id, { epoch: account.epoch, previous: account.frontier, previousBalance: account.balance.toString(), representative: account.representative, blockJson: canonical(block.toWire()), blockHash: block.hash });
-            durable = true;
-            return relay ? this.relayResult(record) : await this.publishNative(record, false);
-        }
-        catch (error) {
-            if (!durable)
-                this.journal.abort(id);
-            throw error;
-        }
+        const record = await this.prepareCandidate(reservation, amount, {kind: 'transfer', destination, ...(relay && {relay})});
+        return relay ? this.relayResult(record) : this.publishNative(record, false);
     }
     private async prepareRelay(args: Record<string, unknown>): Promise<Record<string, unknown>> {
         exactKeys(args, ['requestId', 'origin', 'audience', 'terms', 'paymentRequired']);
         const request = args as unknown as RelayRequest, prior = this.journal.find(`transfer:${this.requestId(request.requestId)}`);
-        const offer = parseRelayOffer(request, Boolean(prior?.blockHash));
-        if (request.origin !== this.configuration.origin || request.audience !== this.configuration.audience || offer.terms.asset !== 'XNO'
-            || offer.terms.network !== this.configuration.network || offer.terms.senderAddress !== this.configuration.sourceAddress) fail('INVALID_REQUEST');
+        const offer = walletRelayOffer(request, this.configuration, Boolean(prior?.blockHash));
         const pending = this.journal.pendingForSource(this.configuration.sourceAddress);
         if (pending?.blockHash && pending.id !== `transfer:${request.requestId}`) {
             await this.rpc.requirePinnedNetwork();
@@ -325,12 +293,8 @@ export class NanoWallet {
         const terms = parseJsonObject(record.requestJson), request = terms.relay as RelayRequest;
         if (!request) fail('JOURNAL_CONFLICT');
         const offer = parseRelayOffer(request, true), block = record.blockHash ? this.savedBlock(record) : undefined, header = this.journal.relayHeader(record.id);
-        if (header) {
-            const proof = relayProofFromHeader(header);
-            if (!block) fail('JOURNAL_CONFLICT');
-            validateRelayProof(offer, block.hash, request.audience, proof, true);
-            if (!offchainVerify(record.source, proof.message, proof.signature) || relayPaymentPayload(offer, request.requestId, { block: block.toWire() }, proof) !== header) fail('JOURNAL_CONFLICT');
-        }
+        if (header)
+            verifyRelayHeader(request, offer, block, header);
         return { requestId: request.requestId, network: record.network, sourceAddress: record.source, destination: record.destination,
             amountAtomic: record.amount, hash: record.blockHash, state: record.state, paymentRequired: request.paymentRequired, paymentSignature: header ?? null };
     }
@@ -340,8 +304,8 @@ export class NanoWallet {
         if (!record?.blockHash) fail('JOURNAL_CONFLICT');
         if (this.journal.relayHeader(record.id)) return this.relayResult(record);
         const request = parseJsonObject(record.requestJson).relay as RelayRequest, offer = parseRelayOffer(request), block = this.savedBlock(record);
-        const supplied = args.proof as RelayProof;
-        validateRelayProof(offer, block.hash, request.audience, { ...supplied, signature: supplied.signature ?? '0'.repeat(128) });
+        const supplied = args.proof as Omit<RelayProof, 'signature'> & { signature?: string };
+        validateRelayChallenge(offer.terms, block.hash, request.audience, supplied);
         let signature = supplied.signature;
         if (signature === undefined) {
             this.requireSigningAuthority(BigInt(record.amount));
@@ -351,8 +315,7 @@ export class NanoWallet {
             });
         }
         const proof = { ...supplied, signature };
-        validateRelayProof(offer, block.hash, request.audience, proof);
-        if (!offchainVerify(record.source, proof.message, proof.signature)) fail('INVALID_REQUEST');
+        verifyRelayAuthorization(request, offer, block, proof);
         this.requireSigningAuthority(BigInt(record.amount));
         this.journal.authorizeRelay(record.id, relayPaymentPayload(offer, request.requestId, { block: block.toWire() }, proof));
         return this.relayResult(record);
@@ -388,8 +351,10 @@ export class NanoWallet {
         const id = `receive:${hash}`;
         let prior = this.journal.find(id);
         if (prior?.state === 'PREPARING') {
-            this.journal.clearAbandoned(id);
-            prior = undefined;
+            this.journal.clearAbandoned(prior);
+            prior = this.journal.find(id);
+            if (prior?.state === 'PREPARING')
+                fail('PAYMENT_IN_PROGRESS');
         }
         if (prior) {
             const block = this.savedBlock(prior);
@@ -410,33 +375,63 @@ export class NanoWallet {
             const result = await this.publishNative(reservation, true);
             return { ...result, amountAtomic: String(amount), replayed: true };
         }
-        let durable = false;
+        const record = await this.prepareCandidate(reservation, amount, {kind: 'receive', hash, devOnly});
+        return { ...await this.publishNative(record, false), amountAtomic: String(amount), replayed: false };
+    }
+    private async prepareCandidate(
+        reservation: JournalRecord,
+        amount: bigint,
+        intent: {kind: 'transfer'; destination: string; relay?: RelayRequest} | {kind: 'receive'; hash: string; devOnly: boolean},
+    ): Promise<JournalRecord> {
         try {
-            const snapshot = await this.rpc.accountSnapshotOrNotFound(this.configuration.sourceAddress);
-            if (devOnly && snapshot)
-                fail('SOURCE_ALREADY_OPEN');
-            const account = snapshot ? requireConfirmedFrontier(snapshot) : { frontier: ZERO_HASH, balance: 0n, representative: this.configuration.sourceAddress, epoch: 0 };
-            if (snapshot)
-                await this.rpc.verifyFrontierState(account, this.configuration.sourceAddress);
-            if (account.balance + amount > MAX_RAW)
-                fail('INVALID_AMOUNT');
-            const root = account.frontier === ZERO_HASH ? upperHex(addressPublicKey(this.configuration.sourceAddress)) : account.frontier;
-            const work = await this.rpc.generateOpenWork(root);
-            const block = await withPrivateKey(this.configuration, key => {
-                if (!devOnly) this.requireReceiveAuthority();
-                return NanoStateBlock.signed(key, account.frontier, account.representative, account.balance + amount, hash, work);
+            const {account, block} = intent.kind === 'transfer'
+                ? await this.signTransferCandidate(amount, intent.destination)
+                : await this.signReceiveCandidate(amount, intent.hash, intent.devOnly);
+            if (intent.kind === 'transfer' && intent.relay)
+                parseRelayOffer(intent.relay);
+            return this.journal.save(reservation.id, {
+                epoch: account.epoch, previous: account.frontier, previousBalance: String(account.balance),
+                representative: account.representative, blockJson: canonical(block.toWire()), blockHash: block.hash,
             });
-            if (!validWork(this.configuration.network, 0, true, root, work))
-                fail('RPC_UNAVAILABLE');
-            const record = this.journal.save(id, { epoch: account.epoch, previous: account.frontier, previousBalance: String(account.balance), representative: account.representative, blockJson: canonical(block.toWire()), blockHash: block.hash });
-            durable = true;
-            return { ...await this.publishNative(record, false), amountAtomic: String(amount), replayed: false };
         }
         catch (error) {
-            if (!durable)
-                this.journal.abort(id);
+            this.journal.abort(reservation.id);
             throw error;
         }
+    }
+    private async signTransferCandidate(amount: bigint, destination: string) {
+        const account = requireConfirmedFrontier(await this.rpc.accountSnapshot(this.configuration.sourceAddress));
+        await this.rpc.verifyFrontierState(account, this.configuration.sourceAddress);
+        if (account.balance < amount)
+            fail('INSUFFICIENT_FUNDS');
+        const work = await this.rpc.generateWork(account.frontier, 2);
+        this.requireSigningAuthority(amount);
+        const block = await withPrivateKey(this.configuration, key => {
+            this.requireSigningAuthority(amount);
+            return NanoStateBlock.signed(key, account.frontier, account.representative, account.balance - amount, upperHex(addressPublicKey(destination)), work);
+        });
+        if (!validWork(this.configuration.network, 2, false, block.workRoot(), block.work))
+            fail('RPC_UNAVAILABLE');
+        return {account, block};
+    }
+    private async signReceiveCandidate(amount: bigint, hash: string, devOnly: boolean) {
+        const snapshot = await this.rpc.accountSnapshotOrNotFound(this.configuration.sourceAddress);
+        if (devOnly && snapshot)
+            fail('SOURCE_ALREADY_OPEN');
+        const account = snapshot ? requireConfirmedFrontier(snapshot) : { frontier: ZERO_HASH, balance: 0n, representative: this.configuration.sourceAddress, epoch: 0 };
+        if (snapshot)
+            await this.rpc.verifyFrontierState(account, this.configuration.sourceAddress);
+        if (account.balance + amount > MAX_RAW)
+            fail('INVALID_AMOUNT');
+        const root = account.frontier === ZERO_HASH ? upperHex(addressPublicKey(this.configuration.sourceAddress)) : account.frontier;
+        const work = await this.rpc.generateOpenWork(root);
+        const block = await withPrivateKey(this.configuration, key => {
+            if (!devOnly) this.requireReceiveAuthority();
+            return NanoStateBlock.signed(key, account.frontier, account.representative, account.balance + amount, hash, work);
+        });
+        if (!validWork(this.configuration.network, 0, true, root, work))
+            fail('RPC_UNAVAILABLE');
+        return {account, block};
     }
     private async publishNative(record: JournalRecord, replayed: boolean): Promise<Record<string, unknown>> {
         const block = this.savedBlock(record);
@@ -495,21 +490,44 @@ export class NanoWallet {
         }
         return this.journal.state(record.id, 'UNKNOWN', this.now());
     }
-    private async status(id: string): Promise<Record<string, unknown>> {
+    private async relayStatus(requestId: string): Promise<Record<string, unknown>> {
+        const id = `transfer:${requestId}`;
+        if (!this.journal.find(id))
+            return { requestId, state: 'NOT_FOUND' };
+        return this.locked(async () => {
+            const record = this.journal.find(id);
+            if (!record)
+                return { requestId, state: 'NOT_FOUND' };
+            this.configuredRecord(record);
+            if (parseJsonObject(record.requestJson).relay === undefined)
+                fail('JOURNAL_CONFLICT');
+            if (record.state === 'PREPARING')
+                return this.relayResult(record);
+            await this.reconcileStatus(record);
+            return this.relayResult(this.journal.find(id)!);
+        });
+    }
+    private async transferStatus(requestId: string): Promise<Record<string, unknown>> {
+        const id = `transfer:${requestId}`;
         const record = this.journal.find(id);
         if (!record)
             fail('NOT_FOUND');
         this.configuredRecord(record);
+        if (parseJsonObject(record.requestJson).relay !== undefined)
+            fail('NOT_FOUND');
         if (record.state === 'PREPARING') {
-            if (this.journal.clearAbandoned(id))
+            if (this.journal.clearAbandoned(record))
                 return { ...this.result(record), state: 'READY', candidateState: 'ABSENT', sendHash: null };
             fail('PAYMENT_IN_PROGRESS');
         }
+        return this.result(await this.reconcileStatus(record)) as unknown as Record<string, unknown>;
+    }
+    private async reconcileStatus(record: JournalRecord): Promise<JournalRecord> {
         this.savedBlock(record);
         if (['CONFIRMED', 'COMPETING'].includes(record.state))
-            return this.result(record) as unknown as Record<string, unknown>;
+            return record;
         await this.rpc.requirePinnedNetwork();
-        return this.result(await this.reconcile(record)) as unknown as Record<string, unknown>;
+        return this.reconcile(record);
     }
 }
 export async function dispatchNanoOperation(env: NodeJS.ProcessEnv, operation: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {

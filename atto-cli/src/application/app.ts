@@ -16,7 +16,7 @@ import { StateStore } from '../storage/state.js';
 import { resolveWalletProfile } from '../storage/profiles.js';
 import { SpendLedger, type McpAccess } from '../spending/ledger.js';
 import { approvalInstructions } from '../spending/approval.js';
-import { Payments, type InternalMarketplacePaymentConfig } from '../spending/payments.js';
+import { Payments } from '../spending/payments.js';
 import { WalletWork, type WorkExecution } from '../wallet/work.js';
 import { BackgroundReceiver } from '../wallet/background-receive.js';
 import { WatchManager } from '../watches/manager.js';
@@ -67,18 +67,16 @@ export class AttoApplication {
   private recoveryReads = 0;
   private readonly calls = new Set<Promise<unknown>>();
   private readonly mcp: boolean;
-  private readonly internalMarketplacePayment?: InternalMarketplacePaymentConfig;
   private readonly internalMarketplaceAuthorizeWrite?: (status: unknown) => void;
   private readonly internalMarketplaceReceiveSafety: boolean;
   private readonly doctorAbort = new AbortController();
 
-  constructor(options: { directory?: string; secrets?: SecretStore; market?: MarketData; access?: 'mcp'; internalMarketplaceReceiveSafety?: boolean; internalMarketplaceAuthorizeWrite?: (status: unknown) => void; internalMarketplacePayment?: InternalMarketplacePaymentConfig; onReceiveProgress?: (event: ReceiveProgress) => void; sendRetry?: SendRetry; globalDirectory?: GlobalDirectory; onDestination?: (binding: DestinationBinding) => void; workExecution?: WorkExecution; receivingAllowed?: () => boolean } = {}) {
+  constructor(options: { directory?: string; secrets?: SecretStore; market?: MarketData; access?: 'mcp'; internalMarketplaceReceiveSafety?: boolean; internalMarketplaceAuthorizeWrite?: (status: unknown) => void; onReceiveProgress?: (event: ReceiveProgress) => void; sendRetry?: SendRetry; globalDirectory?: GlobalDirectory; onDestination?: (binding: DestinationBinding) => void; workExecution?: WorkExecution; receivingAllowed?: () => boolean } = {}) {
     const profile = resolveWalletProfile(options.directory);
     this.store = new StateStore(profile.directory);
     try {
       this.secrets = options.secrets ?? new OsSecretStore(profile.credentialAccount, profile.credentialService);
       this.mcp = options.access === 'mcp';
-      this.internalMarketplacePayment = options.internalMarketplacePayment;
       this.internalMarketplaceAuthorizeWrite = options.internalMarketplaceAuthorizeWrite;
       this.internalMarketplaceReceiveSafety = options.internalMarketplaceReceiveSafety === true;
       this.ledger = new SpendLedger(this.store);
@@ -552,12 +550,13 @@ export class AttoApplication {
   async call(name: string, input: Record<string, unknown> = {}): Promise<unknown> {
     if (name === 'wallet_status' || name === 'doctor') this.requireSession();
     else this.requireReady();
-    const args = parseOperation(name, input);
-    if (!operationFor(name)!.readOnly && name !== 'limits_propose' && !['labels_set', 'labels_remove'].includes(name) && !name.startsWith('watch_')) this.requireMcpWrite();
+    const operation = operationFor(name);
+    const args = parseOperation(operation, input);
+    if (operation.requiresWriteApproval) this.requireMcpWrite();
     const call = (async () => {
       const result = await this.invoke(name, args);
       if (this.internalMarketplaceReceiveSafety && name === 'receive' && (result as { status?: unknown } | null)?.status === 'unknown') return result;
-      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify', 'marketplace_pay_intent', 'marketplace_pay_intent_status'].includes(name)) return result;
+      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify'].includes(name)) return result;
       if (this.settings().network === 'LIVE' && ['address_list', 'account_get', 'balances_get', 'transaction_get', 'entry_get', 'representative_weight', 'history_list', 'receivables_list'].includes(name)) await this.labels.global.refresh();
       return this.labels.decorate(result, this.settings().network);
     })();

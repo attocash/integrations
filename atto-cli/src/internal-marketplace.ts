@@ -54,6 +54,6 @@ export { inspectMarketplaceWalletSetup, withUnchangedMarketplaceWalletSetup, mar
   type MarketplaceWalletSetupSnapshot, type MarketplacePaymentMode, type MarketplacePaymentIntent, type MarketplacePaymentPlan } from './marketplace/wallet-setup.js';
 
 export { assertPrivatePermissions, assertPrivatePermissionsBatch, securePrivatePermissions, syncPrivateDirectory, type PrivatePath } from './storage/private-permissions.js';
-export { parseRelayOffer, decodePaymentHeader, relayPaymentPayload, relayProofFromHeader, relayEvidenceBinding, validateRelayProof, validateRelayOfferRefresh,
-  MARKETPLACE_BINDING, type RelayRequest, type RelayTerms, type RelayProof, type RelayRecord } from './marketplace/relay.js';
+export { parseRelayOffer, decodePaymentHeader, relayPaymentPayload, relayProofFromHeader, relayEvidenceBinding, validateRelayChallenge, validateRelayProof, validateRelayOfferRefresh,
+  MARKETPLACE_BINDING, type RelayRequest, type RelayTerms, type RelayProof, type RelayRecord, type RelayOffer } from './marketplace/relay.js';
 export { parseJsonObject } from './marketplace/strict-json.js';

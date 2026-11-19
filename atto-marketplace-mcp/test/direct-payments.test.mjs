@@ -6,7 +6,7 @@ import assert from 'node:assert/strict';
 const {paymentEvidenceBinding,payRequirement,validatePaymentChallenge}=await import(pathToFileURL(join(packageDirectory,'dist/direct-payments.js')).href);
 const id='11111111-1111-4111-8111-111111111111',account='22222222-2222-4222-8222-222222222222';
 function fixture(asset){return {id,purpose:'SHOP_ORDER',sourceReference:'order',ownerAccountId:account,asset,network:asset==='ATTO'?'atto:local':'nano:dev',senderAddress:'sender',recipientAddress:'seller',amountAtomic:'100000000000000000000000000001',termsHash:'a'.repeat(64),versionHash:'b'.repeat(64),baselineHeight:7,baselineFrontier:'c'.repeat(64),status:'PENDING',verifiedPayment:null,submissions:[],relay:null};}
-for(const asset of ['ATTO','XNO'])for(const outcome of ['pending','confirmed'])test(`${asset} lost relay responses replay the same durable payload and proof through ${outcome} without client publication`,async()=>{
+for(const asset of ['ATTO','XNO'])for(const outcome of ['pending','confirmed'])test(`${asset} lost relay responses replay the same durable payload and proof through ${outcome} without client publication`,async t=>{
   // Given immutable instructions and one wallet-owned candidate/header journal.
   const p=fixture(asset);p.amountAtomic=asset==='ATTO'?'9007199254740993':'100000000000000000000000000001';
   const requests=[],operations=[],headers=[];let saved,signs=0,lost=true;
@@ -42,11 +42,17 @@ for(const asset of ['ATTO','XNO'])for(const outcome of ['pending','confirmed'])t
     return {status:200,headers:new Headers(),json:p};
   }};
   const input={api,profile:{accountId:account,audience:'audience',origin:'https://marketplace.example'},env:{},paymentId:id};
-  // When the admitted relay loses its response and the process repeats the original operation.
-  await assert.rejects(payRequirement(input,native),/response lost/);const result=await payRequirement(input,native);
+  // When the admitted relay loses its response and recovery runs after the offer and proof expire.
+  await assert.rejects(payRequirement(input,native),/response lost/);
+  const recoveryTime = Date.now() + 600_000;
+  t.mock.method(Date, 'now', () => recoveryTime);
+  const result = await payRequirement(input,native);
   // Then the wallet never broadcasts, and Market receives identical signed bytes/proof without another reservation or signature.
   if(outcome==='pending')assert.equal(result.settlement.errorReason,'settlement_pending');else assert.equal(result.status,'VERIFIED');
   assert.equal(signs,0);assert.equal(headers[0],headers[1]);
+  assert.equal(requests.filter(({path}) => path.endsWith('/challenge')).length, 1);
+  assert.equal(requests.filter(({path,options}) => path === `/v1/agent/payments/${id}`
+    && options?.method === 'POST' && !options.headers['PAYMENT-SIGNATURE']).length, 1);
   assert.equal(operations.filter(op=>op==='payment.prepare').length,1);assert.equal(operations.filter(op=>op==='payment.authorize').length,1);
   assert.equal(operations.includes('transfer.send'),false);assert.equal(requests.filter(r=>r.path.endsWith('/evidence')).length,0);
 });

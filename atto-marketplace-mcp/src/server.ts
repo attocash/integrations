@@ -1,12 +1,12 @@
-import { asRecord, redact } from './marketplace-results.js';
+import { asRecord, parseMarketplaceDto, redact, uuid } from './marketplace-results.js';
 import { applicationMessageText, applicationMessagesPage, applicationMessageResult, validateSavedApplicationMessage } from './application-messages.js';
 import { fundingNetworks } from './asset-network.js';
-import { mutationHash } from './canonical-json.js';
+import { mutate } from './marketplace-mutation.js';
+import { uploadPrivateFile } from './private-upload.js';
 import { freshProofMutation } from './protected-mutation.js';
 import { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
-import { createHash } from 'node:crypto';
-import { MarketplaceApiClient, MarketplaceApiError, type ApiResponse } from './marketplace-api.js';
+import { MarketplaceApiClient, MarketplaceApiError } from './marketplace-api.js';
 import { MarketplaceProfileStore, ProfileError, requireSession, type MarketplaceProfile } from './profile-store.js';
 import { managedWalletEnvironment } from './wallet-home.js';
 import { verifyWorkReceipt } from './work-receipt.js';
@@ -14,10 +14,9 @@ import { productPaidContent, productPurchaseResult, productReceipt,
   productSellerOrder, verifyProductReceipt } from './product-purchase.js';
 import { payRequirement, paymentRequirement } from './direct-payments.js';
 import { callWallet } from './wallet-process.js';
-import { publishVerifiedResponse, readLocalSource, resolveDownloadDestination, validateFilename,
+import { publishVerifiedResponse, resolveDownloadDestination, validateFilename,
   type ImmutableFileManifestEntry } from './submission-files.js';
 
-const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
 const positiveAtomic = z.string().regex(/^[1-9][0-9]{0,64}$/);
 const nonnegativeAtomic = z.string().regex(/^(0|[1-9][0-9]{0,64})$/);
 const positiveCanonicalDecimal = z.string().max(150)
@@ -77,15 +76,6 @@ const workReceipt=z.strictObject({receiptId:uuid,taskId:uuid,outcome:z.string(),
 const receiptVerificationKey = z.strictObject({
   version: z.string().min(1).max(64), algorithm: z.literal('Ed25519'), publicKeyBase64: z.string().min(1).max(256),
 });
-const privateFileResponse = z.strictObject({
-  fileId: uuid, contentVersionId: uuid, filename: z.string().min(1).max(255),
-  byteLength: z.number().int().min(1).max(104_857_600), mediaType: z.string().min(1).max(255),
-  sha256: z.string().regex(/^[0-9a-f]{64}$/), state: z.literal('READY'),
-});
-const privateFileUploadStatus = z.strictObject({ uploadId: uuid, state: z.enum(['PENDING_UPLOAD','SCANNING','READY','REJECTED','EXPIRED']),
-  file: privateFileResponse.nullable() });
-const privateFileTransfer = z.strictObject({ uploadId: uuid, state: z.literal('PENDING_UPLOAD'),
-  byteLength: z.number().int().min(1).max(104_857_600), sha256: z.string().regex(/^[0-9a-f]{64}$/) });
 const submissionFileManifest = z.strictObject({ ordinal: z.number().int().nonnegative(), fileId: uuid,
   contentVersionId: uuid, filename: z.string().min(1).max(255), byteLength: z.number().int().min(1).max(104_857_600),
   mediaType: z.string().min(1).max(255), sha256: z.string().regex(/^[0-9a-f]{64}$/) });
@@ -190,12 +180,6 @@ const publicTaskHistoryPage = z.strictObject({
 });
 const jsonOutput = (value: unknown, preserveCredentialId = false) => JSON.stringify(redact(value, preserveCredentialId));
 
-function parseMarketplaceDto<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
-  const parsed = schema.safeParse(value);
-  if (!parsed.success) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL', `Marketplace returned an invalid ${label}.`);
-  return parsed.data;
-}
-
 export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfileStore; profileId: string;
   filesDirectory?: string; env?:NodeJS.ProcessEnv }): McpServer {
   const walletEnv = managedWalletEnvironment(input.profiles.home, input.env ?? process.env);
@@ -299,7 +283,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },{},true);
   register('marketplace_task_milestone_refund', 'Prepare a voluntary full direct refund of a verified paid milestone from its worker to its original buyer. This creates refundPaymentRequirementId; sign locally and relay with marketplace_payment_pay. Paid history, earned fee and milestone order remain unchanged.', {taskId:uuid,milestoneId:uuid,requestId},async args=>{
     requireAccess(profile,['payments:write']);const body={requestId:args.requestId};
-    return mutate(input.profiles,profile,api,'task-milestone-refund',String(args.milestoneId),String(args.requestId),body,
+    return mutate(input.profiles,profile,'task-milestone-refund',String(args.milestoneId),String(args.requestId),body,
       ()=>api.request(`/v1/agent/tasks/${args.taskId}/milestones/${args.milestoneId}/refund`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}));
   },{},true);
   register('marketplace_task_milestones', 'Read ordered milestones with exact approvals, immutable direct payment requirements, and verified transaction hashes. Only verified paid milestones open the next one.', {taskId:uuid},async args=>{
@@ -370,7 +354,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     const body={expectedReleaseHash:args.expectedReleaseHash};
     const immutableTerms={productId:args.productId,releaseId:args.releaseId,asset:args.asset,
       grossAtomic:args.grossAtomic,...body};
-    return mutate(input.profiles,profile,api,'product-purchase',String(args.releaseId),String(args.requestId),immutableTerms,
+    return mutate(input.profiles,profile,'product-purchase',String(args.releaseId),String(args.requestId),immutableTerms,
       ()=>api.request(`/v1/agent/releases/${args.releaseId}/purchase`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}));
   },{},true);
 
@@ -379,7 +363,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },async args=>{
     requireAccess(profile,['purchases:read','purchases:refund']);
     const body={expectedPurchaseVersion:args.expectedPurchaseVersion};
-    return mutate(input.profiles,profile,api,'product-refund',String(args.purchaseId),String(args.requestId),body,
+    return mutate(input.profiles,profile,'product-refund',String(args.purchaseId),String(args.requestId),body,
       ()=>api.request(`/v1/agent/purchases/${args.purchaseId}/refund`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}));
   },{},true);
 
@@ -400,12 +384,12 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   });
   register('marketplace_profile_update', 'Update this account’s private profile fields. bio is long-form Markdown and appears publicly only when the profile is published; handle, displayName, and capabilities remain plain fields. Controller-session mode only.', { requestId, patch: profilePatch }, async args => {
     requireSession(profile);
-    return mutate(input.profiles, profile, api, 'profile-update', profile.accountId, String(args.requestId), args.patch,
+    return mutate(input.profiles, profile, 'profile-update', profile.accountId, String(args.requestId), args.patch,
       () => api.request('/v1/agent/profile', {method:'PATCH', body:args.patch}));
   });
   register('marketplace_profile_publish', 'Publish this account’s profile for public discovery. Controller-session mode only.', { requestId }, async args => {
     requireSession(profile);
-    return mutate(input.profiles, profile, api, 'profile-publish', profile.accountId, String(args.requestId), {}, async () => {
+    return mutate(input.profiles, profile, 'profile-publish', profile.accountId, String(args.requestId), {}, async () => {
       try { return await api.request('/v1/agent/profile/publish', {method:'POST', body:{}}); }
       catch (error) {
         if (!(error instanceof MarketplaceApiError) || error.httpStatus !== 409) throw error;
@@ -417,7 +401,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   }, {destructive:true});
   register('marketplace_profile_unpublish', 'Unpublish this account’s profile from public discovery. Controller-session mode only.', { requestId }, async args => {
     requireSession(profile);
-    return mutate(input.profiles, profile, api, 'profile-unpublish', profile.accountId, String(args.requestId), {}, async () => {
+    return mutate(input.profiles, profile, 'profile-unpublish', profile.accountId, String(args.requestId), {}, async () => {
       try { return await api.request('/v1/agent/profile/unpublish', {method:'POST', body:{}}); }
       catch (error) {
         if (!(error instanceof MarketplaceApiError) || error.httpStatus !== 409) throw error;
@@ -506,9 +490,11 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     requireAccess(profile,fileIds.length>0?['products:write','files:write']:['products:write']);
     const body={title:args.title,summaryMarkdown:args.summaryMarkdown,paidMarkdown:args.paidMarkdown??null,
       licenseText:args.licenseText,asset:args.asset,priceAtomic:args.priceAtomic,fileIds};
-    return mutate(input.profiles,profile,api,'product-draft-create',profile.accountId,String(args.requestId),body,
-      ()=>api.request('/v1/agent/products',{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}),
-      undefined,undefined,value=>validateProductMutation(value),['productId','draftVersion','published','releaseId','releaseHash','publication']);
+    return mutate(input.profiles,profile,'product-draft-create',profile.accountId,String(args.requestId),body,
+      ()=>api.request('/v1/agent/products',{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}), {
+        validateResult: value=>validateProductMutation(value),
+        resultIdentityFields: ['productId','draftVersion','published','releaseId','releaseHash','publication'],
+      });
   },{destructive:true},true);
   register('marketplace_product_draft_update', 'Replace an owned Shop draft at its expected version. Provide the complete ordered fileIds list (use an empty list to remove every draft attachment) so no existing files are silently dropped. summaryMarkdown is public on release; paidMarkdown is seller-private. Upload new files explicitly with marketplace_product_file_upload. Retry uncertainty with the same requestId and exact body. Scoped credentials need products:write and files:write when fileIds is non-empty.', {
     productId:uuid,requestId,expectedVersion:z.number().int().nonnegative(),title:productMarkdown(160,1),
@@ -520,9 +506,11 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     requireAccess(profile,fileIds.length>0?['products:write','files:write']:['products:write']);
     const body={expectedVersion:args.expectedVersion,title:args.title,summaryMarkdown:args.summaryMarkdown,
       paidMarkdown:args.paidMarkdown,licenseText:args.licenseText,asset:args.asset,priceAtomic:args.priceAtomic,fileIds};
-    return mutate(input.profiles,profile,api,'product-draft-update',productId,String(args.requestId),body,
-      ()=>api.request(`/v1/agent/products/${productId}/draft`,{method:'PUT',body,headers:{'Idempotency-Key':String(args.requestId)}}),
-      undefined,undefined,value=>validateProductMutation(value,productId),['productId','draftVersion','published','releaseId','releaseHash','publication']);
+    return mutate(input.profiles,profile,'product-draft-update',productId,String(args.requestId),body,
+      ()=>api.request(`/v1/agent/products/${productId}/draft`,{method:'PUT',body,headers:{'Idempotency-Key':String(args.requestId)}}), {
+        validateResult: value=>validateProductMutation(value,productId),
+        resultIdentityFields: ['productId','draftVersion','published','releaseId','releaseHash','publication'],
+      });
   },{destructive:true},true);
 
   register('marketplace_product_publish', 'Freeze an owned immutable Shop release with quantity N and price P. Seller prepays floor(N*P*rate/10000) own-service fee before visibility: ATTO 1%, XNO 5%. Returns paymentRequirementId, or opens immediately for zero fee. Closing refunds unused fee to original payer; later seller refunds never restore sold quota or earned fee.', {
@@ -530,15 +518,18 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },async args=>{
     requireAccess(profile,['products:read','products:publish']);
     const body={expectedVersion:args.expectedVersion,confirmsDistributionRights:true,quantity:args.quantity};
-    return mutate(input.profiles,profile,api,'product-publish',String(args.productId),String(args.requestId),body,
-      ()=>api.request(`/v1/agent/products/${args.productId}/publish`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}),
-      async()=>{
-        const current=asRecord((await api.request(`/v1/agent/products/${args.productId}`,{query:{limit:1}})).json);
-        const draft=asRecord(current.draft);
-        if(draft.version!==args.expectedVersion) throw new ProfileError('PRODUCT_VERSION_CONFLICT','Read the current draft version.');
-        enforceProductPublishCeiling(profile,String(draft.asset),String(BigInt(String(draft.priceAtomic))*BigInt(Number(args.quantity))));
-        if(Array.isArray(draft.fileIds)&&draft.fileIds.length) requireAccess(profile,['products:write','files:write']);
-      },undefined,value=>validateProductMutation(value,String(args.productId)),['productId','draftVersion','published','releaseId','releaseHash','publication']);
+    return mutate(input.profiles,profile,'product-publish',String(args.productId),String(args.requestId),body,
+      ()=>api.request(`/v1/agent/products/${args.productId}/publish`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}), {
+        prepare: async()=>{
+          const current=asRecord((await api.request(`/v1/agent/products/${args.productId}`,{query:{limit:1}})).json);
+          const draft=asRecord(current.draft);
+          if(draft.version!==args.expectedVersion) throw new ProfileError('PRODUCT_VERSION_CONFLICT','Read the current draft version.');
+          enforceProductPublishCeiling(profile,String(draft.asset),String(BigInt(String(draft.priceAtomic))*BigInt(Number(args.quantity))));
+          if(Array.isArray(draft.fileIds)&&draft.fileIds.length) requireAccess(profile,['products:write','files:write']);
+        },
+        validateResult: value=>validateProductMutation(value,String(args.productId)),
+        resultIdentityFields: ['productId','draftVersion','published','releaseId','releaseHash','publication'],
+      });
   },{},true);
 
   register('marketplace_product_unpublish', 'Stop new purchases by unpublishing an owned Shop product. This preserves the immutable release and any existing buyer access. Requires the products:publish scope for scoped API keys; retry uncertainty with the same requestId.', {
@@ -546,9 +537,11 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },async args=>{
     requireAccess(profile,['products:publish']);
     const productId=String(args.productId),body={expectedVersion:Number(args.expectedVersion),publicationId:args.publicationId};
-    return mutate(input.profiles,profile,api,'product-unpublish',productId,String(args.requestId),body,
-      ()=>api.request(`/v1/agent/products/${productId}/unpublish`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}),
-      undefined,undefined,value=>validateProductMutation(value,productId),['productId','draftVersion','published','releaseId','releaseHash','publication']);
+    return mutate(input.profiles,profile,'product-unpublish',productId,String(args.requestId),body,
+      ()=>api.request(`/v1/agent/products/${productId}/unpublish`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}), {
+        validateResult: value=>validateProductMutation(value,productId),
+        resultIdentityFields: ['productId','draftVersion','published','releaseId','releaseHash','publication'],
+      });
   },{destructive:true},true);
 
   register('marketplace_tasks_list', 'List this account’s private tasks. Requires a controller session or tasks:read.', {}, async () => {
@@ -561,13 +554,13 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     requestId, draft,
   }, async args => {
     requireAccess(profile, ['tasks:draft:write']);
-    return mutate(input.profiles, profile, api, 'task-draft-create', 'account', String(args.requestId), args.draft,
+    return mutate(input.profiles, profile, 'task-draft-create', 'account', String(args.requestId), args.draft,
       () => api.request('/v1/agent/tasks', {method:'POST', body:args.draft, headers:{'Idempotency-Key':String(args.requestId)}}));
   }, {destructive:true});
   register('marketplace_task_draft_update', 'Edit an owned private draft using its expected version. description is task context, deliverable is what the worker must submit, and acceptanceTerms are the buyer’s separate acceptance criteria. All three support CommonMark and GitHub Flavored Markdown in the website; raw HTML is skipped and images are not loaded.', { taskId:uuid, requestId, expectedVersion:z.number().int().nonnegative(), draft }, async args => {
     requireAccess(profile, ['tasks:draft:write']);
     const body={expectedVersion:args.expectedVersion,draft:args.draft};
-    return mutate(input.profiles, profile, api, 'task-draft-update', String(args.taskId), String(args.requestId), body, async () => {
+    return mutate(input.profiles, profile, 'task-draft-update', String(args.taskId), String(args.requestId), body, async () => {
       try { return await api.request(`/v1/agent/tasks/${args.taskId}`, {method:'PUT', body}); }
       catch (error) {
         if (!(error instanceof MarketplaceApiError) || error.httpStatus !== 409) throw error;
@@ -584,14 +577,14 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     requireAccess(profile, ['tasks:publish']);
     const task = asRecord((await api.request(`/v1/agent/tasks/${args.taskId}`)).json);
     enforcePublishCeiling(profile, String(task.asset), String(task.grossAtomic));
-    return mutate(input.profiles, profile, api, 'task-publish', String(args.taskId), String(args.requestId), {expectedVersion:args.expectedVersion},
+    return mutate(input.profiles, profile, 'task-publish', String(args.taskId), String(args.requestId), {expectedVersion:args.expectedVersion},
       () => api.request(`/v1/agent/tasks/${args.taskId}/publish`, {method:'POST', body:{expectedVersion:args.expectedVersion}, headers:{'Idempotency-Key':String(args.requestId)}}));
   }, {destructive:true});
   register('marketplace_task_cancel', 'Cancel an owned draft or pre-hire open task. Only a controller session can safely close and refund it.', {
     taskId:uuid, requestId, expectedVersion:z.number().int().nonnegative(),
   }, async args => {
     requireSession(profile);
-    return mutate(input.profiles, profile, api, 'task-cancel', String(args.taskId), String(args.requestId), {expectedVersion:args.expectedVersion},
+    return mutate(input.profiles, profile, 'task-cancel', String(args.taskId), String(args.requestId), {expectedVersion:args.expectedVersion},
       () => api.request(`/v1/agent/tasks/${args.taskId}/cancel`, {method:'POST', body:{expectedVersion:args.expectedVersion}}));
   }, {destructive:true});
 
@@ -600,11 +593,14 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },async args=>{
     requireAccess(profile,['applications:apply']);
     const body={expectedTaskVersion:args.expectedTaskVersion,proposal:args.proposal};
-    return mutate(input.profiles,profile,api,'application-create',String(args.taskId),String(args.requestId),body,
-      ()=>api.request(`/v1/agent/tasks/${args.taskId}/applications`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}),undefined,undefined,value=>{
-        const parsed=z.object({applicationId:uuid,taskId:uuid,state:z.string(),version:z.number().int().nonnegative()}).safeParse(value);
-        if(!parsed.success || parsed.data.taskId!==args.taskId) throw new MarketplaceApiError('APPLICATION_BINDING','Marketplace application acknowledgement differs from the requested task.');
-      },['applicationId','taskId','state','version']);
+    return mutate(input.profiles,profile,'application-create',String(args.taskId),String(args.requestId),body,
+      ()=>api.request(`/v1/agent/tasks/${args.taskId}/applications`,{method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}), {
+        validateResult: value=>{
+          const parsed=z.object({applicationId:uuid,taskId:uuid,state:z.string(),version:z.number().int().nonnegative()}).safeParse(value);
+          if(!parsed.success || parsed.data.taskId!==args.taskId) throw new MarketplaceApiError('APPLICATION_BINDING','Marketplace application acknowledgement differs from the requested task.');
+        },
+        resultIdentityFields: ['applicationId','taskId','state','version'],
+      });
   },{},true);
 
   register('marketplace_applications_list', 'List this account’s applications. Scoped credentials require applications:read.', {}, async () => {
@@ -639,20 +635,23 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   },async args=>{
     requireAccess(profile,['activity:write']);
     const applicationId=String(args.applicationId),body={text:String(args.text)};
-    return mutate(input.profiles,profile,api,'application-message-add',applicationId,String(args.requestId),body,
+    return mutate(input.profiles,profile,'application-message-add',applicationId,String(args.requestId),body,
       async()=>{
         const response=await api.request(`/v1/agent/applications/${applicationId}/messages`,
           {method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)},allowStatus:[200,201]});
         return {...response,json:applicationMessageResult(response.json,applicationId,profile.agentId,body.text)};
-      },undefined,JSON.stringify({kind:'APPLICATION_MESSAGE_REQUEST',body}),
-      (value,source)=>{
-        if(source==='saved') validateSavedApplicationMessage(value,applicationId,profile.agentId);
-      },['cursor']);
+      }, {
+        pendingResultIdentity: JSON.stringify({kind:'APPLICATION_MESSAGE_REQUEST',body}),
+        validateResult: (value,source)=>{
+          if(source==='saved') validateSavedApplicationMessage(value,applicationId,profile.agentId);
+        },
+        resultIdentityFields: ['cursor'],
+      });
   },{destructive:true},true);
   register('marketplace_application_withdraw', 'Withdraw this account’s free pending application.', {applicationId:uuid, requestId, expectedVersion:z.number().int().nonnegative()}, async args => {
     requireAccess(profile, ['applications:withdraw']);
     const body={expectedVersion:args.expectedVersion};
-    return mutate(input.profiles, profile, api, 'application-withdraw', String(args.applicationId), String(args.requestId), body,
+    return mutate(input.profiles, profile, 'application-withdraw', String(args.applicationId), String(args.requestId), body,
       () => api.request(`/v1/agent/applications/${args.applicationId}/withdraw`, {method:'POST',body}));
   }, {destructive:true});
   register('marketplace_application_hire', 'Hire one pending candidate for an owned open task. Use the current task version from marketplace_task_get; it is independent of application.version. Controller-session mode only.', {
@@ -662,7 +661,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   }, async args => {
     requireSession(profile);
     const body={expectedVersion:args.expectedVersion,applicationId:args.applicationId};
-    return mutate(input.profiles, profile, api, 'application-hire', String(args.taskId), String(args.requestId), body,
+    return mutate(input.profiles, profile, 'application-hire', String(args.taskId), String(args.requestId), body,
       () => api.request(`/v1/agent/tasks/${args.taskId}/hire`, {method:'POST',body}));
   }, {destructive:true});
   register('marketplace_engagements_list', 'List this account’s contracts across buyer and worker roles, including completed work. Scoped credentials require tasks:read. Continue with the returned opaque nextCursor.', {
@@ -687,7 +686,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     requireAccess(profile, fileIds.length>0?['submissions:write','files:write']:['submissions:write']);
     const body = {expectedEngagementVersion:args.expectedEngagementVersion,text:args.text,urls:args.urls,
       ...(fileIds.length>0?{fileIds}:{})};
-    return mutate(input.profiles, profile, api, 'submission-add', String(args.taskId), String(args.requestId), body,
+    return mutate(input.profiles, profile, 'submission-add', String(args.taskId), String(args.requestId), body,
       () => api.request(`/v1/agent/tasks/${args.taskId}/submissions`, {method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}));
   }, {destructive:true});
 
@@ -696,15 +695,8 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     requestId,
   }, async args => {
     requireAccess(profile,['files:write']);
-    const source=readLocalSource(input.filesDirectory,String(args.sourcePath));
-    const requestIdValue=String(args.requestId);
-    const uploadBody={filename:source.filename,byteLength:source.byteLength,declaredMediaType:null,sha256:source.sha256};
-    const uploadTarget=JSON.stringify({marketplaceOrigin:profile.origin,accountId:profile.accountId});
-    const intent=await mutate(input.profiles,profile,api,'submission-file-upload',uploadTarget,requestIdValue,uploadBody,
-      ()=>api.request('/v1/agent/files/uploads',{method:'POST',body:uploadBody,headers:{'Idempotency-Key':requestIdValue}}),
-      undefined,undefined,validateUploadIntent,['uploadId','state']);
-    const uploadId=extractUploadId(intent);
-    const ready=await transferAndFinalizePrivateFile(api,uploadId,requestIdValue,source.filename,source.bytes,source.byteLength,source.sha256);
+    const ready = await uploadPrivateFile(input.profiles, profile, api, 'submission-file-upload',
+      input.filesDirectory, String(args.sourcePath), String(args.requestId));
     return {file:ready,attached:false,nextStep:'Pass file.fileId explicitly in marketplace_submission_add.fileIds.'};
   }, {destructive:true}, true);
 
@@ -730,15 +722,8 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     sourcePath:z.string().min(1).max(4096).describe('Explicit path relative to --files-dir, or an absolute path beneath that directory.'),requestId,
   },async args=>{
     requireAccess(profile,['files:write']);
-    const source=readLocalSource(input.filesDirectory,String(args.sourcePath));
-    const requestIdValue=String(args.requestId);
-    const uploadBody={filename:source.filename,byteLength:source.byteLength,declaredMediaType:null,sha256:source.sha256};
-    const uploadTarget=JSON.stringify({marketplaceOrigin:profile.origin,accountId:profile.accountId});
-    const intent=await mutate(input.profiles,profile,api,'product-file-upload',uploadTarget,requestIdValue,uploadBody,
-      ()=>api.request('/v1/agent/files/uploads',{method:'POST',body:uploadBody,headers:{'Idempotency-Key':requestIdValue}}),
-      undefined,undefined,validateUploadIntent,['uploadId','state']);
-    const uploadId=extractUploadId(intent);
-    const ready=await transferAndFinalizePrivateFile(api,uploadId,requestIdValue,source.filename,source.bytes,source.byteLength,source.sha256);
+    const ready = await uploadPrivateFile(input.profiles, profile, api, 'product-file-upload',
+      input.filesDirectory, String(args.sourcePath), String(args.requestId));
     return {file:ready,attached:false,nextStep:'Pass file.fileId explicitly in marketplace_product_draft_create.fileIds or marketplace_product_draft_update.fileIds.'};
   },{destructive:true},true);
   register('marketplace_product_file_download', 'Download a seller-owned immutable Shop file from the exact release sequence and file ID. Marketplace checks account ownership; a file ID alone grants no authority. The verified bytes are atomically written to a new --files-dir path, and existing files are never overwritten. Scoped credentials require products:read and files:read.', {
@@ -802,9 +787,11 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
         throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace returned an invalid activity cursor.');
       }
     };
-    return mutate(input.profiles, profile, api, 'activity-add', String(args.taskId), String(args.requestId), body,
-      () => api.request(`/v1/agent/tasks/${args.taskId}/activity`, {method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}),
-      undefined, undefined, validateActivityResult, ['cursor']);
+    return mutate(input.profiles, profile, 'activity-add', String(args.taskId), String(args.requestId), body,
+      () => api.request(`/v1/agent/tasks/${args.taskId}/activity`, {method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}), {
+        validateResult: validateActivityResult,
+        resultIdentityFields: ['cursor'],
+      });
   }, {destructive:true});
   register('marketplace_activity_list', 'Read the participant activity feed. Scoped credentials require activity:read.', {
     taskId:uuid, after:z.number().int().nonnegative().default(0), limit:z.number().int().min(1).max(100).default(50),
@@ -815,7 +802,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     taskId:uuid, requestId, expectedEngagementVersion:z.number().int().nonnegative(), submissionId:uuid,
   }, async args => {
     requireSession(profile); const body={expectedEngagementVersion:args.expectedEngagementVersion,submissionId:args.submissionId};
-    return mutate(input.profiles, profile, api, 'work-accept', String(args.taskId), String(args.requestId), body,
+    return mutate(input.profiles, profile, 'work-accept', String(args.taskId), String(args.requestId), body,
       () => api.request(`/v1/agent/tasks/${args.taskId}/accept`, {method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}));
   }, {destructive:true});
   register('marketplace_receipt_get', 'Export the exact immutable signed work receipt for a completed participant task, including its public verification signature.', {taskId:uuid}, async args => {
@@ -837,7 +824,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     evidenceUrls:z.array(z.string().url().startsWith('https://')).max(5).default([]),
   }, async args => {
     requireSession(profile); const body={expectedEngagementVersion:args.expectedEngagementVersion,reason:args.reason,statement:args.statement,evidenceUrls:args.evidenceUrls};
-    return mutate(input.profiles, profile, api, 'dispute-open', String(args.taskId), String(args.requestId), body,
+    return mutate(input.profiles, profile, 'dispute-open', String(args.taskId), String(args.requestId), body,
       () => api.request(`/v1/agent/tasks/${args.taskId}/disputes`, {method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}));
   }, {destructive:true});
   register('marketplace_dispute_respond', 'Append a private participant-authored Markdown dispute statement; evidenceUrls remains a structured HTTPS list. Session-authorized API only.', {
@@ -846,7 +833,7 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
     evidenceUrls:z.array(z.string().url().startsWith('https://')).max(5).default([]),
   }, async args => {
     requireSession(profile); const body={expectedDisputeVersion:args.expectedDisputeVersion,statement:args.statement,evidenceUrls:args.evidenceUrls};
-    return mutate(input.profiles, profile, api, 'dispute-respond', String(args.disputeId), String(args.requestId), body,
+    return mutate(input.profiles, profile, 'dispute-respond', String(args.disputeId), String(args.requestId), body,
       () => api.request(`/v1/agent/disputes/${args.disputeId}/responses`, {method:'POST',body,headers:{'Idempotency-Key':String(args.requestId)}}));
   }, {destructive:true});
 
@@ -921,108 +908,11 @@ async function credentialGrantForRotation(api:MarketplaceApiClient,apiKeyId:stri
     purchaseXnoLimit:target.purchaseXnoLimit});
 }
 
-interface MutationRecoveryIdentity { kind:'MARKETPLACE_MUTATION_RECOVERY'; pendingResultIdentity?:string }
-function encodeMutationRecovery(pendingResultIdentity?:string):string {
-  return JSON.stringify({kind:'MARKETPLACE_MUTATION_RECOVERY',...(pendingResultIdentity!==undefined?{pendingResultIdentity}:{})});
-}
-function decodeMutationRecovery(value:string|null):MutationRecoveryIdentity {
-  try {
-    const parsed=asRecord(value===null?{}:JSON.parse(value));
-    if(parsed.kind!=='MARKETPLACE_MUTATION_RECOVERY' || parsed.command!==undefined
-      || (parsed.pendingResultIdentity!==undefined && typeof parsed.pendingResultIdentity!=='string')) throw new Error('invalid');
-    return parsed as unknown as MutationRecoveryIdentity;
-  } catch { throw new ProfileError('RECOVERY_REQUIRED','The saved Marketplace request has an invalid recovery record.'); }
-}
-
-function validateUploadIntent(value:unknown):void {
-  const result=asRecord(value);
-  if(typeof result.uploadId!=='string'||!uuid.safeParse(result.uploadId).success
-    ||!['PENDING_UPLOAD','SCANNING','READY'].includes(String(result.state))) {
-    throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace returned an invalid private upload intent.');
-  }
-}
-
 function validateProductMutation(value:unknown,expectedProductId?:string):void {
   const result=productMutationResponse.safeParse(value);
   if(!result.success || (expectedProductId!==undefined&&result.data.productId!==expectedProductId)) {
     throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace returned a product mutation result for a different product or outside the current contract.');
   }
-}
-
-function extractUploadId(value:unknown):string {
-  const result=asRecord(value);
-  if(typeof result.uploadId==='string'&&uuid.safeParse(result.uploadId).success) return result.uploadId;
-  if(result.recovered===true&&typeof result.resultIdentity==='string') {
-    try {
-      const identity=asRecord(JSON.parse(result.resultIdentity));
-      if(typeof identity.uploadId==='string'&&uuid.safeParse(identity.uploadId).success) return identity.uploadId;
-    } catch { /* The local mutation journal is not a valid upload recovery record. */ }
-  }
-  throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','The saved private upload intent could not be recovered; keep the original requestId.');
-}
-
-async function transferAndFinalizePrivateFile(api:MarketplaceApiClient,uploadId:string,requestIdValue:string,
-  filename:string,bytes:Buffer,byteLength:number,sha256:string):Promise<z.infer<typeof privateFileResponse>> {
-  const deadline=Date.now()+15*60*1000;
-  const status=parseMarketplaceDto(privateFileUploadStatus,
-    (await api.request(`/v1/agent/files/uploads/${uploadId}`)).json,'private upload status');
-  if(status.uploadId!==uploadId) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace returned status for a different private upload.');
-  if(status.state==='READY'&&status.file) return verifyReadyPrivateFile(status.file,filename,byteLength,sha256);
-  if(status.state==='SCANNING') {
-    // A previous finalize may have failed while scanning was transiently unavailable.
-    // Replay the original saved action key before polling; never mint another intent.
-    const resumed=parseMarketplaceDto(privateFileUploadStatus,
-      (await api.request(`/v1/agent/files/uploads/${uploadId}/finalize`,{method:'POST',headers:{'Idempotency-Key':requestIdValue}})).json,
-      'private upload finalization recovery');
-    if(resumed.uploadId!==uploadId) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace finalized a different private upload.');
-    if(resumed.state==='READY'&&resumed.file) return verifyReadyPrivateFile(resumed.file,filename,byteLength,sha256);
-    if(resumed.state==='SCANNING') return await waitForPrivateFileReady(api,uploadId,deadline,filename,byteLength,sha256);
-    throw new MarketplaceApiError('FILE_NOT_READY',`Marketplace upload is ${resumed.state.toLowerCase()} and cannot be attached.`,409);
-  }
-  if(status.state!=='PENDING_UPLOAD') throw new MarketplaceApiError('FILE_NOT_READY',`Marketplace upload is ${status.state.toLowerCase()} and cannot be attached.`,409);
-
-  const blob=new Blob([new Uint8Array(bytes).buffer as ArrayBuffer],{type:'application/octet-stream'});
-  try {
-    const response=await api.requestStream(`/v1/agent/files/uploads/${uploadId}/content`,{
-      method:'PUT',headers:{'content-type':'application/octet-stream'},body:blob,timeoutMs:15*60*1000,allowStatus:[200],
-    });
-    const transferred=parseMarketplaceDto(privateFileTransfer,await response.json(),'private file transfer');
-    if(transferred.uploadId!==uploadId||transferred.byteLength!==byteLength||transferred.sha256!==sha256) {
-      throw new MarketplaceApiError('FILE_INTEGRITY','Marketplace returned transfer metadata different from the selected bytes.');
-    }
-  } catch(error) {
-    if(!(error instanceof MarketplaceApiError)||error.httpStatus!==409) throw error;
-  }
-
-  const finalized=parseMarketplaceDto(privateFileUploadStatus,
-    (await api.request(`/v1/agent/files/uploads/${uploadId}/finalize`,{method:'POST',headers:{'Idempotency-Key':requestIdValue}})).json,
-    'private upload finalization');
-  if(finalized.uploadId!==uploadId) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace finalized a different private upload.');
-  if(finalized.state==='READY'&&finalized.file) return verifyReadyPrivateFile(finalized.file,filename,byteLength,sha256);
-  if(finalized.state==='SCANNING') return await waitForPrivateFileReady(api,uploadId,deadline,filename,byteLength,sha256);
-  throw new MarketplaceApiError('FILE_NOT_READY',`Marketplace upload is ${finalized.state.toLowerCase()} and cannot be attached.`,409);
-}
-
-async function waitForPrivateFileReady(api:MarketplaceApiClient,uploadId:string,deadline:number,filename:string,byteLength:number,
-  sha256:string):Promise<z.infer<typeof privateFileResponse>> {
-  const waitUntil=Math.min(deadline,Date.now()+120_000);
-  while(Date.now()<waitUntil) {
-    await new Promise(resolve=>setTimeout(resolve,500));
-    const status=parseMarketplaceDto(privateFileUploadStatus,
-      (await api.request(`/v1/agent/files/uploads/${uploadId}`)).json,'private upload status');
-    if(status.uploadId!==uploadId) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace returned status for a different private upload.');
-    if(status.state==='READY'&&status.file) return verifyReadyPrivateFile(status.file,filename,byteLength,sha256);
-    if(status.state!=='SCANNING') throw new MarketplaceApiError('FILE_NOT_READY',`Marketplace upload is ${status.state.toLowerCase()} and cannot be attached.`,409);
-  }
-  throw new MarketplaceApiError('FILE_SCAN_PENDING','Marketplace is still scanning this upload. Retry marketplace_submission_file_upload with the same requestId and unchanged source bytes.');
-}
-
-function verifyReadyPrivateFile(file:z.infer<typeof privateFileResponse>,filename:string,byteLength:number,
-  sha256:string):z.infer<typeof privateFileResponse> {
-  if(file.filename!==filename||file.byteLength!==byteLength||file.sha256!==sha256) {
-    throw new MarketplaceApiError('FILE_INTEGRITY','Marketplace returned READY file metadata different from the explicitly selected source.');
-  }
-  return file;
 }
 
 function findExactSubmission(value:unknown,taskId:string,version:number):{submissionId:string;version:number;files:ImmutableFileManifestEntry[]} {
@@ -1049,31 +939,6 @@ function findExactSubmission(value:unknown,taskId:string,version:number):{submis
     throw new MarketplaceApiError('MARKETPLACE_PROTOCOL','Marketplace omitted the immutable submission manifest hash.');
   }
   return {submissionId:row.submissionId,version,files:parsed.data};
-}
-
-async function mutate(store: MarketplaceProfileStore, profile: MarketplaceProfile, api:MarketplaceApiClient, operation: string, target: string, id: string,
-  payload: unknown, send: () => Promise<ApiResponse>, prepare?: () => Promise<void>, pendingResultIdentity?:string,
-  validateResult?:(value:unknown, source:'response'|'saved')=>void, resultIdentityFields:string[]=[]): Promise<unknown> {
-  const hash=mutationHash({operation,target,payload,accountId:profile.accountId});
-  const identity={profileId:profile.id,requestId:id,operation,target,requestHash:hash};
-  if (!store.getMutation(identity)) await prepare?.();
-  const previous=store.beginMutation(identity,encodeMutationRecovery(pendingResultIdentity));
-  if (previous.state==='COMPLETE') {
-    if (validateResult) validateResult(previous.resultIdentity===null?null:JSON.parse(previous.resultIdentity),'saved');
-    return {requestId:id,recovered:true,resultIdentity:previous.resultIdentity};
-  }
-  const recovery=decodeMutationRecovery(previous.resultIdentity);
-  if (pendingResultIdentity!==undefined && recovery.pendingResultIdentity!==pendingResultIdentity) {
-    throw new ProfileError('IDEMPOTENCY_CONFLICT','This pending request is bound to different application content.');
-  }
-  const response=await send();
-  const result=response.json;
-  validateResult?.(result,'response');
-  const record=asRecord(result);
-  const safeIdentity=Object.fromEntries(Object.entries(record).filter(([key]) => /(?:id|state|version|replayed)$/i.test(key)
-    || resultIdentityFields.includes(key)));
-  store.completeMutation(profile.id,id,hash,JSON.stringify(safeIdentity));
-  return result;
 }
 
 function requireScope(profile: MarketplaceProfile, scope: string): void {

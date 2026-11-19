@@ -75,18 +75,40 @@ export function relayEvidenceBinding(terms: RelayTerms, transactionHash: string)
   return createHash('sha256').update(['Marketplace payment evidence v1', terms.paymentId, terms.versionHash, terms.termsHash,
     terms.ownerAccountId, terms.network, terms.senderAddress, terms.recipientAddress, terms.amountAtomic, transactionHash.toLowerCase()].join('\n')).digest('hex');
 }
-export function validateRelayProof(offer: RelayOffer, transactionHash: string, audience: string, proof: RelayProof, allowExpired = false, now = Date.now()): void {
-  const parsed = z.strictObject({ challengeId: z.string().uuid(), message: z.string().min(1).max(4096), signature: z.string().regex(/^[a-fA-F0-9]{128}$/) }).safeParse(proof);
+const relayChallenge = z.strictObject({
+  challengeId: z.string().uuid(),
+  message: z.string().min(1).max(4096),
+  signature: z.string().regex(/^[a-fA-F0-9]{128}$/).optional(),
+});
+const signedProof = relayChallenge.required();
+
+/** Check the unsigned challenge before either wallet opens its signing key. */
+export function validateRelayChallenge(terms: RelayTerms, transactionHash: string, audience: string, challenge: unknown, now = Date.now()) {
+  const parsed = relayChallenge.safeParse(challenge);
   if (!parsed.success) invalid('Invalid payment proof.');
-  const lines = proof.message.split('\n'), p = offer.terms;
-  if (lines.length !== 10 || /[\r\0]/.test(proof.message) || lines[0] !== `${p.asset === 'ATTO' ? '' : 'Nano '}Marketplace Agent Controller Proof v1`
-    || lines[1] !== `Audience: ${audience}` || lines[2] !== `Network: ${p.asset === 'ATTO' ? 'live' : p.network}`
-    || lines[3] !== `Address: ${p.senderAddress}` || lines[4] !== 'Purpose: payment evidence' || lines[5] !== `Request ID: ${proof.challengeId}`
-    || lines[6] !== `Binding Hash: ${relayEvidenceBinding(p, transactionHash)}` || !/^Nonce: [a-f0-9]{64}$/.test(lines[7]!)
+  return validateChallengeFrame(terms, transactionHash, audience, parsed.data, false, now);
+}
+
+export function validateRelayProof(offer: RelayOffer, transactionHash: string, audience: string, proof: RelayProof, allowExpired = false, now = Date.now()): void {
+  const parsed = signedProof.safeParse(proof);
+  if (!parsed.success) invalid('Invalid payment proof.');
+  validateChallengeFrame(offer.terms, transactionHash, audience, parsed.data, allowExpired, now);
+}
+
+function validateChallengeFrame(terms: RelayTerms, transactionHash: string, audience: string,
+  challenge: Pick<RelayProof, 'challengeId' | 'message'>, allowExpired: boolean, now: number) {
+  const lines = challenge.message.split('\n');
+  if (lines.length !== 10 || /[\r\0]/.test(challenge.message) || lines[0] !== `${terms.asset === 'ATTO' ? '' : 'Nano '}Marketplace Agent Controller Proof v1`
+    || lines[1] !== `Audience: ${audience}` || lines[2] !== `Network: ${terms.asset === 'ATTO' ? 'live' : terms.network}`
+    || lines[3] !== `Address: ${terms.senderAddress}` || lines[4] !== 'Purpose: payment evidence' || lines[5] !== `Request ID: ${challenge.challengeId}`
+    || lines[6] !== `Binding Hash: ${relayEvidenceBinding(terms, transactionHash)}` || !/^Nonce: [a-f0-9]{64}$/.test(lines[7]!)
     || !lines[8]!.startsWith('Issued At: ') || !lines[9]!.startsWith('Expiration Time: ')) invalid('Payment proof differs from the original candidate or audience.');
-  const issued = Date.parse(lines[8]!.slice(11)), expires = Date.parse(lines[9]!.slice(17));
+  const issuedAt = lines[8]!.slice('Issued At: '.length);
+  const expiresAt = lines[9]!.slice('Expiration Time: '.length);
+  const issued = Date.parse(issuedAt), expires = Date.parse(expiresAt);
   if (!Number.isSafeInteger(issued) || !Number.isSafeInteger(expires) || expires <= issued || expires - issued > 300_000
     || (!allowExpired && (issued > now + 30_000 || expires <= now))) invalid('Payment proof expired or has invalid timing.');
+  return { issuedAt, expiresAt };
 }
 export function relayPaymentPayload(offer: RelayOffer, requestId: string, payload: Record<string, unknown>, proof: RelayProof): string {
   const extensions = object(offer.raw.extensions), identifier = object(extensions['payment-identifier']), binding = object(extensions[MARKETPLACE_BINDING]);

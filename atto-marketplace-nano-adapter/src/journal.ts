@@ -156,15 +156,16 @@ export class NanoJournal {
             if (prior) {
                 const oldTerms = parseJsonObject(prior.requestJson), nextTerms = parseJsonObject(input.requestJson);
                 const relay = oldTerms.relay as RelayRequest | undefined;
-                if (relay && prior.state === 'PREPARING') {
+                if (relay !== undefined && prior.state === 'PREPARING') {
                     this.requireUnsigned(prior);
                     if (this.ownerAlive(prior.owner)) fail('PAYMENT_IN_PROGRESS');
                     if (this.relayHeader(prior.id)) fail('JOURNAL_CONFLICT');
                     for (const key of ['id','kind','uniqueId','source','network','amount','destination'] as const) {
                         if (prior[key] !== input[key]) fail('HANDLE_REUSE');
                     }
-                    const nextRelay = nextTerms.relay as RelayRequest;
-                    if (relay.paymentRequired !== nextRelay?.paymentRequired) validateRelayOfferRefresh(relay, nextRelay);
+                    const nextRelay = nextTerms.relay as RelayRequest | undefined;
+                    if (nextRelay === undefined) fail('HANDLE_REUSE');
+                    if (relay.paymentRequired !== nextRelay.paymentRequired) validateRelayOfferRefresh(relay, nextRelay);
                     else this.requireTerms(prior, input);
                     if (sha256(prior.requestJson) !== prior.digest || sha256(input.requestJson) !== input.digest) fail('JOURNAL_CONFLICT');
                     this.db.prepare(`UPDATE operations SET owner=?,requestJson=?,digest=? WHERE id=? AND state='PREPARING' AND blockHash IS NULL`).run(this.token,input.requestJson,input.digest,input.id);
@@ -178,11 +179,11 @@ export class NanoJournal {
                     fail('PAYMENT_IN_PROGRESS');
                 this.db.prepare(`DELETE FROM operations WHERE id=? AND state='PREPARING' AND blockHash IS NULL`).run(input.id);
             }
-            const lane = this.db.prepare(`SELECT ${columns} FROM operations WHERE source=? AND state IN ('PREPARING','PREPARED','UNKNOWN')`).get(input.source) as unknown as JournalRecord | undefined;
+            const lane = this.pendingForSource(input.source);
             if (lane?.state === 'PREPARING')
                 this.requireUnsigned(lane);
             if (lane?.state === 'PREPARING' && !this.ownerAlive(lane.owner))
-                this.db.prepare(`DELETE FROM operations WHERE source=? AND state='PREPARING' AND blockHash IS NULL`).run(input.source);
+                this.db.prepare(`DELETE FROM operations WHERE id=? AND state='PREPARING' AND blockHash IS NULL`).run(lane.id);
             else if (lane)
                 fail(lane.state === 'PREPARING' ? 'PAYMENT_IN_PROGRESS' : 'SOURCE_FENCED', 'A prior Nano operation still owns the source account lane.');
             const alias = this.db.prepare('SELECT id FROM operations WHERE uniqueId=?').get(input.uniqueId);
@@ -213,15 +214,16 @@ export class NanoJournal {
             this.db.prepare(`DELETE FROM operations WHERE id=? AND state='PREPARING' AND owner=? AND blockHash IS NULL`).run(id, this.token);
         });
     }
-    clearAbandoned(id: string): boolean {
+    clearAbandoned(expected: JournalRecord): boolean {
         return this.transaction(() => {
-            const row = this.find(id);
-            if (!row || row.state !== 'PREPARING')
+            const row = this.find(expected.id);
+            if (!row || row.state !== 'PREPARING' || row.owner !== expected.owner || row.digest !== expected.digest
+                || parseJsonObject(row.requestJson).relay !== undefined)
                 return false;
             this.requireUnsigned(row);
             if (this.ownerAlive(row.owner))
                 fail('PAYMENT_IN_PROGRESS');
-            this.db.prepare('DELETE FROM operations WHERE id=? AND blockHash IS NULL').run(id);
+            this.db.prepare('DELETE FROM operations WHERE id=? AND blockHash IS NULL').run(row.id);
             return true;
         });
     }

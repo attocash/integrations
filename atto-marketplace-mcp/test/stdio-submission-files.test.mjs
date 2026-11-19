@@ -271,6 +271,12 @@ test('stdio upload resumes SCANNING after scanner outage and process restart wit
 
     // When the MCP process restarts, retry the identical request and source path.
     client=await connect(home,'agent',filesDirectory);
+    const differentTool = await client.callTool({
+      name: 'marketplace_product_file_upload', arguments: {sourcePath: 'source.txt', requestId},
+    });
+    assert.equal(differentTool.isError, true);
+    assert.equal(JSON.parse(contentText(differentTool)).error.code, 'IDEMPOTENCY_CONFLICT');
+
     const recovered=await client.callTool({name:'marketplace_submission_file_upload',arguments:{sourcePath:'source.txt',requestId}});
 
     // Then the saved intent and original finalize key are reused, without another transfer.

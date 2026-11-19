@@ -620,6 +620,40 @@ test('a 101st receivable is received by exact hash and an exact replay publishes
     assert.equal(replay.state, 'CONFIRMED'); assert.equal(replay.index, 1);
     assert.equal(f.published.length, 1); assert.deepEqual(checked, [send.hash]);
 });
+test('receive recovers a candidate confirmed while checking a preparation for abandonment', async t => {
+    // Given a writer that owns an unsigned receive for this funding block.
+    const f = await fixture(t), send = fundingSend(f), wallet = f.open();
+    const args = { network: 'nano:dev', hash: send.hash }, id = `receive:${send.hash}`;
+    const requestJson = canonical({ ...args, amountAtomic: '10' });
+    const account = f.account;
+    const block = NanoStateBlock.signed(f.key, account.frontier, account.representative, account.balance + 10n, send.hash, work(account.frontier, true));
+    const writer = new NanoJournal(f.dir);
+    const receivableExists = t.mock.method(f.rpc, 'receivableExists', async () => false);
+    const generateOpenWork = t.mock.method(f.rpc, 'generateOpenWork');
+    const clearAbandoned = NanoJournal.prototype.clearAbandoned;
+    try {
+        writer.begin({ id, kind: 'receive', digest: sha256(requestJson), requestJson, uniqueId: id,
+            source: f.source, network: args.network, amount: '0', destination: send.hash }, now, 100n);
+        // When the writer confirms after the retry reads PREPARING, before its cleanup transaction.
+        t.mock.method(NanoJournal.prototype, 'clearAbandoned', function (row) {
+            writer.save(id, { epoch: account.epoch, previous: account.frontier, previousBalance: String(account.balance),
+                representative: account.representative, blockJson: canonical(block.toWire()), blockHash: block.hash });
+            writer.state(id, 'CONFIRMED', now);
+            return clearAbandoned.call(this, row);
+        });
+        const recovered = await wallet.call('receive', args);
+        // Then the retry returns the saved receive without checking for new funding or publishing.
+        assert.equal(recovered.state, 'CONFIRMED');
+        assert.equal(recovered.sendHash, block.hash);
+        assert.equal(recovered.amountAtomic, '10');
+        assert.equal(recovered.replayed, true);
+        assert.equal(receivableExists.mock.callCount(), 0);
+        assert.equal(generateOpenWork.mock.callCount(), 0);
+        assert.equal(f.published.length, 0);
+    } finally {
+        writer.close();
+    }
+});
 test('exact receipt availability cannot replace confirmed signed SEND, recipient and predecessor amount proof', async t => {
     const f = await fixture(t), send = fundingSend(f), wallet = f.open(); t.after(() => wallet.close());
     const original = f.blocks.get(send.hash), predecessor = f.blocks.get(send.previous);
@@ -806,28 +840,38 @@ test('external transfer and status expose immutable destination, amount and sele
 });
 
 
-test('abandoned unsigned transfer status preserves original terms when reporting READY', async t => {
+test('native status clears only its original abandoned unsigned transfer', async t => {
     const f = await fixture(t), args = transfer(f), id = `transfer:${args.requestId}`;
-    const journal = new NanoJournal(f.dir), json = canonical(args);
-    journal.db.prepare(`INSERT INTO operations(id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner) VALUES(?,?,?,?,?,?,?,?,?,?,'PREPARING',?)`)
-        .run(id, 'transfer', sha256(json), json, id, f.source, args.network, args.amountAtomic, args.destination, now, '999999999:123:dead');
-    journal.close();
-    const wallet = f.open();
-    t.after(() => wallet.close());
-    const result = await wallet.call('transfer.status', { requestId: args.requestId });
-    assert.equal(result.state, 'READY');
-    assert.equal(result.requestId, args.requestId);
-    assert.equal(result.destination, args.destination);
-    assert.equal(result.amountAtomic, args.amountAtomic);
-    assert.equal(result.index, 1);
-    assert.equal(result.sourceAddress, f.source);
-    assert.equal(result.network, args.network);
-    assert.equal(result.sendHash, null);
-    assert.equal(result.candidateState, 'ABSENT');
-    assert.equal(f.published.length, 0);
-    const after = new NanoJournal(f.dir);
-    assert.equal(after.find(id), undefined);
-    after.close();
+    const journal = new NanoJournal(f.dir);
+    try {
+        const insert = journal.db.prepare(`INSERT INTO operations(id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner) VALUES(?,?,?,?,?,?,?,?,?,?,'PREPARING',?)`);
+        const json = canonical(args);
+        insert.run(id, 'transfer', sha256(json), json, id, f.source, args.network, args.amountAtomic, args.destination, now, '999999999:123:dead');
+        const stale = journal.find(id);
+        const wallet = f.open();
+        await assert.rejects(wallet.call('payment.status', { requestId: args.requestId }), { code: 'JOURNAL_CONFLICT' });
+        assert.equal(f.pinCount, 0);
+        const result = await wallet.call('transfer.status', { requestId: args.requestId });
+        assert.equal(result.state, 'READY');
+        assert.equal(result.requestId, args.requestId);
+        assert.equal(result.destination, args.destination);
+        assert.equal(result.amountAtomic, args.amountAtomic);
+        assert.equal(result.index, 1);
+        assert.equal(result.sourceAddress, f.source);
+        assert.equal(result.network, args.network);
+        assert.equal(result.sendHash, null);
+        assert.equal(result.candidateState, 'ABSENT');
+        assert.equal(f.published.length, 0);
+        assert.equal(journal.find(id), undefined);
+
+        // A second process reserves the vacant ID and dies while another reader still holds the old row.
+        const replacement = canonical({ ...args, amountAtomic: '41' });
+        insert.run(id, 'transfer', sha256(replacement), replacement, id, f.source, args.network, '41', args.destination, now, '999999999:123:replacement');
+        assert.equal(journal.clearAbandoned(stale), false);
+        assert.equal(journal.find(id).requestJson, replacement);
+    } finally {
+        journal.close();
+    }
 });
 
 
@@ -899,6 +943,9 @@ test('x402 relay preparation and original proof survive restart without Nano pub
     const proof={challengeId:c.challengeId,message:c.message,signature:upperHex(offchainSign(f.key,c.message))};
     const authorized=await wallet.call('payment.authorize',{requestId:paymentId,proof:{challengeId:proof.challengeId,message:proof.message}});
     wallet.close();wallet=f.open(now+172800000);
+    const pinCount = f.pinCount;
+    await assert.rejects(wallet.call('transfer.status', { requestId: paymentId }), { code: 'NOT_FOUND' });
+    assert.equal(f.pinCount, pinCount);
     const recovered=await wallet.call('payment.status',{requestId:paymentId});
     // Then Market can recover the unchanged candidate while status and generic sends cannot publish or replace it.
     assert.equal(f.published.length,0);assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,authorized.paymentSignature);
@@ -953,6 +1000,11 @@ test('a killed unsigned Nano relay refreshes only its expired offer while a live
         await assert.rejects(wallet.call('payment.prepare',fresh),{code:'PAYMENT_IN_PROGRESS'});
         const still=new NanoJournal(f.dir);assert.equal(still.find(original.id).requestJson,original.requestJson);still.close();
         const exited=once(held,'exit');held.kill('SIGKILL');await exited;
+        await assert.rejects(wallet.call('transfer.status', { requestId: paymentId }), { code: 'NOT_FOUND' });
+        const unsigned = await wallet.call('payment.status', { requestId: paymentId });
+        assert.equal(unsigned.state, 'PREPARING');
+        assert.equal(unsigned.hash, null);
+        assert.equal(unsigned.paymentRequired, request.paymentRequired);
         // When the original process is proven dead, its unsigned reservation can adopt the fresh backend window.
         const recovered=await wallet.call('payment.prepare',fresh),afterJournal=new NanoJournal(f.dir),after=afterJournal.find(original.id);
         // Then identity, original reservation time and amount remain; exactly one complete native candidate is retained.
