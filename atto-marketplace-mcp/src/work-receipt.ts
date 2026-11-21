@@ -9,7 +9,7 @@ export function verifyWorkReceipt(receipt:Receipt,key:{version:string;algorithm:
     const c=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(canonical)) as Record<string,string>;
     if(!c || Array.isArray(c) || Object.keys(c).length!==Object.keys(receipt.content).length || Object.keys(c).some(k=>typeof c[k]!=='string'||c[k]!==receipt.content[k])
       || c.schema!=='marketplace-work-receipt-v3' || c.taskId!==taskId || c.receiptId!==receipt.receiptId || c.outcome!==receipt.outcome
-      || !/^[1-9][0-9]{0,64}$/.test(c.grossAtomic??'') || !(c.asset==='ATTO'?c.feeRateBasisPoints==='100':c.asset==='XNO'&&c.feeRateBasisPoints==='500')) throw invalid();
+      || !/^[1-9][0-9]{0,64}$/.test(c.grossAtomic??'') || !((c.asset==='ATTO' && (c.feeRateBasisPoints==='10' || c.feeRateBasisPoints==='100')) || (c.asset==='XNO' && c.feeRateBasisPoints==='500'))) throw invalid();
     const milestones=JSON.parse(c.milestones??'null') as Array<{state:string;amountAtomic:string;paidTransactionHash:string}>;
     if(!Array.isArray(milestones)||!milestones.length||milestones.some(m=>m.state!=='PAID'||!/^[1-9][0-9]{0,64}$/.test(m.amountAtomic)||!/^[a-f0-9]{64}$/i.test(m.paidTransactionHash))
       ||milestones.reduce((sum,m)=>sum+BigInt(m.amountAtomic),0n)!==BigInt(c.grossAtomic!)) throw invalid();

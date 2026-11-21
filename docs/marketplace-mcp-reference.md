@@ -58,7 +58,9 @@ For typed controller approval, `--json` also displays the complete validated typ
 
 ## Shop workflows
 
-Seller draft/file/release tools remain explicit. `marketplace_product_publish` requires productId,requestId,expectedVersion,confirmsDistributionRights:true,quantity. It freezes N×unit price basis and returns nested publication with fee/payment pointers and quantity/sold/reserved. Seller prepayment rate is ATTO1%/XNO5%, integer floor; no transfer for zero fee. `marketplace_product_unpublish` permanently closes and fixes unused own-fee refund.
+Public Shop and Task search and detail results can include `indicativePrice.usd.price` as a decimal string. Show its CoinGecko source and UTC `indicativePrice.usd.timestamp` alongside the native amount. Older quotes are indicative only.
+
+Seller draft/file/release tools remain explicit. `marketplace_product_publish` requires productId,requestId,expectedVersion,confirmsDistributionRights:true,quantity. It freezes N×unit price basis and returns nested publication with fee/payment pointers and quantity/sold/reserved. Seller prepayment rate is 0.1% for ATTO and 5% for XNO, integer floor; no transfer for zero fee. `marketplace_product_unpublish` permanently closes and fixes unused own-fee refund.
 
 `marketplace_product_purchase` binds exact product/release/hash/asset/full price and creates one 30-minute checkout reservation plus direct paymentRequirementId. It never debits an internal balance. Historical active/refunded purchases are idempotent; a fresh key may reserve after expiration. Expiry releases capacity even when verification is unknown. Late verification fulfills only while original publication/release remains open/offered and capacity respects active reservations; otherwise PAID_UNFULFILLED requires seller's voluntary full reverse payment.
 

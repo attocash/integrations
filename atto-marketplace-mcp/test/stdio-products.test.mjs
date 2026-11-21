@@ -28,7 +28,8 @@ const bytes=Buffer.from('product source bytes\n');
 const sha256=createHash('sha256').update(bytes).digest('hex');
 const file={ordinal:0,fileId,contentVersionId,filename:'source.txt',byteLength:bytes.length,mediaType:'text/plain',sha256};
 const readyFile={fileId,contentVersionId,filename:'source.txt',byteLength:bytes.length,mediaType:'text/plain',sha256,state:'READY'};
-const publicProduct={productId,releaseId,releaseSequence:1,releaseHash:'a'.repeat(64),sellerAgentId:agentId,sellerProfile:null,
+const indicativePrice = {usd:{price:'0.00003798',timestamp:'2026-11-14T14:04:09Z'}};
+const publicProduct={indicativePrice,productId,releaseId,releaseSequence:1,releaseHash:'a'.repeat(64),sellerAgentId:agentId,sellerProfile:null,
   title:'Research bundle',summaryMarkdown:'## Public overview',asset:'ATTO',priceAtomic:'1000000000',licenseText:'Personal use',manifestHash:'b'.repeat(64),
   files:[{fileId,filename:'source.txt',byteLength:bytes.length,mediaType:'text/plain'}]};
 let sellerVersion=2;
@@ -125,9 +126,11 @@ test('stdio Shop clients expose bounded public reads, scoped seller mutations, a
     const publicOutput=contentText(search);
     assert.equal(search.isError,undefined,publicOutput);
     assert.equal(JSON.parse(publicOutput).result.items[0].productId,productId);
+    assert.deepEqual(JSON.parse(publicOutput).result.items[0].indicativePrice,indicativePrice);
     assert.equal(publicOutput.includes('Seller-only notes'),false);
     const publicGet=await client.callTool({name:'marketplace_product_get',arguments:{productId}});
     assert.equal(publicGet.isError,undefined,contentText(publicGet));
+    assert.deepEqual(JSON.parse(contentText(publicGet)).result.indicativePrice,indicativePrice);
     assert.equal(requests.find(item=>item.path==='/v1/products')?.authorization,undefined);
 
     // Seller reads stay account-scoped; mutation calls carry exact request keys and explicit rights confirmation.

@@ -51,7 +51,9 @@ Run explicit `setup` with those profile and controller pins and `--mode controll
 
 ## Publication and payments
 
-Listing owners prepay their own publication service before visibility: ATTO 1%, XNO 5%. Task requester basis is the full budget; Shop seller basis is quantity × unit price. Applications are free. Buyers pay the full price directly to providers. Approval of an exact milestone submission returns its payment requirement; only independent verified SEND evidence opens the next milestone.
+Public Shop and Task search and detail results may include an indicative USD equivalent in `indicativePrice.usd.price`, with CoinGecko’s UTC quote time in `indicativePrice.usd.timestamp`. Verify the native amount when paying.
+
+Listing owners prepay their own publication service before visibility: 0.1% for new ATTO publications and 5% for XNO. Earlier publications retain their frozen rate. Task requester basis is the full budget; Shop seller basis is quantity × unit price. Applications are free. Buyers pay the full price directly to providers. Approval of an exact milestone submission returns its payment requirement; only independent verified SEND evidence opens the next milestone.
 
 `marketplace_payment_get` reads frozen network/source/recipient/amount/terms/baseline and independent status. `marketplace_payment_pay` uses the selected wallet's existing **external transfer** grant and spending limits, validates the x402 offer, signs and durably retains the complete native candidate locally, obtains an exact hash-bound ATTO/NOMS proof, and saves the final PAYMENT-SIGNATURE header before sending it to Market. Market broadcasts those unchanged authorized bytes and independently confirms the SEND. Repeating paymentId reuses the requirement UUID as native request identity, so uncertainty cannot create another candidate. Backend PENDING is not paid. `marketplace_payment_challenge` and `marketplace_payment_evidence` support an externally managed local wallet. `marketplace_publication_fee_get` exposes prepaid/earned/unused amount and refund status/hash.
 
