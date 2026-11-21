@@ -71,3 +71,15 @@ jobs:
         timeout-minutes: 3
         if: runner.os != 'Linux'
         run: npm run test:keychain
+
+  required-check:
+    name: test / test
+    needs: [test, password-store]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every platform and credential-store check to pass
+        env:
+          PLATFORM_TESTS: ${{ needs.test.result }}
+          CREDENTIAL_TESTS: ${{ needs.password-store.result }}
+        run: test "$PLATFORM_TESTS" = success && test "$CREDENTIAL_TESTS" = success
