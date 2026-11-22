@@ -238,6 +238,23 @@ test('block-not-found accepts only the exact absence error; malformed confirmati
   await assert.rejects(client.blockInfo(BLOCK.hash), rpcError);
 });
 
+test('HTTP 404 means an absent block only for an exact block_info error', async t => {
+  let status = 404, value = { error: 'Block not found' };
+  const { client } = await serverFixture(t, (_body, response) => {
+    response.writeHead(status, { 'Content-Type': 'application/json' });
+    response.end(JSON.stringify(value));
+  });
+  assert.equal(await client.blockInfo(BLOCK.hash), null);
+  await assert.rejects(client.accountSnapshotOrNotFound(SOURCE), rpcError);
+  for (const invalid of [evidence(), { error: 'Block not found', confirmed: 'false' }, { error: 'Route not found' }]) {
+    value = invalid;
+    await assert.rejects(client.blockInfo(BLOCK.hash), rpcError);
+  }
+  status = 503;
+  value = { error: 'Block not found' };
+  await assert.rejects(client.blockInfo(BLOCK.hash), rpcError);
+});
+
 test('work generation sends only the public root and exact epoch threshold and checks returned work', async t => {
   // Given work has no separate endpoint and uses the configured RPC by default.
   let work = '8e8206e47e15b74b';

@@ -68,6 +68,10 @@ function textField(value: Record<string, unknown>, name: string): string {
   return field;
 }
 
+function isBlockNotFound(value: Record<string, unknown>): boolean {
+  return value.error === 'Block not found' && Object.keys(value).length === 1;
+}
+
 export function epochLink(epoch: number): string {
   if (epoch !== 1 && epoch !== 2) throw new Error('Unsupported Nano epoch');
   const bytes = new Uint8Array(32);
@@ -156,7 +160,7 @@ export class NanoRpcClient {
     const requestedHash = canonicalHash(hash);
     const value = await this.response('block_info', { hash: requestedHash, json_block: 'true', include_linked_account: 'true' });
     if (Object.hasOwn(value, 'error')) {
-      if (Object.keys(value).length === 1 && value.error === 'Block not found') return null;
+      if (isBlockNotFound(value)) return null;
       throw new NanoRpcError();
     }
     return this.parseBlockEvidence(value, requestedHash);
@@ -311,7 +315,8 @@ export class NanoRpcClient {
       const response = await fetch(action === 'work_generate' ? this.workUrl : this.rpcUrl, { method: 'POST', redirect: 'error',
         signal: AbortSignal.timeout(action === 'work_generate' ? 90_000 : 15_000),
         headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action, ...fields }) });
-      if (response.status !== 200 || response.body === null) {
+      const missingBlockStatus = action === 'block_info' && response.status === 404;
+      if ((response.status !== 200 && !missingBlockStatus) || response.body === null) {
         await response.body?.cancel();
         throw new NanoRpcError();
       }
@@ -330,7 +335,9 @@ export class NanoRpcClient {
           chunks.push(value);
         }
       } finally { reader.releaseLock(); }
-      return parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total)));
+      const value = parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks, total)));
+      if (missingBlockStatus && !isBlockNotFound(value)) throw new NanoRpcError();
+      return value;
     } catch { throw new NanoRpcError(); }
   }
 }
