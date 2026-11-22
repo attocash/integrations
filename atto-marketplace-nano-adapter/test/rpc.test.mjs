@@ -186,11 +186,17 @@ test('confirmed account RPC preserves bigint amounts and confirms frontier, bala
   await assert.rejects(client.confirmedAccount(SOURCE), { code: 'SOURCE_FRONTIER_UNCONFIRMED' });
 });
 
-test('account-not-found is nullable only for the exact single-field Nano error', async t => {
+test('account-not-found accepts an optional zero raw balance', async t => {
   let value = { error: 'Account not found' };
   const { client } = await serverFixture(t, () => value);
   assert.equal(await client.accountSnapshotOrNotFound(SOURCE), null);
-  for (const error of [{ error: 'Account not found', frontier: ROOT }, { error: 'Bad account number' }, { error: 1 }]) {
+  value = { error: 'Account not found', balance: '0' };
+  assert.equal(await client.accountSnapshotOrNotFound(SOURCE), null);
+  for (const error of [
+    { error: 'Account not found', balance: '1' }, { error: 'Account not found', balance: 0 },
+    { error: 'Account not found', frontier: ROOT }, { error: 'Account not found', balance: '0', frontier: ROOT },
+    { error: 'Bad account number', balance: '0' }, { error: 1 },
+  ]) {
     value = error;
     await assert.rejects(client.accountSnapshotOrNotFound(SOURCE), rpcError);
   }

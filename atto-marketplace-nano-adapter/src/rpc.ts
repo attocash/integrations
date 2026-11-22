@@ -133,7 +133,8 @@ export class NanoRpcClient {
   async accountSnapshotOrNotFound(address: string): Promise<NanoAccountSnapshot | null> {
     const value = await this.response('account_info', { account: canonicalAddress(address), include_confirmed: 'true', representative: 'true' });
     if (Object.hasOwn(value, 'error')) {
-      if (Object.keys(value).length === 1 && value.error === 'Account not found') return null;
+      const { error, balance, ...other } = value;
+      if (error === 'Account not found' && (balance === undefined || balance === '0') && Object.keys(other).length === 0) return null;
       throw new NanoRpcError();
     }
     try {
