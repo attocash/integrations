@@ -17,6 +17,7 @@ import {
 import {menuChoice} from './terminal-input.js';
 import type { DeferredWalletPlan, WalletAccessMode } from './wallet-plan.js';
 import { ProfileError } from './profile-store.js';
+import { defaultNanoRpcUrl, nanoWorkDescription } from './nano-work.js';
 import { marketplaceConnection } from './defaults.js';
 import { readWalletSelection, saveWalletSelection } from './wallet-preferences.js';
 
@@ -40,10 +41,6 @@ export interface NanoInteractiveSetupResult {
 
 type Policy = Pick<NanoWalletConfiguration, 'grants' | 'limits'>;
 type SetupMode = 'create' | 'reuse' | 'import';
-
-export function defaultNanoRpcUrl(network: NanoNetwork): string {
-  return network === 'nano:mainnet' ? 'https://rpc.nano.to' : 'http://localhost:17076';
-}
 
 /** Standalone setup owns its one exact approval; guided setup combines the public plan with login. */
 export async function setupNanoWalletInteractive(options: NanoInteractiveSetupOptions): Promise<NanoInteractiveSetupResult> {
@@ -111,7 +108,7 @@ export async function prepareNanoWalletInteractive(options: NanoInteractiveSetup
   requireEmptyTarget(directory);
   const network = options.advanced ? await choice(options, 'Nano network (nano:mainnet/nano:dev)', ['nano:mainnet', 'nano:dev'], 'nano:mainnet') : 'nano:mainnet';
   const rpcUrl = options.advanced ? validateNanoRpcUrl(await answer(options, 'Nano RPC URL', defaultNanoRpcUrl(network))) : defaultNanoRpcUrl(network);
-  const selectedWorkUrl = options.advanced ? await answer(options, 'Nano work URL (optional; Enter uses the Nano RPC)', '') : '';
+  const selectedWorkUrl = options.advanced ? await answer(options, 'Nano work URL (optional; Enter uses the default work provider)', '') : '';
   const workUrl = selectedWorkUrl ? validateNanoRpcUrl(selectedWorkUrl) : undefined;
   const { origin, audience } = marketplaceConnection(options);
   const index = options.advanced ? derivationIndex(await answer(options, 'Nano derivation index', mode === 'create' ? '0' : '1')) : 0;
@@ -381,7 +378,7 @@ function review(input: ReviewInput): string {
     `Derivation index: ${terminalText(input.index)}`,
     `Network: ${terminalText(input.network)}`,
     `RPC: ${terminalText(input.rpcUrl)}`,
-    `Work: ${terminalText(input.workUrl ?? input.rpcUrl)}`,
+    `Work: ${terminalText(nanoWorkDescription(input))}`,
     `Marketplace origin: ${terminalText(input.origin)}`,
     `Audience: ${terminalText(input.audience)}`,
     changedLine('External transfers', original && (original.grants.externalTransfers ? 'allowed' : 'denied'), input.policy.grants.externalTransfers ? 'allowed' : 'denied'),

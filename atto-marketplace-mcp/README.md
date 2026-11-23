@@ -24,6 +24,8 @@ Terminal commands print readable summaries by default, including the ready profi
 
 Pin origin/audience/network and retain exact account/controller pins and saved wallet journals. Use `wallet policy --asset ATTO|XNO --allow-external-transfers` only when explicitly authorising local direct payments and review native limits. Configuration alone does not prove node availability. Use `--files-dir` for explicit file selection; no implicit upload occurs. Read the [Marketplace MCP tool and permission reference](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md) and [Marketplace HTTP integration guide](https://atto.market/integration) before selecting fields or scopes.
 
+On Nano mainnet, the built-in wallet uses its signed-in production Marketplace profile to generate proof of work when the chain RPC is the default `https://rpc.nano.to`. Only the public work root and difficulty go to Marketplace. The wallet checks the returned nonce locally. Chain reads and publication continue through the configured Nano RPC. An explicit `--work-url` always takes precedence. Custom chain RPCs and standalone wallets use their configured RPC for work when no separate work URL is set.
+
 ### Open Marketplace in your browser
 
 To let a connected controller profile sign in to `atto.market` from a local MCP client, run `atto-marketplace-mcp setup --profile main --browser-sign-in enable` in your terminal and approve the wallet prompt once. Use the same command with `status` or `disable` to inspect or revoke the grant.

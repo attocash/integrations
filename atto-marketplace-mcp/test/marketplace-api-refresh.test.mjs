@@ -120,3 +120,27 @@ test('a late shared refresh cannot replace credentials from an explicit local re
   // A later, explicit read uses the committed login rather than retaining a failed promise.
   await api.request('/v1/agent/profile');assert.equal(reads,1);assert.equal(refreshes,1);
 });
+
+test('Nano work uses the refreshed session only on the production endpoint',async t=>{
+  const origin='https://api.atto.market', audience='urn:marketplace:agent-api:live';
+  const {store}=await fixture(t,{origin,audience});
+  const hash='AB'.repeat(32), difficulty='FFFFFFC000000000', work='EF'.repeat(8);
+  const calls=[];
+  globalThis.fetch=async(url,options)=>{
+    calls.push(String(url));
+    assert.equal(options.redirect,'error');
+    if (String(url).endsWith('/refresh')) {
+      assert.deepEqual(JSON.parse(options.body),{refreshToken:'original-refresh-token'});
+      return Response.json(rotated());
+    }
+    assert.equal(options.headers.authorization,'Bearer rotated-access-token');
+    assert.deepEqual(JSON.parse(options.body),{hash,difficulty});
+    return Response.json({work});
+  };
+  const api=new MarketplaceApiClient(store,'agent');
+  assert.equal(await api.generateNanoWork(hash,difficulty),work);
+  assert.deepEqual(calls,[origin+'/v1/agent/auth/sessions/refresh',origin+'/v1/agent/wallets/xno/work']);
+  store.createProfile(profile({id:'custom'}));
+  await assert.rejects(new MarketplaceApiClient(store,'custom').generateNanoWork(hash,difficulty),{code:'MARKETPLACE_ORIGIN'});
+  assert.equal(calls.length,2);
+});

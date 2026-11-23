@@ -4,7 +4,8 @@ import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 import { z } from 'zod';
 import { createApplication, type ApplicationSession } from '@attocash/cli/core';
 import { createInternalMarketplaceWalletApplication } from '@attocash/cli/internal-marketplace';
-import { dispatchNanoOperation, loadConfiguration, defaultDataDirectory } from '@attocash/atto-marketplace-nano-adapter';
+import { dispatchNanoOperation, loadConfiguration, defaultDataDirectory, type NanoWorkProvider } from '@attocash/atto-marketplace-nano-adapter';
+import { nanoWorkMethod, nanoWorkResult, usesMarketplaceWork } from './nano-work.js';
 import { selectedAttoWallet } from './wallet-access.js';
 import { canonicalWalletDestination, normalizeWalletResult, publicWalletIdentity } from './wallet-results.js';
 
@@ -19,7 +20,7 @@ export interface WalletRequest {
 }
 
 /** Trusted, installed adapters only. Each adapter owns its key access, permissions and durable state. */
-export async function executeWalletRequest(request: WalletRequest, env: NodeJS.ProcessEnv): Promise<unknown> {
+export async function executeWalletRequest(request: WalletRequest, env: NodeJS.ProcessEnv, workProvider?: NanoWorkProvider): Promise<unknown> {
   if (request.operation === 'transfer.send') request = {...request,input:{...request.input,
     destination:canonicalWalletDestination(request.asset, request.input.destination)}};
   const internal = request.operation === 'controller.sign';
@@ -30,10 +31,10 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
       'transfer.send':'transfer.send','transfer.status':'transfer.status',receive:'receive','receivable.list':'receivable.list'};
     const selected=request.operation==='controller.sign'&&request.input.purpose!=='payment evidence'&&env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR
       ? {...env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR}:env;
-    if (request.operation === 'controller.sign') {
-      return dispatchNanoOperation(selected, names[request.operation], request.input);
-    }
-    if (request.operation === 'payment.prepare' || request.operation === 'payment.authorize' || request.operation === 'payment.status') return dispatchNanoOperation(selected, names[request.operation], request.input);
+    const dispatch = () => dispatchNanoOperation(selected, names[request.operation], request.input,
+      workProvider && (configuration => usesMarketplaceWork(configuration) ? workProvider : undefined));
+    if (request.operation === 'controller.sign' || request.operation === 'payment.prepare'
+      || request.operation === 'payment.authorize' || request.operation === 'payment.status') return dispatch();
     const configuration = loadConfiguration(defaultDataDirectory(selected));
     const identity = publicWalletIdentity({asset:'XNO',network:configuration.network,address:configuration.sourceAddress,
       index:configuration.derivationIndex,permissions:{externalTransfers:configuration.grants.externalTransfers,receive:configuration.grants.externalTransfers}});
@@ -41,7 +42,7 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
     // validates its original shared journal binding without opening signing keys.
     if (request.operation === 'identity.list') return normalizeWalletResult(identity, request.operation, {}, request.input);
     if (request.operation === 'receive' && !identity.permissions.receive) throw walletError('PERMISSION_DENIED');
-    const result = await dispatchNanoOperation(selected, names[request.operation], request.input);
+    const result = await dispatch();
     return normalizeWalletResult(identity, request.operation, result, request.input);
   }
   const directory = env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR;
@@ -117,7 +118,7 @@ export function publicWalletErrorCode(error: unknown): string {
   if (['SPEND_LIMIT','SPENDING_LIMIT','DAILY_LIMIT','PAYMENT_LIMIT','LIMIT_EXCEEDED'].includes(code ?? '')) return 'SPENDING_LIMIT';
   if (['PERMISSION_DENIED','EXTERNAL_TRANSFERS_DENIED','MARKETPLACE_FUNDING_DENIED','MCP_READ_ONLY'].includes(code ?? '')) return 'PERMISSION_DENIED';
   if (['SOURCE_FENCED','ACCOUNT_RESERVED','POOL_BUSY','PAYMENT_IN_PROGRESS','WALLET_BUSY','ACCOUNT_BUSY'].includes(code ?? '')) return 'SOURCE_FENCED';
-  const allowed = ['INSUFFICIENT_FUNDS','NETWORK_MISMATCH','WALLET_SETUP_REQUIRED','WALLET_RESPONSE_INVALID',
+  const allowed = ['NANO_WORK_INVALID','INSUFFICIENT_FUNDS','NETWORK_MISMATCH','WALLET_SETUP_REQUIRED','WALLET_RESPONSE_INVALID',
     'REQUEST_CONFLICT','INVALID_REQUEST','NOT_FOUND','JOURNAL_NOT_FOUND','RPC_CONFLICT','JOURNAL_CONFLICT','RECEIVE_RECOVERY_UNAVAILABLE'];
   return code && allowed.includes(code) ? code : 'WALLET_REJECTED';
 }
@@ -128,10 +129,15 @@ export function createWalletHost(env: NodeJS.ProcessEnv = process.env): McpServe
   server.registerTool('wallet_call', {
     description:'Private typed wallet adapter request. No generic hash signing, key export or remote plugin loading.',
     inputSchema:z.strictObject({asset:z.enum(['ATTO','XNO']),operation:z.enum(walletOperations),
-      input:z.record(z.string(),z.unknown())}),
-  }, async request => {
+      input:z.record(z.string(),z.unknown()), marketplaceWork:z.literal(true).optional()}),
+  }, async (request, context) => {
     try {
-      const result = await executeWalletRequest(request, env);
+      const workProvider: NanoWorkProvider | undefined = request.marketplaceWork ? async (hash, difficulty) => {
+        const result = await context.mcpReq.send({method:nanoWorkMethod, params:{hash, difficulty}},
+          nanoWorkResult, {timeout:120_000});
+        return result.work;
+      } : undefined;
+      const result = await executeWalletRequest(request, env, workProvider);
       const structuredContent = {result};
       return {content:[{type:'text',text:JSON.stringify(structuredContent)}],structuredContent};
     } catch(error) {

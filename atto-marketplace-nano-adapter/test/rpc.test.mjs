@@ -533,3 +533,16 @@ test('epoch-open requires zero economics, pinned signer, supported epoch and val
   assert.equal(new NanoRpcClient('https://rpc.example', 'nano:mainnet').validConfirmedBlock(valid, SOURCE), false);
   await assert.rejects(client.verifyFrontierState({ frontier: block.hash, balance: 0n, representative: zero, epoch: 3 }, SOURCE), rpcError);
 });
+
+test('an external work provider supplies locally verified mainnet SEND and OPEN nonces', async () => {
+  const hash = '718CC2121C3E641059BC1C2CFC45666C99E8AE922F7A807B7D07B62C995D79E2';
+  const work = '2B3D689BBCB21DCA';
+  const calls = [];
+  const client = new NanoRpcClient('https://rpc.nano.to', 'nano:mainnet', undefined, async (root,difficulty) => {
+    calls.push({root,difficulty});
+    return work.toLowerCase();
+  });
+  assert.equal(await client.generateWork(hash,2), work);
+  assert.equal(await client.generateOpenWork(hash), work);
+  assert.deepEqual(calls,[{root:hash,difficulty:'FFFFFFF800000000'},{root:hash,difficulty:'FFFFFFC000000000'}]);
+});

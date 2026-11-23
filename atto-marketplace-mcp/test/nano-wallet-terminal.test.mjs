@@ -25,8 +25,8 @@ async function terminal(args,environment,response='APPROVE',command) {
   assert.equal(metadata.timedOut,false);
   return {...metadata,transcript:Buffer.from(metadata.transcriptBase64,'base64').toString('utf8').replaceAll('\r','')};
 }
-for (const { name, network, rpcOption, rpcUrl, workUrl } of [
-  { name: 'mainnet omitted RPC uses Nano.to', network: 'nano:mainnet', rpcOption: [], rpcUrl: 'https://rpc.nano.to' },
+for (const { name, network, rpcOption, rpcUrl, workUrl, production } of [
+  { name: 'production mainnet uses signed-in Marketplace work with Nano.to chain RPC', production:true, network: 'nano:mainnet', rpcOption: [], rpcUrl: 'https://rpc.nano.to' },
   { name: 'development omitted RPC uses loopback', network: 'nano:dev', rpcOption: [], rpcUrl: 'http://localhost:17076' },
   { name: 'mainnet explicit RPC keeps the custom provider', network: 'nano:mainnet', rpcOption: ['--rpc-url', 'https://nano.example/rpc'], rpcUrl: 'https://nano.example/rpc' },
   { name: 'mainnet separate work URL keeps the RPC default', network: 'nano:mainnet', rpcOption: [], rpcUrl: 'https://rpc.nano.to', workUrl: 'https://work.nano.example/generate' },
@@ -39,7 +39,8 @@ for (const { name, network, rpcOption, rpcUrl, workUrl } of [
     await writeFile(seedFile,seed,{mode:0o600});
     const expected=await inspectNanoSeed(seedFile,1);
     const args=['setup','--asset','XNO','--network',network,...rpcOption,...(workUrl?['--work-url',workUrl]:[]),
-      '--origin','http://localhost:8080','--audience','terminal-rpc-test','--seed-file',seedFile];
+      '--origin',production?'https://api.atto.market':'http://localhost:8080',
+      '--audience',production?'urn:marketplace:agent-api:live':'terminal-rpc-test','--seed-file',seedFile];
     // When the user approves setup through the real terminal without contacting the RPC.
     const result=await terminal(args,{MARKETPLACE_MCP_HOME:home});
     // Then the reviewed provider and imported identity are persisted without exposing the seed.
@@ -48,6 +49,7 @@ for (const { name, network, rpcOption, rpcUrl, workUrl } of [
     assert.ok(rpcOffset>=0);assert.ok(rpcOffset<result.transcript.indexOf('Type APPROVE to confirm: '));
     const workOffset=result.transcript.indexOf(`Work: ${workUrl??rpcUrl}\n`);
     assert.ok(workOffset>=0);assert.ok(workOffset<result.transcript.indexOf('Type APPROVE to confirm: '));
+    assert.equal(result.transcript.includes('Work when signed in: https://api.atto.market/v1/agent/wallets/xno/work'), Boolean(production));
     const config=JSON.parse(await readFile(join(home,'wallets','nano','wallet.json'),'utf8'));
     assert.equal(config.network,network);assert.equal(config.rpcUrl,rpcUrl);
     assert.equal(config.workUrl,workUrl);assert.equal(Object.hasOwn(config,'workUrl'),workUrl!==undefined);

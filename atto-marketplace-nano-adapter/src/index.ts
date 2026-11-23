@@ -3,4 +3,4 @@ export { provisionNanoWallet, inspectNanoWallet, inspectNanoSeed, inspectNanoRec
 export { signMarketplaceNanoController, verifyNanoMessage, type ControllerProofRequest } from './controller.js';
 export { NanoWalletError } from './errors.js';
 export * from './protocol.js';
-export { NanoRpcClient, NanoRpcError } from './rpc.js';
+export { NanoRpcClient, NanoRpcError, type NanoWorkProvider } from './rpc.js';

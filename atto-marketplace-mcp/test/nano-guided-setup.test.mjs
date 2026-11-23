@@ -285,7 +285,8 @@ test('basic Nano refuses an occupied selected directory before offering creation
   assert.deepEqual(await snapshot(home), before);
 }));
 
-for (const { name, network, answer, rpcUrl } of [
+for (const { name, network, answer, rpcUrl, production } of [
+  { name: 'mainnet production blank RPC uses signed-in Marketplace work', production:true, network:'nano:mainnet', answer:'', rpcUrl:'https://rpc.nano.to' },
   { name: 'mainnet blank RPC uses Nano.to', network: 'nano:mainnet', answer: '', rpcUrl: 'https://rpc.nano.to' },
   { name: 'development blank RPC uses loopback', network: 'nano:dev', answer: '', rpcUrl: 'http://localhost:17076' },
   { name: 'mainnet explicit RPC keeps the custom provider', network: 'nano:mainnet', answer: 'https://nano.example/rpc', rpcUrl: 'https://nano.example/rpc' },
@@ -297,11 +298,13 @@ for (const { name, network, answer, rpcUrl } of [
     const script = interaction(responses, async question => {
       if (question.startsWith('Review Nano wallet setup:')) {
         assert.deepEqual(await snapshot(home), before, 'The reviewed profile must not exist before consent');
-        assert.ok(question.includes(`Network: ${network}\nRPC: ${rpcUrl}\nWork: ${rpcUrl}\n`));
+        const work = production ? 'Marketplace when signed in, otherwise ' + rpcUrl : rpcUrl;
+        assert.ok(question.includes(`Network: ${network}\nRPC: ${rpcUrl}\nWork: ${work}\n`));
       }
     });
     // When the user reviews the resolved RPC and approves creation.
-    const result = await setupNanoWalletInteractive({ advanced:true, home, env: {}, origin, audience, prompt: script.prompt });
+    const result = await setupNanoWalletInteractive({ advanced:true, home, env:{}, origin:production?'https://api.atto.market':origin,
+      audience:production?'urn:marketplace:agent-api:live':audience, prompt:script.prompt });
     // Then the saved connection matches exactly the provider shown before approval.
     const config = JSON.parse(await readFile(join(result.directory, 'wallet.json'), 'utf8'));
     assert.equal(config.network, network);

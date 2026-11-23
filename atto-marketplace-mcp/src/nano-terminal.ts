@@ -10,9 +10,10 @@ import {ensurePrivateDirectory} from './private-directory.js';
 import { managedWalletEnvironment } from './wallet-home.js';
 import { ProfileError } from './profile-store.js';
 import { callWallet } from './wallet-process.js';
-import { defaultNanoRpcUrl, validateNanoRpcUrl } from './nano-setup.js';
+import { defaultNanoRpcUrl, usesMarketplaceWork } from './nano-work.js';
+import { validateNanoRpcUrl } from './nano-setup.js';
 
-export const nanoWalletUsage = `Nano wallet: atto-marketplace-mcp wallet setup --asset XNO --network <nano:dev|nano:mainnet> [--rpc-url <url>] [--work-url <url>] --origin <marketplace-origin> --audience <audience> [--home <private-directory>] [--index <index>] [--recovery-wallet-dir <existing-Atto-wallet-directory> | --seed-file <private-file>] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw>] [--rolling-24h-atomic <raw>] [--unlimited]\nRPC defaults for new profiles: nano:mainnet uses https://rpc.nano.to; nano:dev uses http://localhost:17076. Existing profiles retain their configured RPC when --rpc-url is omitted. Work uses --work-url when provided, otherwise the saved work URL or the selected RPC.\nPolicy: atto-marketplace-mcp wallet policy --asset XNO [--home <private-directory>] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw> --rolling-24h-atomic <raw> | --unlimited]\nUnlimited spending can spend the available wallet balance, including future deposits.\nApproval: atto-marketplace-mcp approve <private-request-path> [--home <private-directory>]\nStatus: atto-marketplace-mcp wallet status --asset XNO [--home <private-directory>]\n`;
+export const nanoWalletUsage = `Nano wallet: atto-marketplace-mcp wallet setup --asset XNO --network <nano:dev|nano:mainnet> [--rpc-url <url>] [--work-url <url>] --origin <marketplace-origin> --audience <audience> [--home <private-directory>] [--index <index>] [--recovery-wallet-dir <existing-Atto-wallet-directory> | --seed-file <private-file>] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw>] [--rolling-24h-atomic <raw>] [--unlimited]\nRPC defaults for new profiles: nano:mainnet uses https://rpc.nano.to; nano:dev uses http://localhost:17076. Existing profiles retain their configured RPC when --rpc-url is omitted. Work uses an explicit or saved --work-url. Signed-in production mainnet wallets using the default RPC use Marketplace for work. Other wallets use their RPC.\nPolicy: atto-marketplace-mcp wallet policy --asset XNO [--home <private-directory>] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw> --rolling-24h-atomic <raw> | --unlimited]\nUnlimited spending can spend the available wallet balance, including future deposits.\nApproval: atto-marketplace-mcp approve <private-request-path> [--home <private-directory>]\nStatus: atto-marketplace-mcp wallet status --asset XNO [--home <private-directory>]\n`;
 
 export async function runNanoTerminal(argv:string[],env:NodeJS.ProcessEnv):Promise<void> {
   const output=takeJsonFlag(argv); argv=output.argv;
@@ -82,7 +83,8 @@ export async function runNanoTerminal(argv:string[],env:NodeJS.ProcessEnv):Promi
   const separateController=controllerDirectory!==dataDir?loadConfiguration(controllerDirectory):undefined;
   const terms={...(imported?{importedPublicAddress:imported.address}:{}),
     ...(separateController?{separateController:{address:separateController.sourceAddress,directory:controllerDirectory}}:{}),
-    walletDirectory:dataDir,network,rpcUrl,workUrl:workUrl??rpcUrl,marketplaceOrigin:origin,audience,index,
+    walletDirectory:dataDir,network,rpcUrl,workUrl:workUrl??rpcUrl,
+    ...(usesMarketplaceWork({network,rpcUrl,workUrl,origin,audience}) && {signedInWorkUrl:origin+'/v1/agent/wallets/xno/work'}),marketplaceOrigin:origin,audience,index,
     externalTransfers:grants.externalTransfers,controllerPurposes:grants.controllerPurposes,
     maximumPerPaymentRaw:maxPaymentAtomic,rolling24HoursRaw:rolling24hAtomic,
     ...(maxPaymentAtomic===null?{spending:'Unlimited: can spend the available wallet balance, including future deposits.'}:{}),

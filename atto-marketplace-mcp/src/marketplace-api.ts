@@ -1,8 +1,11 @@
+import { nanoWorkResult } from './nano-work.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { productionMarketplaceAudience, productionMarketplaceOrigin } from './defaults.js';
+import { isProductionMarketplace } from './defaults.js';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
 
+const NANO_WORK_PATH = '/v1/agent/wallets/xno/work';
+const retryNanoWork = 'Retry the same request ID or incoming SEND hash.';
 const REQUEST_TIMEOUT_MS = 15_000;
 const RESPONSE_LIMIT_BYTES = 1_048_576;
 const TOKEN_LIMIT = 8192;
@@ -48,6 +51,18 @@ export class MarketplaceApiClient {
     const response = await this.fetchResponse(this.profiles.getProfile(this.profileId), path, options, REQUEST_TIMEOUT_MS);
     if (response.status === 202 && !options.allowStatus?.includes(202)) throw new MarketplaceApiError('MARKETPLACE_PROTOCOL', 'Unexpected asynchronous response. Preserve the original request ID and retry its exact request.');
     return response;
+  }
+
+  async generateNanoWork(hash: string, difficulty: string): Promise<string> {
+    const profile = this.profiles.getProfile(this.profileId);
+    if (!isProductionMarketplace(profile)) {
+      throw new MarketplaceApiError('MARKETPLACE_ORIGIN', 'Nano work requires the live Marketplace profile.');
+    }
+    const response = await this.fetchResponse(profile, NANO_WORK_PATH,
+      {method:'POST', body:{hash, difficulty}, allowStatus:[200]}, 90_000);
+    const result = nanoWorkResult.safeParse(response.json);
+    if (!result.success) throw new MarketplaceApiError('NANO_WORK_INVALID', 'Marketplace returned an invalid work nonce. ' + retryNanoWork);
+    return result.data.work;
   }
 
   /** Stream a bounded private file through the pinned profile and normal auth refresh path. */
@@ -122,11 +137,25 @@ export class MarketplaceApiClient {
         signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
       });
     } catch {
+      if (path === NANO_WORK_PATH) throw new MarketplaceApiError('NANO_WORK_UNAVAILABLE',
+        'Marketplace Nano work could not be reached. ' + retryNanoWork);
       throw new MarketplaceApiError('MARKETPLACE_UNAVAILABLE', 'The configured Marketplace endpoint could not be reached. For a mutation, retry with the same request ID.');
     }
     if (response.url && new URL(response.url).origin !== profile.origin) {
       await response.body?.cancel().catch(() => undefined);
       throw new MarketplaceApiError('MARKETPLACE_ORIGIN', 'Marketplace redirected away from the pinned profile origin.');
+    }
+    // A gateway can return HTML for throttling or upstream outages. These statuses
+    // carry all the public diagnostics needed for retrying the original wallet operation.
+    if (path === NANO_WORK_PATH && response.status !== 200) {
+      await response.body?.cancel().catch(() => undefined);
+      if (response.status === 429) throw new MarketplaceApiError('NANO_WORK_RATE_LIMITED',
+        'Marketplace temporarily rate-limited Nano work. Wait before retrying. ' + retryNanoWork, 429);
+      if (response.status === 401 || response.status === 403) throw new MarketplaceApiError('AUTHORIZATION_DENIED',
+        'Marketplace denied Nano work. Check the selected profile credential or reauthenticate its controller session. ' + retryNanoWork, response.status);
+      if (response.status >= 500) throw new MarketplaceApiError('NANO_WORK_UNAVAILABLE',
+        'Marketplace Nano work is temporarily unavailable. ' + retryNanoWork, response.status);
+      throw new MarketplaceApiError('NANO_WORK_REJECTED', 'Marketplace rejected this Nano work request.', response.status);
     }
     const publicHistoryPage = response.status === 200
       && (options.method ?? 'GET') === 'GET' && url.pathname === '/v1/discovery/task-history';
@@ -419,8 +448,7 @@ function dateMillis(value: unknown): number {
 }
 
 export function requireLiveController(profile: MarketplaceProfile): void {
-  if (profile.authMode !== 'controller-session' || profile.origin !== productionMarketplaceOrigin
-    || profile.audience !== productionMarketplaceAudience) {
+  if (profile.authMode !== 'controller-session' || !isProductionMarketplace(profile)) {
     throw new ProfileError('LIVE_CONTROLLER_REQUIRED', 'Browser sign-in requires a controller session on the live Marketplace Agent API.');
   }
 }

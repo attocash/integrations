@@ -1,7 +1,7 @@
 import { parseJsonObject } from './json.js';
 import { NanoStateBlock, MAX_RAW, ZERO_HASH, addressPublicKey, canonicalAddress, canonicalHash, upperHex, validWork, offchainSign, type NanoNetwork } from './protocol.js';
 import { parseRelayOffer, relayPaymentPayload, validateRelayChallenge, type RelayRequest, type RelayProof } from '@attocash/cli/internal-marketplace';
-import { NanoRpcClient, DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, requireConfirmedFrontier, type NanoAccountSnapshot } from './rpc.js';
+import { NanoRpcClient, DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, requireConfirmedFrontier, type NanoAccountSnapshot, type NanoWorkProvider } from './rpc.js';
 import { canonical, defaultDataDirectory, exactKeys, loadConfiguration, positiveRaw, sha256, text, withPrivateKey, type NanoWalletConfiguration } from './configuration.js';
 import { signControllerProof, validateControllerProof, verifyNanoMessage, type ControllerProofRequest } from './controller.js';
 import { NanoJournal, type JournalRecord } from './journal.js';
@@ -11,6 +11,7 @@ export type NanoRpc = Pick<NanoRpcClient, 'requirePinnedNetwork' | 'accountSnaps
 export interface NanoWalletOpenOptions {
     dataDir?: string;
     rpc?: NanoRpc;
+    selectWorkProvider?: (configuration: NanoWalletConfiguration) => NanoWorkProvider | undefined;
     now?: () => number;
 }
 export interface NanoTransferRequest {
@@ -81,7 +82,8 @@ export class NanoWallet {
     private constructor(options: NanoWalletOpenOptions) {
         this.dataDir = options.dataDir ?? defaultDataDirectory();
         this.configuration = loadConfiguration(this.dataDir);
-        this.rpc = options.rpc ?? new NanoRpcClient(this.configuration.rpcUrl, this.configuration.network, this.configuration.workUrl);
+        this.rpc = options.rpc ?? new NanoRpcClient(this.configuration.rpcUrl, this.configuration.network, this.configuration.workUrl,
+            options.selectWorkProvider?.(this.configuration));
         this.now = options.now ?? Date.now;
         this.journal = new NanoJournal(this.dataDir);
     }
@@ -530,10 +532,11 @@ export class NanoWallet {
         return this.reconcile(record);
     }
 }
-export async function dispatchNanoOperation(env: NodeJS.ProcessEnv, operation: string, args: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+export async function dispatchNanoOperation(env: NodeJS.ProcessEnv, operation: string, args: Record<string, unknown> = {},
+    selectWorkProvider?: NanoWalletOpenOptions['selectWorkProvider']): Promise<Record<string, unknown>> {
     if (operation === 'message.verify')
         return { valid: verifyNanoMessage(args as any) };
-    const wallet = NanoWallet.open({ dataDir: defaultDataDirectory(env) });
+    const wallet = NanoWallet.open({ dataDir: defaultDataDirectory(env), ...(selectWorkProvider && { selectWorkProvider }) });
     try {
         return await wallet.call(operation, args);
     }

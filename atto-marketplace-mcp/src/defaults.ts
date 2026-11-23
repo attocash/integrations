@@ -4,6 +4,9 @@ import { ProfileError } from './profile-store.js';
 
 export const productionMarketplaceOrigin = 'https://api.atto.market';
 export const productionMarketplaceAudience = 'urn:marketplace:agent-api:live';
+export function isProductionMarketplace(connection: {origin:string; audience:string}): boolean {
+  return connection.origin === productionMarketplaceOrigin && connection.audience === productionMarketplaceAudience;
+}
 export const defaultMarketplaceProfile = 'main';
 export function defaultMarketplaceHome(env: NodeJS.ProcessEnv = process.env): string {
   return process.platform === 'win32'

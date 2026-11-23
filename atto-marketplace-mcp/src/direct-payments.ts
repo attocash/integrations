@@ -2,6 +2,7 @@ import { parseRelayOffer, decodePaymentHeader, relayEvidenceBinding, validateRel
 import { z } from 'zod';
 import { MarketplaceApiClient, MarketplaceApiError, type ApiResponse } from './marketplace-api.js';
 import type { MarketplaceProfile } from './profile-store.js';
+import type { NanoWorkProvider } from '@attocash/atto-marketplace-nano-adapter';
 import { callWallet } from './wallet-process.js';
 const hash=z.string().regex(/^[a-fA-F0-9]{64}$/);
 const requirement=z.object({id:z.string().uuid(),purpose:z.enum(['PUBLICATION_FEE','SHOP_ORDER','TASK_MILESTONE','BUYER_REFUND']),
@@ -52,7 +53,7 @@ export function validatePaymentChallenge(value:unknown,p:PaymentRequirement,tran
   return parsed.data;
 }
 /** The wallet retains the native candidate and final header; only Market publishes it. */
-export async function payRequirement(input:{api:MarketplaceApiClient;profile:MarketplaceProfile;env:NodeJS.ProcessEnv;paymentId:string},native={callWallet}) {
+export async function payRequirement(input:{api:MarketplaceApiClient;profile:MarketplaceProfile;env:NodeJS.ProcessEnv;paymentId:string;nanoWork?:NanoWorkProvider | undefined},native={callWallet}) {
   const {api,profile,env,paymentId}=input;
   const path=`/v1/agent/payments/${paymentId}`;
   const p=paymentRequirement((await api.request(path)).json,paymentId,profile.accountId);
@@ -77,7 +78,7 @@ export async function payRequirement(input:{api:MarketplaceApiClient;profile:Mar
   }
   const request = { ...binding, paymentRequired: offer.header };
   if (needsCandidate) {
-    saved = await native.callWallet(env, { asset: p.asset, operation: 'payment.prepare', input: request });
+    saved = await native.callWallet(env, { asset: p.asset, operation: 'payment.prepare', input: request }, input.nanoWork);
   }
   validateSaved(saved,p);
   if(saved.state==='failed'||saved.state==='COMPETING')return {requirement:p,wallet:saved};

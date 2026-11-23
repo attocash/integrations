@@ -11,7 +11,7 @@ export function terminalText(value: unknown): string {
 
 const labels: Record<string, string> = {
   profileId: 'Profile', origin: 'Marketplace', marketplaceOrigin: 'Marketplace', audience: 'Audience',
-  home: 'Configuration', rpcUrl: 'RPC', workUrl: 'Work', walletDirectory: 'Controller wallet', nativeNetwork: 'Native network',
+  home: 'Configuration', rpcUrl: 'RPC', workUrl: 'Work', signedInWorkUrl: 'Work when signed in', walletDirectory: 'Controller wallet', nativeNetwork: 'Native network',
   controllerNetwork: 'Controller network', controllerAddress: 'Controller address', controllerIndex: 'Controller index',
   walletCommand: 'Approve with', resumeCommand: 'Continue with', responsePath: 'Approval file',
 };

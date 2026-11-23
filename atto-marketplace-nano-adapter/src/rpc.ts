@@ -1,7 +1,7 @@
 import { parseJsonObject } from './json.js';
 import {
   addressPublicKey, blake2bHash, canonicalAddress, canonicalHash, hexBytes, NanoStateBlock,
-  rawAmount, requiredDifficulty, strictReceiveDifficulty, upperHex, validWork,
+  rawAmount, requiredDifficulty, upperHex, validWork,
   verify, ZERO_HASH, type NanoNetwork,
 } from './protocol.js';
 
@@ -79,11 +79,13 @@ export function epochLink(epoch: number): string {
   return upperHex(bytes);
 }
 
+export type NanoWorkProvider = (hash: string, difficulty: string) => Promise<string>;
+
 export class NanoRpcClient {
   readonly rpcUrl: URL;
   readonly workUrl: URL;
 
-  constructor(url: string | URL, readonly network: NanoNetwork, workUrl?: string | URL) {
+  constructor(url: string | URL, readonly network: NanoNetwork, workUrl?: string | URL, private readonly workProvider?: NanoWorkProvider) {
     this.rpcUrl = new URL(url);
     this.workUrl = new URL(workUrl ?? this.rpcUrl);
     if (!['nano:dev', 'nano:mainnet'].includes(network)) throw new NanoRpcError();
@@ -184,20 +186,20 @@ export class NanoRpcClient {
   async generateWork(root: string, epoch: number, receive = false): Promise<string> {
     const canonicalRoot = canonicalHash(root);
     const difficulty = requiredDifficulty(this.network, epoch, receive);
-    const value = await this.call('work_generate', { hash: canonicalRoot, difficulty });
-    const work = textField(value, 'work').toUpperCase();
-    if (!validWork(this.network, epoch, receive, canonicalRoot, work)) throw new NanoRpcError();
+    const nonce = this.workProvider
+      ? await this.workProvider(canonicalRoot, difficulty)
+      : textField(await this.call('work_generate', { hash: canonicalRoot, difficulty }), 'work');
+    const work = nonce.toUpperCase();
+    if (!validWork(this.network, epoch, receive, canonicalRoot, work)) {
+      throw new NanoRpcError(this.workProvider ? 'NANO_WORK_INVALID' : 'RPC_UNAVAILABLE');
+    }
     return work;
   }
 
   async generateOpenWork(root: string): Promise<string> {
     // The source send epoch is not guaranteed by receivable RPC. Epoch-0 receive
     // work is the strictest supported receive threshold, valid across epochs.
-    const canonicalRoot = canonicalHash(root);
-    const value = await this.call('work_generate', { hash: canonicalRoot, difficulty: strictReceiveDifficulty(this.network) });
-    const work = textField(value, 'work').toUpperCase();
-    if (!validWork(this.network, 0, true, canonicalRoot, work)) throw new NanoRpcError();
-    return work;
+    return this.generateWork(root, 0, true);
   }
 
   requireLoopbackDevelopmentEndpoint(): void {

@@ -2,6 +2,9 @@ import { isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { offchainVerify } from '@attocash/atto-marketplace-nano-adapter/protocol';
 import type { WalletRequest } from './wallet-host.js';
+import { MarketplaceApiError } from './marketplace-api.js';
+import { nanoWorkMethod, nanoWorkRequest, nanoWorkResult } from './nano-work.js';
+import type { NanoWorkProvider } from '@attocash/atto-marketplace-nano-adapter';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
 import { ProfileError } from './profile-store.js';
@@ -47,12 +50,24 @@ export async function signNanoControllerProof(input: {
 }
 
 /** Both networks cross the same private Node stdio boundary. */
-export async function callWallet(env: NodeJS.ProcessEnv, request: WalletRequest): Promise<Record<string, unknown>> {
+export async function callWallet(env: NodeJS.ProcessEnv, request: WalletRequest, workProvider?: NanoWorkProvider): Promise<Record<string, unknown>> {
   const configured = env.MARKETPLACE_MCP_WALLET_HOST_COMMAND;
   if (configured && (!isAbsolute(configured) || configured.length>4096 || /[\0\r\n]/.test(configured))) {
     throw new ProfileError('WALLET_SETUP_REQUIRED','Use an absolute path for the private wallet host.');
   }
   const client = new Client({name:'marketplace-managed-wallet',version:'0.1.0'});
+  const marketplaceWork = !configured && request.asset === 'XNO' && workProvider;
+  let workFailure: MarketplaceApiError | ProfileError | undefined;
+  if (marketplaceWork) {
+    client.setRequestHandler(nanoWorkMethod, {params:nanoWorkRequest, result:nanoWorkResult}, async ({hash, difficulty}) => {
+      try { return {work:await marketplaceWork(hash, difficulty)}; }
+      catch (error) {
+        workFailure = error instanceof MarketplaceApiError || error instanceof ProfileError ? error
+          : new MarketplaceApiError('NANO_WORK_UNAVAILABLE', 'Marketplace could not supply Nano work. Retry the same request ID or incoming SEND hash.');
+        throw new Error('Nano work request failed.');
+      }
+    });
+  }
   const nodeScript = process.platform === 'win32' && configured !== undefined && /\.[cm]?js$/i.test(configured);
   const transport = new StdioClientTransport({command:nodeScript?process.execPath:configured??process.execPath,
     args:configured?(nodeScript?[configured]:[]):[fileURLToPath(new URL('./main.js',import.meta.url)),'--internal-wallet-host'],
@@ -60,10 +75,11 @@ export async function callWallet(env: NodeJS.ProcessEnv, request: WalletRequest)
   try {
     await client.connect(transport);
     let timer:NodeJS.Timeout|undefined;
-    const result=await Promise.race([client.callTool({name:'wallet_call',arguments:request as unknown as Record<string,unknown>},{timeout:TOOL_TIMEOUT_MS}),
+    const result=await Promise.race([client.callTool({name:'wallet_call',arguments:{...request, ...(marketplaceWork && {marketplaceWork:true})}},{timeout:TOOL_TIMEOUT_MS}),
       new Promise<never>((_resolve,reject)=>{timer=setTimeout(()=>reject(new Error('Wallet timeout')),TOOL_TIMEOUT_MS);})
     ]).finally(()=>{if(timer)clearTimeout(timer);});
     if(result.isError) {
+      if (workFailure) throw workFailure;
       const content=result.structuredContent;
       if(isRecord(content)&&isRecord(content.error)&&typeof content.error.code==='string'&&Object.hasOwn(walletDenials,content.error.code)) {
         throw new ProfileError(content.error.code,walletDenials[content.error.code]!);
@@ -74,7 +90,7 @@ export async function callWallet(env: NodeJS.ProcessEnv, request: WalletRequest)
     if(isRecord(structured)&&isRecord(structured.result)) return structured.result;
     throw new Error('invalid wallet result');
   } catch(error) {
-    if(error instanceof ProfileError)throw error;
+    if(error instanceof ProfileError || error instanceof MarketplaceApiError)throw error;
     throw localSignerFailure('The private wallet could not complete this operation. Check its selected profile, approved permissions, and original request status.');
   } finally { await client.close().catch(()=>undefined); }
 }
@@ -100,6 +116,7 @@ function localSignerFailure(message: string): ProfileError {
 
 const walletDenials:Record<string,string>={
   WALLET_SETUP_REQUIRED:'Configure the selected account and wallet permissions in the local terminal.',
+  NANO_WORK_INVALID:'The returned nonce did not meet the requested Nano difficulty. Retry the same request ID or incoming SEND hash.',
   WALLET_RESPONSE_INVALID:'The native wallet returned data inconsistent with the selected account or request.',
   RECEIVE_RECOVERY_UNAVAILABLE:'Recovery data is temporarily unavailable. Retry wallet_receive with the original incoming SEND hash; its candidate is unchanged.',
   REQUEST_CONFLICT:'Recover the original request with its unchanged account, route and payment terms.',
