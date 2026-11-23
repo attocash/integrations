@@ -1,14 +1,15 @@
+import { isDeepStrictEqual } from 'node:util';
 import {
-    parseRelayOffer, relayPaymentPayload, relayProofFromHeader, validateRelayProof,
-    type RelayOffer, type RelayProof, type RelayRequest,
+    parseRelayOffer, validateRetainedRelayPayload,
+    type RelayOffer, type RelayRequest,
 } from '@attocash/cli/internal-marketplace';
 import type { NanoWalletConfiguration } from './configuration.js';
 import { fail } from './errors.js';
 import type { JournalRecord } from './journal.js';
 import { offchainVerify, type NanoStateBlock } from './protocol.js';
 
-export function walletRelayOffer(request: RelayRequest, config: NanoWalletConfiguration, allowExpired: boolean): RelayOffer {
-    const offer = parseRelayOffer(request, allowExpired);
+export function walletRelayOffer(request: RelayRequest, config: NanoWalletConfiguration, retained: boolean): RelayOffer {
+    const offer = parseRelayOffer(request, retained);
     const { terms } = offer;
     if (request.origin !== config.origin || request.audience !== config.audience || terms.asset !== 'XNO'
         || terms.network !== config.network || terms.senderAddress !== config.sourceAddress)
@@ -24,17 +25,8 @@ export function checkRelayCandidateTerms(request: RelayRequest, record: JournalR
 }
 
 export function verifyRelayHeader(request: RelayRequest, offer: RelayOffer, block: NanoStateBlock | undefined, header: string): void {
-    const proof = relayProofFromHeader(header);
-    if (!block)
+    if (!block) fail('JOURNAL_CONFLICT');
+    const { payload, proof } = validateRetainedRelayPayload(offer, request.requestId, header, block.hash);
+    if (!isDeepStrictEqual(payload, { block: block.toWire() }) || (proof && !offchainVerify(block.account, proof.message, proof.signature)))
         fail('JOURNAL_CONFLICT');
-    validateRelayProof(offer, block.hash, request.audience, proof, true);
-    if (!offchainVerify(block.account, proof.message, proof.signature)
-        || relayPaymentPayload(offer, request.requestId, { block: block.toWire() }, proof) !== header)
-        fail('JOURNAL_CONFLICT');
-}
-
-export function verifyRelayAuthorization(request: RelayRequest, offer: RelayOffer, block: NanoStateBlock, proof: RelayProof): void {
-    validateRelayProof(offer, block.hash, request.audience, proof);
-    if (!offchainVerify(block.account, proof.message, proof.signature))
-        fail('INVALID_REQUEST');
 }

@@ -4,13 +4,13 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { fixture, gate, until } from '../../atto-cli/test/support/payments.mjs';
-import { offer, terms, challenge, paymentId } from '../../test/support/relay.mjs';
+import { offer, terms, paymentId } from '../../test/support/relay.mjs';
 
 const directory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??join(import.meta.dirname,'..');
 const cliDirectory=process.env.ATTO_TEST_CLI_PACKAGE_DIR??join(import.meta.dirname,'../../atto-cli');
 const {callWallet}=await import(pathToFileURL(join(directory,'dist/wallet-process.js')));
 const {saveWalletSelection,readWalletSelection}=await import(pathToFileURL(join(directory,'dist/wallet-preferences.js')));
-const {relayEvidenceBinding,decodePaymentHeader}=await import(pathToFileURL(join(cliDirectory,'dist/marketplace/relay.js')));
+const {decodePaymentHeader}=await import(pathToFileURL(join(cliDirectory,'dist/marketplace/relay.js')));
 
 test('private ATTO process bridge finishes asynchronous payment operations before closing and recovers exact authorization',
   {timeout:30000,skip:process.platform!=='linux'?'Uses the Linux OS credential adapter fixture.':false},async t=>{
@@ -36,25 +36,24 @@ test('private ATTO process bridge finishes asynchronous payment operations befor
     await until(()=>{if(outcome?.error)throw outcome.error;return f.state.works.length>0;});
     assert.equal(outcome,undefined);
     f.state.holdWork.release();
-    const prepared=await pending,record=f.app.ledger.get(paymentId),proof=challenge(p,prepared.hash,relayEvidenceBinding);
+    const prepared=await pending,record=f.app.ledger.get(paymentId);
     // Then preparation durably retained the full candidate for the selected account without publishing.
     assert.ok(record.transactionJson);assert.equal(record.index,1);
-    assert.equal(prepared.hash,record.hash);assert.equal(record.relay.paymentSignature,undefined);
+    assert.equal(prepared.hash,record.hash);assert.equal(record.relay.paymentSignature,prepared.paymentSignature);
     assert.equal(f.app.ledger.usage().pendingRaw,'40');assert.equal(f.app.ledger.journalList().items.length,1);
     assert.equal(f.state.publicationAttempts.length,0);
-    // When authorization rejects a changed proof, closes cleanly, then succeeds through a fresh host process.
-    await assert.rejects(invoke('payment.authorize',{requestId:paymentId,proof:{challengeId:proof.challengeId,message:proof.message.replace('Binding Hash:','Changed Hash:')}}));
-    const authorized=await invoke('payment.authorize',{requestId:paymentId,proof:{challengeId:proof.challengeId,message:proof.message}});
+    // When status and prepare reopen the journal in fresh wallet processes.
     const recovered=await invoke('payment.status',{requestId:paymentId});
     const retried=await invoke('payment.prepare',request);
     // Then status/retry reopen the same journal and preserve its exact header, candidate, allowance and selection.
-    assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,authorized.paymentSignature);
-    assert.equal(retried.hash,prepared.hash);assert.equal(retried.paymentSignature,authorized.paymentSignature);
+    assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,prepared.paymentSignature);
+    assert.equal(retried.hash,prepared.hash);assert.equal(retried.paymentSignature,prepared.paymentSignature);
     assert.equal(f.app.ledger.get(paymentId).transactionJson,record.transactionJson);
     const decoded=decodePaymentHeader(recovered.paymentSignature);
     assert.equal(decoded.payload.transaction.block.receiverAddress,p.recipientAddress);
     assert.equal(decoded.payload.transaction.block.amount,'40');
-    assert.equal(decoded.extensions['marketplace-binding'].proof.message,proof.message);
+    assert.deepEqual(Object.keys(decoded.extensions),['payment-identifier']);
+    assert.deepEqual(decoded.extensions['payment-identifier'].info,{required:true,id:paymentId});
     assert.deepEqual(readWalletSelection(home).attoAccess,access);
     assert.equal(f.app.ledger.usage().pendingRaw,'40');assert.equal(f.app.ledger.journalList().items.length,1);
     assert.equal(f.state.publicationAttempts.length,0);
@@ -62,5 +61,5 @@ test('private ATTO process bridge finishes asynchronous payment operations befor
     await assert.rejects(invoke('payment.status',{requestId:paymentId,index:0}),{code:'INVALID_REQUEST'});
     await saveWalletSelection(home,{attoAccess:{...access,externalTransfers:false}});
     await assert.rejects(invoke('payment.prepare',request),{code:'PERMISSION_DENIED'});
-    assert.equal((await invoke('payment.status',{requestId:paymentId})).paymentSignature,authorized.paymentSignature);
+    assert.equal((await invoke('payment.status',{requestId:paymentId})).paymentSignature,prepared.paymentSignature);
   });

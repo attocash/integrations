@@ -10,7 +10,7 @@ import { selectedAttoWallet } from './wallet-access.js';
 import { canonicalWalletDestination, normalizeWalletResult, publicWalletIdentity } from './wallet-results.js';
 
 export const walletOperations = ['controller.sign','identity.list','balance.get',
-  'transfer.send','transfer.status','receive','receivable.list','payment.prepare','payment.authorize','payment.status'] as const;
+  'transfer.send','transfer.status','receive','receivable.list','payment.prepare','payment.status'] as const;
 export type WalletOperation = typeof walletOperations[number];
 export type WalletAsset = 'ATTO' | 'XNO';
 export interface WalletRequest {
@@ -27,14 +27,14 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
   if (!internal && Object.hasOwn(request.input, 'index')) throw walletError('INVALID_REQUEST');
   if (request.asset === 'XNO') {
     const names: Record<WalletOperation,string> = {'controller.sign':'message.sign','identity.list':'identity.list','balance.get':'balance.get',
-      'payment.prepare':'payment.prepare','payment.authorize':'payment.authorize','payment.status':'payment.status',
+      'payment.prepare':'payment.prepare','payment.status':'payment.status',
       'transfer.send':'transfer.send','transfer.status':'transfer.status',receive:'receive','receivable.list':'receivable.list'};
-    const selected=request.operation==='controller.sign'&&request.input.purpose!=='payment evidence'&&env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR
+    const selected=request.operation==='controller.sign'&&env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR
       ? {...env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR}:env;
     const dispatch = () => dispatchNanoOperation(selected, names[request.operation], request.input,
       workProvider && (configuration => usesMarketplaceWork(configuration) ? workProvider : undefined));
     if (request.operation === 'controller.sign' || request.operation === 'payment.prepare'
-      || request.operation === 'payment.authorize' || request.operation === 'payment.status') return dispatch();
+      || request.operation === 'payment.status') return dispatch();
     const configuration = loadConfiguration(defaultDataDirectory(selected));
     const identity = publicWalletIdentity({asset:'XNO',network:configuration.network,address:configuration.sourceAddress,
       index:configuration.derivationIndex,permissions:{externalTransfers:configuration.grants.externalTransfers,receive:configuration.grants.externalTransfers}});
@@ -68,19 +68,19 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
         || currentIdentity.fingerprint !== originalIdentity.fingerprint) {
         throw walletError('WALLET_SETUP_REQUIRED');
       }
-      const allowed = request.operation === 'transfer.send' || ['payment.prepare','payment.authorize'].includes(request.operation) ? current.permissions.externalTransfers
+      const allowed = request.operation === 'transfer.send' || request.operation === 'payment.prepare' ? current.permissions.externalTransfers
         : request.operation === 'receive' ? current.permissions.receive : true;
       if (!allowed) throw walletError('PERMISSION_DENIED');
     }});
   try {
     const names: Record<WalletOperation,string> = {'controller.sign':'message_sign','identity.list':'wallet_status','balance.get':'balances_get',
-      'payment.prepare':'payment_prepare','payment.authorize':'payment_authorize','payment.status':'payment_status',
+      'payment.prepare':'payment_prepare','payment.status':'payment_status',
       'transfer.send':'send','transfer.status':'journal_get',receive:'receive','receivable.list':'receivables_list'};
     const args = {...request.input};
     status = await app.call('wallet_status', {}) as Record<string, unknown>;
     selection = selectedAttoWallet(env, status);
     const identity = publicWalletIdentity({asset:'ATTO',...selection});
-    if (request.operation === 'payment.prepare' || request.operation === 'payment.authorize' || request.operation === 'payment.status') {
+    if (request.operation === 'payment.prepare' || request.operation === 'payment.status') {
       args.index = identity.index;
       return await app.call(names[request.operation], args);
     }

@@ -75,7 +75,7 @@ signatures for that key. Grant only keys approved for those purposes, and sign
 only challenges you trust. `message_verify` checks the same exact bytes with
 public data and does not read wallet credentials.
 
-Marketplace MCP uses the local native wallet child to send directly under its independently approved external-transfer grant. The requirement UUID is the durable wallet request ID. The wallet journals the signed candidate before publishing and recovers the same candidate after uncertain responses. Marketplace receives only the SEND hash and a proof bound to the exact frozen requirement; its independent network verification determines payment status.
+Marketplace MCP uses the selected native wallet’s external-transfer grant and spending limits. The wallet signs the SEND and journals it under the requirement UUID. Marketplace broadcasts that signed transaction and independently confirms it on the native network. Retrying the same requirement reuses the saved candidate and x402 header.
 
 Limits apply to all CLI and MCP sends in that profile, across every derived
 address and including ordinary payments to owned addresses. Internal transfers
@@ -89,7 +89,7 @@ running as the same OS user.
 
 ## Marketplace direct payments
 
-Use the separate Marketplace MCP package for named task, Shop, direct-payment evidence and own-publication-fee workflows. Standalone ATTO transfers still use the existing local send/spending journal. The Marketplace backend never signs or broadcasts customer payments.
+Use the separate Marketplace MCP package for task and Shop payments, publication fees and verification of externally broadcast SENDs. Its `marketplace_payment_evidence` tool accepts the payment ID, request ID and transaction hash. Standalone ATTO transfers use the local spending journal and wallet publisher.
 
 The CLI retains local typed identity/credential approvals. Connect its identity context with `atto marketplace connect --api-url https://<api-origin>/v1/agent/payments --audience <exact-audience> --controller-index <index>` and only explicitly authorised browser origins. No Marketplace topup/status operation exists. Use the current [Marketplace MCP reference](marketplace-mcp-reference.md) for its tools.
 

@@ -21,7 +21,7 @@ import { SpendLedger, type ConsolidationStep, type SendRecord } from './ledger.j
 import { planPayment, type PoolAccount } from './pool.js';
 import { reconcileBlock, reconcileSend } from './reconcile.js';
 import { wireTransaction } from './atto-x402.js';
-import { parseRelayOffer, relayPaymentPayload, relayProofFromHeader, validateRelayChallenge, validateRelayProof, type RelayRequest } from '../marketplace/relay.js';
+import { parseRelayOffer, relayPaymentPayload, validateRetainedRelayPayload, type RelayRequest } from '../marketplace/relay.js';
 
 interface PaymentWallet {
   settings(): WalletSettings;
@@ -404,7 +404,7 @@ export class Payments {
         const saved = this.ledger.reserve({ id: request.requestId, index: request.index, destination: offer.terms.recipientAddress,
           raw: offer.terms.amountAtomic, sourceAddress: offer.terms.senderAddress, network: this.wallet.settings().network,
           selection: 'explicit', createdAt: existing?.createdAt ?? Date.now(), relay: { ...request, version: 1 } });
-        this.requireApproved(saved);
+        this.requireApproved(saved, saved.status !== 'published');
         return saved;
       });
       if (record.status === 'failed') throw new AttoError('REQUEST_FAILED', 'Recover this original rejected native payment; no replacement was prepared.');
@@ -429,10 +429,19 @@ export class Payments {
           await this.store.withWalletLock(async () => {
             const current = this.ledger.get(record.id)!;
             this.requireApproved(current); this.checkBlock(current, transaction.block);
-            parseRelayOffer(current.relay!);
-            this.ledger.signed(record.id, transaction.hash.toString(), transaction.block.toJson(), transaction.toJson(), this.candidateBinding(current));
+            const header = relayPaymentPayload(offer, record.id, { transaction: wireTransaction(transaction) });
+            this.ledger.signed(record.id, transaction.hash.toString(), transaction.block.toJson(), transaction.toJson(), this.candidateBinding(current), header);
           });
         } finally { wallet?.close(); seed.value.fill(0); }
+      } else if (!record.relay!.paymentSignature) {
+        // Complete a pre-upgrade prepare using the original signed transaction.
+        const transaction = await this.retainedTransaction(record);
+        const header = relayPaymentPayload(offer, record.id, { transaction: wireTransaction(transaction) });
+        await this.store.withWalletLock(async () => {
+          const current = this.ledger.get(record.id)!;
+          this.requireApproved(current, current.status !== 'published');
+          this.ledger.authorizeRelay(record.id, header);
+        });
       }
       return this.relayResult(this.ledger.get(record.id)!);
     });
@@ -441,15 +450,16 @@ export class Payments {
   private async relayResult(record: SendRecord): Promise<unknown> {
     if (!record.relay) throw new AttoError('REQUEST_CONFLICT', 'This request belongs to another wallet operation.');
     const transaction = record.hash ? await this.retainedTransaction(record) : undefined;
-    if (record.relay.paymentSignature && transaction) {
-      const offer = parseRelayOffer(record.relay, true), proof = relayProofFromHeader(record.relay.paymentSignature);
-      validateRelayProof(offer, transaction.hash.toString(), record.relay.audience, proof, true);
-      if (relayPaymentPayload(offer, record.id, { transaction: wireTransaction(transaction) }, proof) !== record.relay.paymentSignature
-        || !await AttoSignature.Companion.parse(proof.signature).isValidMessage(transaction.address.publicKey, Int8Array.from(Buffer.from(proof.message)))) {
+    if (record.relay.paymentSignature) {
+      if (!transaction) throw new AttoError('INVALID_STATE', 'Missing signed relay transaction.');
+      const offer = parseRelayOffer(record.relay, true);
+      const { payload, proof } = validateRetainedRelayPayload(offer, record.id, record.relay.paymentSignature, transaction.hash.toString());
+      if (!isDeepStrictEqual(payload, { transaction: wireTransaction(transaction) })
+        || (proof && !await AttoSignature.Companion.parse(proof.signature).isValidMessage(transaction.address.publicKey, Int8Array.from(Buffer.from(proof.message))))) {
         throw new AttoError('INVALID_STATE', 'The retained relay payload differs from its original authorization.');
       }
     }
-    return { requestId: record.id, network: record.relay.terms.network, sourceAddress: record.sourceAddress,
+    return { requestId: record.id, origin: record.relay.origin, audience: record.relay.audience, terms: record.relay.terms, network: record.relay.terms.network, sourceAddress: record.sourceAddress,
       destination: record.destination, amountAtomic: record.raw, hash: record.hash ?? null, state: record.status,
       paymentRequired: record.relay.paymentRequired, paymentSignature: record.relay.paymentSignature ?? null };
   }
@@ -462,37 +472,6 @@ export class Payments {
       if (!record.relay) throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another native operation.');
       await this.reconcileRecord(record);
       return this.relayResult(this.ledger.get(requestId)!);
-    });
-  }
-
-  async authorizeRelay(input: Record<string, unknown>): Promise<unknown> {
-    const { requestId, index, proof: suppliedProof } = z.strictObject({ requestId: z.string().uuid(), index: z.number().int().min(0).max(0x7fff_ffff).optional(), proof: z.strictObject({ challengeId: z.string().uuid(), message: z.string(), signature: z.string().optional() }) }).parse(input);
-    const record = this.ledger.get(requestId);
-    if (!record?.relay || !record.hash) throw new AttoError('REQUEST_CONFLICT', 'Prepare this original relay payment first.');
-    if (index !== undefined && index !== record.index) throw new AttoError('REQUEST_CONFLICT', 'The original relay belongs to another selected wallet account.');
-    return this.store.withAccountLocks([record.index], async () => {
-      if (record.relay!.paymentSignature) return this.relayResult(record);
-      const transaction = await this.retainedTransaction(record), offer = parseRelayOffer(record.relay!);
-      // Validate the complete typed frame before key access. This authorizes no general message signing.
-      validateRelayChallenge(offer.terms, record.hash!, record.relay!.audience, suppliedProof);
-      let signature = suppliedProof.signature;
-      if (!signature) {
-        await this.store.withWalletLock(async () => this.requireApproved(this.ledger.get(record.id)!));
-        const seed = await this.wallet.seed();
-        try {
-          const signer = await derivedSigner(seed, record.index);
-          if (signer.address.value !== record.sourceAddress) throw new AttoError('WALLET_MISMATCH', 'The payment proof signer differs from its retained sender.');
-          signature = (await signer.signMessage(Int8Array.from(Buffer.from(suppliedProof.message)))).toString();
-        } finally { seed.value.fill(0); }
-      }
-      const proof = { ...suppliedProof, signature };
-      validateRelayProof(offer, record.hash!, record.relay!.audience, proof);
-      if (!await AttoSignature.Companion.parse(proof.signature).isValidMessage(transaction.address.publicKey, Int8Array.from(Buffer.from(proof.message)))) {
-        throw new AttoError('PAYMENT_PROTOCOL', 'Invalid wallet proof for this payment.');
-      }
-      const paymentSignature = relayPaymentPayload(offer, record.id, { transaction: wireTransaction(transaction) }, proof);
-      await this.store.withWalletLock(async () => { this.requireApproved(this.ledger.get(record.id)!); this.ledger.authorizeRelay(record.id, paymentSignature); });
-      return this.relayResult(this.ledger.get(record.id)!);
     });
   }
 

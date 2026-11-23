@@ -383,7 +383,7 @@ export class SpendLedger {
     } : {}) };
   }
 
-  signed(id: string, hash: string, blockJson: string, transactionJson?: string, candidateBinding?: string): void {
+  signed(id: string, hash: string, blockJson: string, transactionJson?: string, candidateBinding?: string, paymentSignature?: string): void {
     this.update(id, (record) => {
       if (record.status === 'published' || record.status === 'failed' || (record.hash && (record.hash !== hash || record.blockJson !== blockJson))
         || (record.transactionJson !== undefined && (record.transactionJson !== transactionJson || record.candidateBinding !== candidateBinding))) {
@@ -391,7 +391,10 @@ export class SpendLedger {
       }
       if (!hash || !blockJson) throw new AttoError('SEND_STATE', 'A signed payment requires its block hash and block.');
       if (record.plan?.steps.some(step => step.status !== 'published')) throw new AttoError('SEND_STATE', 'Complete every consolidation step before signing the external payment.');
-      return { ...record, hash, blockJson, ...(transactionJson !== undefined ? { transactionJson, candidateBinding } : {}), status: 'signed' };
+      if (paymentSignature !== undefined && (!record.relay || !transactionJson || (record.relay.paymentSignature !== undefined && record.relay.paymentSignature !== paymentSignature))) {
+        throw new AttoError('SEND_STATE', 'The relay header must belong to its original signed payment.');
+      }
+      return { ...record, ...(paymentSignature !== undefined && { relay: { ...record.relay!, paymentSignature } }), hash, blockJson, ...(transactionJson !== undefined ? { transactionJson, candidateBinding } : {}), status: 'signed' };
     });
   }
 

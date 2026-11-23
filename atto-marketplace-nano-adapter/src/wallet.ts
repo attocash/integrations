@@ -1,12 +1,12 @@
 import { parseJsonObject } from './json.js';
-import { NanoStateBlock, MAX_RAW, ZERO_HASH, addressPublicKey, canonicalAddress, canonicalHash, upperHex, validWork, offchainSign, type NanoNetwork } from './protocol.js';
-import { parseRelayOffer, relayPaymentPayload, validateRelayChallenge, type RelayRequest, type RelayProof } from '@attocash/cli/internal-marketplace';
+import { NanoStateBlock, MAX_RAW, ZERO_HASH, addressPublicKey, canonicalAddress, canonicalHash, upperHex, validWork, type NanoNetwork } from './protocol.js';
+import { parseRelayOffer, relayPaymentPayload, type RelayRequest } from '@attocash/cli/internal-marketplace';
 import { NanoRpcClient, DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, requireConfirmedFrontier, type NanoAccountSnapshot, type NanoWorkProvider } from './rpc.js';
 import { canonical, defaultDataDirectory, exactKeys, loadConfiguration, positiveRaw, sha256, text, withPrivateKey, type NanoWalletConfiguration } from './configuration.js';
 import { signControllerProof, validateControllerProof, verifyNanoMessage, type ControllerProofRequest } from './controller.js';
 import { NanoJournal, type JournalRecord } from './journal.js';
 import { fail } from './errors.js';
-import { checkRelayCandidateTerms, verifyRelayAuthorization, verifyRelayHeader, walletRelayOffer } from './relay.js';
+import { checkRelayCandidateTerms, verifyRelayHeader, walletRelayOffer } from './relay.js';
 export type NanoRpc = Pick<NanoRpcClient, 'requirePinnedNetwork' | 'accountSnapshot' | 'accountSnapshotOrNotFound' | 'blockInfo' | 'generateWork' | 'generateOpenWork' | 'process' | 'processDevOpen' | 'receivable' | 'receivableExists' | 'verifyFrontierState' | 'validSourceBlock' | 'validConfirmedBlock' | 'requireLoopbackDevelopmentEndpoint'>;
 export interface NanoWalletOpenOptions {
     dataDir?: string;
@@ -171,7 +171,6 @@ export class NanoWallet {
             case 'message.verify': return { valid: verifyNanoMessage(args as any) };
             case 'transfer.send': return await this.locked(() => this.transfer(args));
             case 'payment.prepare': return await this.locked(() => this.prepareRelay(args));
-            case 'payment.authorize': return await this.locked(() => this.authorizeRelay(args));
             case 'payment.status': {
                 exactKeys(args, ['requestId']);
                 return this.relayStatus(this.requestId(args.requestId));
@@ -265,7 +264,7 @@ export class NanoWallet {
         if (prior) {
             if (!(relay && prior.state === 'PREPARING')) this.journal.requireTerms(prior, input);
             if (prior.state !== 'PREPARING')
-                return relay ? this.relayResult(prior) : await this.publishNative(prior, true);
+                return relay ? this.preparedRelayResult(prior, relay) : await this.publishNative(prior, true);
         }
         if (!this.configuration.grants.externalTransfers)
             fail('PERMISSION_DENIED', 'External Nano transfers require their own local terminal grant.');
@@ -275,7 +274,7 @@ export class NanoWallet {
         await this.rpc.requirePinnedNetwork();
         const reservation = this.journal.begin(input, this.now(), this.rollingLimit());
         if (reservation.state !== 'PREPARING')
-            return relay ? this.relayResult(reservation) : await this.publishNative(reservation, true);
+            return relay ? this.preparedRelayResult(reservation, relay) : await this.publishNative(reservation, true);
         const record = await this.prepareCandidate(reservation, amount, {kind: 'transfer', destination, ...(relay && {relay})});
         return relay ? this.relayResult(record) : this.publishNative(record, false);
     }
@@ -290,6 +289,15 @@ export class NanoWallet {
         }
         return this.transfer({ requestId: request.requestId, network: offer.terms.network, destination: offer.terms.recipientAddress, amountAtomic: offer.terms.amountAtomic }, request);
     }
+    private preparedRelayResult(record: JournalRecord, request: RelayRequest): Record<string, unknown> {
+        if (!this.journal.relayHeader(record.id) && record.state !== 'COMPETING') {
+            // A previous wallet version could stop after persisting the signed SEND.
+            const block = this.savedBlock(record);
+            this.requireSigningAuthority(BigInt(record.amount));
+            this.journal.authorizeRelay(record.id, relayPaymentPayload(parseRelayOffer(request, true), request.requestId, { block: block.toWire() }));
+        }
+        return this.relayResult(record);
+    }
     private relayResult(record: JournalRecord): Record<string, unknown> {
         this.configuredRecord(record);
         const terms = parseJsonObject(record.requestJson), request = terms.relay as RelayRequest;
@@ -297,30 +305,8 @@ export class NanoWallet {
         const offer = parseRelayOffer(request, true), block = record.blockHash ? this.savedBlock(record) : undefined, header = this.journal.relayHeader(record.id);
         if (header)
             verifyRelayHeader(request, offer, block, header);
-        return { requestId: request.requestId, network: record.network, sourceAddress: record.source, destination: record.destination,
+        return { requestId: request.requestId, origin: request.origin, audience: request.audience, terms: request.terms, network: record.network, sourceAddress: record.source, destination: record.destination,
             amountAtomic: record.amount, hash: record.blockHash, state: record.state, paymentRequired: request.paymentRequired, paymentSignature: header ?? null };
-    }
-    private async authorizeRelay(args: Record<string, unknown>): Promise<Record<string, unknown>> {
-        exactKeys(args, ['requestId', 'proof']);
-        const record = this.journal.find(`transfer:${this.requestId(args.requestId)}`);
-        if (!record?.blockHash) fail('JOURNAL_CONFLICT');
-        if (this.journal.relayHeader(record.id)) return this.relayResult(record);
-        const request = parseJsonObject(record.requestJson).relay as RelayRequest, offer = parseRelayOffer(request), block = this.savedBlock(record);
-        const supplied = args.proof as Omit<RelayProof, 'signature'> & { signature?: string };
-        validateRelayChallenge(offer.terms, block.hash, request.audience, supplied);
-        let signature = supplied.signature;
-        if (signature === undefined) {
-            this.requireSigningAuthority(BigInt(record.amount));
-            signature = await withPrivateKey(this.configuration, key => {
-                this.requireSigningAuthority(BigInt(record.amount));
-                return upperHex(offchainSign(key, supplied.message));
-            });
-        }
-        const proof = { ...supplied, signature };
-        verifyRelayAuthorization(request, offer, block, proof);
-        this.requireSigningAuthority(BigInt(record.amount));
-        this.journal.authorizeRelay(record.id, relayPaymentPayload(offer, request.requestId, { block: block.toWire() }, proof));
-        return this.relayResult(record);
     }
     private async funding(hash: string, devOnly: boolean): Promise<bigint> {
         const send = await this.rpc.blockInfo(hash);
@@ -389,12 +375,15 @@ export class NanoWallet {
             const {account, block} = intent.kind === 'transfer'
                 ? await this.signTransferCandidate(amount, intent.destination)
                 : await this.signReceiveCandidate(amount, intent.hash, intent.devOnly);
-            if (intent.kind === 'transfer' && intent.relay)
-                parseRelayOffer(intent.relay);
+            let header: string | undefined;
+            if (intent.kind === 'transfer' && intent.relay) {
+                this.requireSigningAuthority(amount);
+                header = relayPaymentPayload(parseRelayOffer(intent.relay), intent.relay.requestId, { block: block.toWire() });
+            }
             return this.journal.save(reservation.id, {
                 epoch: account.epoch, previous: account.frontier, previousBalance: String(account.balance),
                 representative: account.representative, blockJson: canonical(block.toWire()), blockHash: block.hash,
-            });
+            }, header);
         }
         catch (error) {
             this.journal.abort(reservation.id);

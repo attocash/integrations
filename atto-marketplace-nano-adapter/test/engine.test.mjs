@@ -12,8 +12,8 @@ import { canonical, sha256 } from '../dist/configuration.js';
 import { NanoJournal } from '../dist/journal.js';
 import { NanoRpcClient, epochLink, DEV_GENESIS_ACCOUNT } from '../dist/rpc.js';
 import { hexBytes, sign, offchainSign } from '../dist/protocol.js';
-import { relayEvidenceBinding, decodePaymentHeader } from '@attocash/cli/internal-marketplace';
-import { offer, terms, challenge, paymentId } from '../../test/support/relay.mjs';
+import { decodePaymentHeader } from '@attocash/cli/internal-marketplace';
+import { offer, legacyOffer, legacyHeader, terms, legacyChallenge, paymentId } from '../../test/support/relay.mjs';
 import { securePrivatePermissions } from '@attocash/cli/internal-marketplace';
 import { publishPrivate, readPrivate, processOwnerAlive } from '../dist/private-files.js';
 import * as nanoAdapter from '../dist/index.js';
@@ -934,24 +934,23 @@ test('fixture cleanup closes restarted wallets before removing exact signed reco
 });
 
 
-test('x402 relay preparation and original proof survive restart without Nano publication or a second allowance',async t=>{
+test('x402 relay preparation and original header survive restart without Nano publication or a second allowance',async t=>{
     // Given immutable seller terms and the selected native wallet's existing transfer authority.
     const f=await fixture(t),p=terms('XNO',f.source,f.destination),request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:offer(p,'http://localhost:8080')};
     let wallet=f.open();
     // When the wallet prepares its candidate and durably retains the exact final header.
-    const prepared=await wallet.call('payment.prepare',request),c=challenge(p,prepared.hash,relayEvidenceBinding);
-    const proof={challengeId:c.challengeId,message:c.message,signature:upperHex(offchainSign(f.key,c.message))};
-    const authorized=await wallet.call('payment.authorize',{requestId:paymentId,proof:{challengeId:proof.challengeId,message:proof.message}});
+    const prepared=await wallet.call('payment.prepare',request);
     wallet.close();wallet=f.open(now+172800000);
     const pinCount = f.pinCount;
     await assert.rejects(wallet.call('transfer.status', { requestId: paymentId }), { code: 'NOT_FOUND' });
     assert.equal(f.pinCount, pinCount);
     const recovered=await wallet.call('payment.status',{requestId:paymentId});
     // Then Market can recover the unchanged candidate while status and generic sends cannot publish or replace it.
-    assert.equal(f.published.length,0);assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,authorized.paymentSignature);
+    assert.equal(f.published.length,0);assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,prepared.paymentSignature);
     const payload=decodePaymentHeader(recovered.paymentSignature);
     assert.equal(payload.payload.block.link_as_account,f.destination);assert.equal(payload.payload.block.balance,'960');
-    assert.deepEqual(payload.extensions['marketplace-binding'].proof,proof);
+    assert.deepEqual(Object.keys(payload.extensions),['payment-identifier']);
+    assert.equal(payload.extensions['payment-identifier'].info.id,paymentId);
     await assert.rejects(wallet.call('transfer.send',transfer(f,'40',paymentId)),{code:'HANDLE_REUSE'});
     await assert.rejects(wallet.call('transfer.send',transfer(f,'1')),{code:'SOURCE_FENCED'});
     assert.equal((await wallet.call('payment.prepare',request)).paymentSignature,recovered.paymentSignature);
@@ -968,54 +967,75 @@ test('x402 relay preparation and original proof survive restart without Nano pub
     assert.equal(confirmed.paymentSignature,recovered.paymentSignature);
 });
 
-test('x402 relay refuses a changed offer and proof before native publication',async t=>{
-    // Given a locally prepared SEND for one exact requirement.
+test('x402 relay rejects changed terms and requires the existing transfer grant',async t=>{
     const f=await fixture(t),wallet=f.open(),p=terms('XNO',f.source,f.destination),request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:offer(p,'http://localhost:8080')};
-    const prepared=await wallet.call('payment.prepare',request),c=challenge(p,'f'.repeat(64),relayEvidenceBinding);
-    // When another native hash or changed amount is offered under the original operation ID.
-    // Then no candidate or wallet proof can be replaced and the node receives no SEND.
-    await assert.rejects(wallet.call('payment.authorize',{requestId:paymentId,proof:{challengeId:c.challengeId,message:c.message,signature:upperHex(offchainSign(f.key,c.message))}}));
+    await approveNanoWalletPolicy({dataDir:f.dir,grants:{externalTransfers:false,controllerPurposes:[]},limits:{maxPaymentAtomic:'100',rolling24hAtomic:'100'},terminalConfirmed:true});
+    await assert.rejects(wallet.call('payment.prepare',request),{code:'PERMISSION_DENIED'});
+    await approveNanoWalletPolicy({dataDir:f.dir,grants:{externalTransfers:true,controllerPurposes:[]},limits:{maxPaymentAtomic:'100',rolling24hAtomic:'100'},terminalConfirmed:true});
+    const prepared=await wallet.call('payment.prepare',request);
     await assert.rejects(wallet.call('payment.prepare',{...request,terms:{...p,amountAtomic:'41'}}));
+    await assert.rejects(wallet.call('payment.prepare',{...request,terms:{...p,termsHash:'c'.repeat(64)}}),{code:'HANDLE_REUSE'});
     assert.equal((await wallet.call('payment.status',{requestId:paymentId})).hash,prepared.hash);
     assert.equal(f.published.length,0);
 });
 
-test('a killed unsigned Nano relay refreshes only its expired offer while a live signer and retained candidate stay fenced', {timeout:20000},async t=>{
+for(const hasHeader of [false,true]) test(`Nano reopens a previous-version ${hasHeader?'authorized':'prepared'} relay without signing another block`, async t=>{
+    const f=await fixture(t),p=terms('XNO',f.source,f.destination);
+    const request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:legacyOffer(p,'http://localhost:8080',now)};
+    const requestJson=canonical({...transfer(f,'40',paymentId),relay:request}),journal=new NanoJournal(f.dir),id='transfer:'+paymentId;
+    journal.begin({id,kind:'transfer',digest:sha256(requestJson),requestJson,uniqueId:id,source:f.source,network:p.network,amount:p.amountAtomic,destination:f.destination},now,100n);
+    const prior=f.account,block=NanoStateBlock.signed(f.key,prior.frontier,f.source,960n,upperHex(addressPublicKey(f.destination)),work(prior.frontier));
+    journal.save(id,{epoch:prior.epoch,previous:prior.frontier,previousBalance:'1000',representative:f.source,blockJson:canonical(block.toWire()),blockHash:block.hash});
+    let header;
+    if(hasHeader) {
+        const c=legacyChallenge(p,block.hash,request.audience,now);
+        header=legacyHeader(request,{block:block.toWire()},{challengeId:c.challengeId,message:c.message,signature:upperHex(offchainSign(f.key,c.message))});
+        journal.authorizeRelay(id,header);
+    }
+    journal.close();
+    f.rpc.generateWork=async()=>assert.fail('Recovery requested another block');
+    const wallet=f.open(),status=await wallet.call('payment.status',{requestId:paymentId});
+    assert.equal(status.paymentSignature,header??null);
+    const prepared=await wallet.call('payment.prepare',request);
+    assert.equal(prepared.hash,block.hash);assert.equal(prepared.paymentRequired,request.paymentRequired);
+    if(hasHeader) assert.equal(prepared.paymentSignature,header);
+    else assert.deepEqual(Object.keys(decodePaymentHeader(prepared.paymentSignature).extensions),['payment-identifier']);
+    assert.deepEqual(decodePaymentHeader(prepared.paymentSignature).payload.block,block.toWire());
+    assert.equal((await wallet.call('payment.status',{requestId:paymentId})).paymentSignature,prepared.paymentSignature);
+    assert.equal(f.published.length,0);
+});
+
+test('an unsigned pre-upgrade Nano relay resumes its original reservation after its owner exits', {timeout:20000},async t=>{
     // Given a real process holding the original source lane before work or a signed candidate exists.
     const f=await fixture(t),p=terms('XNO',f.source,f.destination),request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:offer(p,'http://localhost:8080')};
+    const oldRequest={...request,paymentRequired:legacyOffer(p,request.origin,now)};
+    const requestJson=canonical({...transfer(f,'40',paymentId),relay:oldRequest}),id='transfer:'+paymentId;
+    const reservation={id,kind:'transfer',digest:sha256(requestJson),requestJson,uniqueId:id,source:f.source,network:p.network,amount:p.amountAtomic,destination:f.destination};
     const childCode=`
-      import {NanoWallet} from ${JSON.stringify(new URL('../dist/index.js',import.meta.url).href)};
-      const [dataDir,source,requestText]=process.argv.slice(1),snapshot={frontier:'A'.repeat(64),confirmedFrontier:'A'.repeat(64),balance:1000n,confirmedBalance:1000n,representative:source,confirmedRepresentative:source,epoch:2};
-      const rpc={requirePinnedNetwork:async()=>{},accountSnapshot:async()=>snapshot,verifyFrontierState:async()=>{},generateWork:async()=>{console.log('WORK_PENDING');await new Promise(r=>setTimeout(r,60000));}};
-      const wallet=NanoWallet.open({dataDir,rpc});try{await wallet.call('payment.prepare',JSON.parse(requestText));}finally{wallet.close();}
+      import {NanoJournal} from ${JSON.stringify(new URL('../dist/journal.js',import.meta.url).href)};
+      const journal=new NanoJournal(process.argv[1]);
+      journal.begin(JSON.parse(process.argv[2]),${now},100n);
+      console.log('RESERVED');
+      await new Promise(r=>setTimeout(r,60000));
     `;
-    const held=f.trackChild(spawn(process.execPath,['--input-type=module','-e',childCode,f.dir,f.source,JSON.stringify(request)],{stdio:['ignore','pipe','pipe']}));
-    held.stderr.resume();const [pending]=await once(held.stdout,'data');assert.match(String(pending),/WORK_PENDING/);
+    const held=f.trackChild(spawn(process.execPath,['--input-type=module','-e',childCode,f.dir,JSON.stringify(reservation)],{stdio:['ignore','pipe','pipe']}));
+    held.stderr.resume();const [pending]=await once(held.stdout,'data');assert.match(String(pending),/RESERVED/);
     const beforeJournal=new NanoJournal(f.dir),original=beforeJournal.find(`transfer:${paymentId}`);beforeJournal.close();
     assert.equal(original.blockHash,null);assert.equal(original.blockJson,null);
-    const realNow=Date.now,advanced=realNow()+400000;Date.now=()=>advanced;
-    try {
-        const wallet=f.open(),fresh={...request,paymentRequired:offer(p,request.origin,advanced)};
-        // When refresh races the live signer, then its live ownership wins and no window is replaced.
-        await assert.rejects(wallet.call('payment.prepare',fresh),{code:'PAYMENT_IN_PROGRESS'});
-        const still=new NanoJournal(f.dir);assert.equal(still.find(original.id).requestJson,original.requestJson);still.close();
-        const exited=once(held,'exit');held.kill('SIGKILL');await exited;
-        await assert.rejects(wallet.call('transfer.status', { requestId: paymentId }), { code: 'NOT_FOUND' });
-        const unsigned = await wallet.call('payment.status', { requestId: paymentId });
-        assert.equal(unsigned.state, 'PREPARING');
-        assert.equal(unsigned.hash, null);
-        assert.equal(unsigned.paymentRequired, request.paymentRequired);
-        // When the original process is proven dead, its unsigned reservation can adopt the fresh backend window.
-        const recovered=await wallet.call('payment.prepare',fresh),afterJournal=new NanoJournal(f.dir),after=afterJournal.find(original.id);
-        // Then identity, original reservation time and amount remain; exactly one complete native candidate is retained.
-        assert.equal(after.createdAt,original.createdAt);assert.equal(after.amount,original.amount);assert.equal(after.uniqueId,original.uniqueId);
-        assert.notEqual(after.owner,original.owner);assert.equal(JSON.parse(after.requestJson).relay.paymentRequired,fresh.paymentRequired);
-        assert.equal(after.blockHash,recovered.hash);assert.equal(f.published.length,0);
-        const future={...fresh,paymentRequired:offer(p,request.origin,advanced+400000)};
-        await assert.rejects(wallet.call('payment.prepare',future),{code:'HANDLE_REUSE'});
-        assert.throws(()=>afterJournal.db.prepare('UPDATE operations SET owner=? WHERE id=?').run('replacement',original.id),/immutable wallet terms/);
-        assert.equal(afterJournal.find(original.id).blockJson,after.blockJson);afterJournal.close();
-    } finally {Date.now=realNow;}
+    const wallet=f.open();
+    await assert.rejects(wallet.call('payment.prepare',request),{code:'PAYMENT_IN_PROGRESS'});
+    const still=new NanoJournal(f.dir);assert.equal(still.find(original.id).requestJson,original.requestJson);still.close();
+    const exited=once(held,'exit');held.kill('SIGKILL');await exited;
+    await assert.rejects(wallet.call('transfer.status', { requestId: paymentId }), { code: 'NOT_FOUND' });
+    const unsigned = await wallet.call('payment.status', { requestId: paymentId });
+    assert.equal(unsigned.state, 'PREPARING');assert.equal(unsigned.hash, null);assert.equal(unsigned.paymentRequired, oldRequest.paymentRequired);
+    await assert.rejects(wallet.call('payment.prepare',{...request,terms:{...p,termsHash:'c'.repeat(64)}}));
+    const recovered=await wallet.call('payment.prepare',request),afterJournal=new NanoJournal(f.dir),after=afterJournal.find(original.id);
+    assert.equal(after.createdAt,original.createdAt);assert.equal(after.amount,original.amount);assert.equal(after.uniqueId,original.uniqueId);
+    assert.notEqual(after.owner,original.owner);assert.equal(JSON.parse(after.requestJson).relay.paymentRequired,request.paymentRequired);
+    assert.equal(after.blockHash,recovered.hash);assert.equal(afterJournal.relayHeader(after.id),recovered.paymentSignature);assert.equal(f.published.length,0);
+    assert.throws(()=>afterJournal.db.prepare('UPDATE operations SET owner=? WHERE id=?').run('replacement',original.id),/immutable wallet terms/);
+    assert.equal(afterJournal.find(original.id).blockJson,after.blockJson);afterJournal.close();
 });
 
 test('Unlimited retains spend history so a later finite policy counts earlier transfers', async t=>{

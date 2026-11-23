@@ -5,9 +5,9 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
 import { fixture, gate, until } from './support/payments.mjs';
-import { offer, terms, challenge, paymentId } from '../../test/support/relay.mjs';
+import { offer, legacyOffer, legacyHeader, terms, legacyChallenge, paymentId } from '../../test/support/relay.mjs';
 import { derivedSigner, mnemonicSeed } from '../dist/wallet/signing.js';
-import { parseRelayOffer, relayEvidenceBinding, decodePaymentHeader } from '../dist/marketplace/relay.js';
+import { parseRelayOffer, decodePaymentHeader } from '../dist/marketplace/relay.js';
 const strictJsonModule=process.env.ATTO_TEST_CLI_PACKAGE_DIR
   ?pathToFileURL(join(process.env.ATTO_TEST_CLI_PACKAGE_DIR,'dist/marketplace/strict-json.js'))
   :new URL('../dist/marketplace/strict-json.js',import.meta.url);
@@ -68,23 +68,18 @@ test('Marketplace relay signs locally, retains exact authorization through resta
   // Given a selected wallet with its existing spend grant and immutable seller requirement.
   const f=await fixture(t,['100']), app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
   const p={...terms('ATTO',f.addresses[0].address,f.recipient.address),baselineFrontier:'01'.repeat(32)},request={requestId:paymentId,origin:'https://marketplace.example',audience:'marketplace',terms:p,paymentRequired:offer(p),index:0};
-  // When the native candidate is prepared and its exact bound proof is retained before relay.
+  // Preparing once atomically saves the SEND and the entire payment header.
   const prepared=await app.marketplaceRelay('payment_prepare',request);
   assert.equal(f.state.publicationAttempts.length,0);
-  const record=app.ledger.get(paymentId),seed=await mnemonicSeed(f.mnemonic());
-  const c=challenge(p,prepared.hash,relayEvidenceBinding),signer=await derivedSigner(seed,0);
-  const proof={challengeId:c.challengeId,message:c.message,signature:(await signer.signMessage(Int8Array.from(Buffer.from(c.message)))).toString()};seed.value.fill(0);
-  const reads=f.secretReads;
-  await assert.rejects(app.marketplaceRelay('payment_authorize',{requestId:paymentId,index:1,proof:{challengeId:proof.challengeId,message:proof.message}}),{code:'REQUEST_CONFLICT'});
+  const record=app.ledger.get(paymentId),reads=f.secretReads;
   await assert.rejects(app.marketplaceRelay('payment_status',{requestId:paymentId,index:1}),{code:'REQUEST_CONFLICT'});
   assert.equal(f.secretReads,reads);
   assert.deepEqual(app.ledger.messageSigningIndexes(),[]);
-  const authorized=await app.marketplaceRelay('payment_authorize',{requestId:paymentId,proof:{challengeId:proof.challengeId,message:proof.message}});
   await app.close();f.forbidSecrets();
   const reopened=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
   const recovered=await reopened.marketplaceRelay('payment_status',{requestId:paymentId});
-  // Then the exact signed candidate and proof survive, the account stays fenced, and generic send cannot publish it.
-  assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,authorized.paymentSignature);
+  // Then the exact signed candidate and header survive, the account stays fenced, and generic send cannot publish it.
+  assert.equal(recovered.hash,prepared.hash);assert.equal(recovered.paymentSignature,prepared.paymentSignature);
   assert.equal(reopened.ledger.get(paymentId).transactionJson,record.transactionJson);
   assert.equal((await reopened.call('limits_get',{})).pendingRaw,'40');
   assert.equal(f.state.publicationAttempts.length,0);
@@ -92,27 +87,61 @@ test('Marketplace relay signs locally, retains exact authorization through resta
   const decoded=decodePaymentHeader(recovered.paymentSignature);
   assert.equal(decoded.payload.transaction.block.receiverAddress,p.recipientAddress);
   assert.equal(decoded.payload.transaction.block.amount,'40');
-  assert.deepEqual(decoded.extensions['marketplace-binding'].proof,proof);
+  assert.deepEqual(Object.keys(decoded.extensions),['payment-identifier']);
+  assert.equal(decoded.extensions['payment-identifier'].info.id,paymentId);
   await assert.rejects(reopened.marketplaceRelay('payment_prepare',{...request,terms:{...p,amountAtomic:'41'}}));
 });
 
-test('relay offer parser rejects changed immutable fields, duplicate JSON, unsupported extensions and expired fresh authorization',()=>{
-  // Given one frozen offer whose atomic amount must remain a lossless string.
+test('standard relay offers require the exact payment resource, identifier and transfer terms',()=>{
   const p=terms('ATTO','sender','seller'),request={requestId:paymentId,origin:'https://marketplace.example',audience:'marketplace',terms:p,paymentRequired:offer(p)};
-  // When offer fields or wire parsing are changed at the trust boundary.
+  assert.doesNotThrow(()=>parseRelayOffer(request));
   const mutations=[raw=>raw.accepts[0].amount=40,raw=>raw.accepts[0].payTo='other',raw=>raw.accepts[0].network='atto:live',
-    raw=>raw.extensions['marketplace-binding'].info.termsHash='c'.repeat(64),raw=>raw.extensions.unknown={info:{required:true}},
-    raw=>raw.resource.url='https://elsewhere.example/v1/agent/payments/'+paymentId,raw=>raw.extensions['marketplace-binding'].info.baselineHeight=3];
-  // Then every inconsistent offer is rejected before a key or native network is accessed.
+    raw=>raw.extensions['payment-identifier'].info.required=false,raw=>raw.extensions['payment-identifier'].info.id='another-payment-id',
+    raw=>delete raw.extensions['payment-identifier'],raw=>raw.extensions.unknown={info:{required:true}},
+    raw=>raw.resource.url='https://elsewhere.example/v1/agent/payments/'+paymentId];
   for(const mutate of mutations){const raw=decodePaymentHeader(request.paymentRequired);mutate(raw);assert.throws(()=>parseRelayOffer({...request,paymentRequired:Buffer.from(JSON.stringify(raw)).toString('base64')}));}
   assert.throws(()=>parseRelayOffer({...request,paymentRequired:Buffer.from('{"x402Version":2,"x402Version":2}').toString('base64')}),/JSON/);
   assert.throws(()=>parseRelayOffer({...request,paymentRequired:request.paymentRequired+'\n'}));
-  const expired={...request,paymentRequired:offer(p,request.origin,Date.now()-400000)};
-  assert.throws(()=>parseRelayOffer(expired),/expired/);assert.doesNotThrow(()=>parseRelayOffer(expired,true));
+  const legacy={...request,paymentRequired:legacyOffer(p)};
+  assert.throws(()=>parseRelayOffer(legacy));assert.doesNotThrow(()=>parseRelayOffer(legacy,true));
 });
 
+for(const hasHeader of [false,true]) test(`ATTO reopens a previous-version ${hasHeader?'authorized':'prepared'} relay and reuses its signed transaction`, async t=>{
+  const f=await fixture(t,['100']),app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
+  const p={...terms('ATTO',f.addresses[0].address,f.recipient.address),baselineFrontier:'01'.repeat(32)};
+  const request={requestId:paymentId,origin:'https://marketplace.example',audience:'marketplace',terms:p,index:0,paymentRequired:offer(p)};
+  const prepared=await app.marketplaceRelay('payment_prepare',request);
+  // Seed the old journal layout with a genuine signed candidate and its original request binding.
+  const record=app.ledger.get(paymentId),oldRequest={...request,paymentRequired:legacyOffer(p,request.origin,Date.now()-400000)};
+  record.relay.paymentRequired=oldRequest.paymentRequired;
+  delete record.relay.paymentSignature;
+  record.candidateBinding=app.payments.candidateBinding(record);
+  if(hasHeader) {
+    const seed=await mnemonicSeed(f.mnemonic()),signer=await derivedSigner(seed,0);
+    const c=legacyChallenge(p,prepared.hash,request.audience,Date.now()-400000);
+    const proof={challengeId:c.challengeId,message:c.message,signature:(await signer.signMessage(Int8Array.from(Buffer.from(c.message)))).toString()};
+    seed.value.fill(0);
+    record.relay.paymentSignature=legacyHeader(oldRequest,decodePaymentHeader(prepared.paymentSignature).payload,proof);
+  }
+  app.store.set('spending.records',[record]);
+  await app.close();f.forbidSecrets();
+  const reopened=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
+  const before=await reopened.marketplaceRelay('payment_status',{requestId:paymentId});
+  assert.equal(before.paymentSignature,record.relay.paymentSignature??null);
+  const recovered=await reopened.marketplaceRelay('payment_prepare',oldRequest);
+  assert.equal(recovered.hash,prepared.hash);
+  if(hasHeader) assert.equal(recovered.paymentSignature,record.relay.paymentSignature);
+  else {
+    const decoded=decodePaymentHeader(recovered.paymentSignature);
+    assert.deepEqual(decoded.payload,decodePaymentHeader(prepared.paymentSignature).payload);
+    assert.deepEqual(Object.keys(decoded.extensions),['payment-identifier']);
+    assert.deepEqual(decoded.extensions['payment-identifier'].schema,decodePaymentHeader(oldRequest.paymentRequired).extensions['payment-identifier'].schema);
+  }
+  assert.equal(reopened.ledger.get(paymentId).transactionJson,record.transactionJson);
+  assert.equal(reopened.ledger.usage().pendingRaw,'40');assert.equal(f.state.publicationAttempts.length,0);
+});
 
-test('a killed unsigned ATTO relay refreshes only its expired unused offer and preserves the original reservation', {timeout:20000},async t=>{
+test('an unsigned pre-upgrade ATTO relay resumes the original reservation', {timeout:20000},async t=>{
   // Given a real wallet process stopped during work before any complete candidate is retained or returned.
   const f=await fixture(t,['100']),p={...terms('ATTO',f.addresses[0].address,f.recipient.address),baselineFrontier:'01'.repeat(32)},
     request={requestId:paymentId,origin:'https://marketplace.example',audience:'marketplace',terms:p,paymentRequired:offer(p),index:0};
@@ -128,34 +157,29 @@ test('a killed unsigned ATTO relay refreshes only its expired unused offer and p
   await until(()=>{assert.equal(child.exitCode,null,diagnostics);return f.state.works.length>0;});
   const original=f.app.ledger.get(paymentId);assert.equal(original.hash,undefined);assert.equal(original.transactionJson,undefined);
   const exited=once(child,'exit');child.kill('SIGKILL');await exited;f.state.holdWork.release();
-  // When time passes beyond the unused offer and a new backend-issued window is offered for the exact same operation.
-  const realNow=Date.now,advanced=realNow()+400000;Date.now=()=>advanced;
-  try {
-    const app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}}),fresh={...request,paymentRequired:offer(p,request.origin,advanced)};
-    const recovered=await app.marketplaceRelay('payment_prepare',fresh),saved=app.ledger.get(paymentId);
-    // Then only the unused window changes; the reservation is retained once and no native publication occurs.
-    assert.equal(saved.createdAt,original.createdAt);assert.equal(saved.id,original.id);assert.equal(saved.raw,original.raw);
-    assert.equal(saved.relay.paymentRequired,fresh.paymentRequired);assert.ok(recovered.hash);assert.equal(f.state.publicationAttempts.length,0);
-    assert.equal(app.ledger.usage().pendingRaw,'40');assert.equal(app.ledger.journalList().items.length,1);
-    await assert.rejects(app.marketplaceRelay('payment_prepare',{...fresh,paymentRequired:offer(p,request.origin,advanced+400000)}),{code:'REQUEST_CONFLICT'});
-    assert.equal(app.ledger.get(paymentId).hash,recovered.hash);
-  } finally {Date.now=realNow;}
+  original.relay.paymentRequired=legacyOffer(p,request.origin);
+  f.app.store.set('spending.records',[original]);
+  const app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
+  await assert.rejects(app.marketplaceRelay('payment_prepare',{...request,terms:{...p,termsHash:'c'.repeat(64)}}));
+  assert.equal(app.ledger.get(paymentId).relay.paymentRequired,original.relay.paymentRequired);
+  const recovered=await app.marketplaceRelay('payment_prepare',request),saved=app.ledger.get(paymentId);
+  assert.equal(saved.createdAt,original.createdAt);assert.equal(saved.raw,original.raw);
+  assert.equal(saved.relay.paymentRequired,request.paymentRequired);assert.ok(recovered.paymentSignature);
+  assert.equal(app.ledger.usage().pendingRaw,'40');assert.equal(app.ledger.journalList().items.length,1);
+  assert.equal(f.state.publicationAttempts.length,0);
 });
 
-test('ATTO offer refresh races with signing under the same account lock and never replaces a retained candidate', {timeout:20000},async t=>{
-  // Given the original prepare holds its account while work is in flight.
-  const f=await fixture(t,['100']),app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}}),other=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}}),
-    p={...terms('ATTO',f.addresses[0].address,f.recipient.address),baselineFrontier:'01'.repeat(32)},request={requestId:paymentId,origin:'https://marketplace.example',audience:'marketplace',terms:p,paymentRequired:offer(p),index:0};
-  f.state.holdWork=gate();const first=app.marketplaceRelay('payment_prepare',request);first.catch(()=>{});
-  await until(()=>f.state.works.length>0);
-  const realNow=Date.now,advanced=realNow()+400000;Date.now=()=>advanced;
+test('concurrent ATTO prepares retain one header and use one allowance', {timeout:20000},async t=>{
+  const f=await fixture(t,['100']),app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}}),other=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
+  const p={...terms('ATTO',f.addresses[0].address,f.recipient.address),baselineFrontier:'01'.repeat(32)};
+  const request={requestId:paymentId,origin:'https://marketplace.example',audience:'marketplace',terms:p,paymentRequired:offer(p),index:0};
+  f.state.holdWork=gate();const first=app.marketplaceRelay('payment_prepare',request);
   try {
-    // When the offer expires and another process-equivalent session requests a fresh unused window.
-    const fresh={...request,paymentRequired:offer(p,request.origin,advanced)},second=other.marketplaceRelay('payment_prepare',fresh);second.catch(()=>{});
+    await until(()=>f.state.works.length>0);
+    const second=other.marketplaceRelay('payment_prepare',request);
     f.state.holdWork.release();
-    await assert.rejects(first,/expired/);const result=await second;
-    // Then stale preparation returns no candidate; the locked refresh persists just one candidate and allowance.
-    assert.ok(result.hash);assert.equal(app.ledger.get(paymentId).hash,result.hash);assert.equal(app.ledger.usage().pendingRaw,'40');
-    assert.equal(app.ledger.get(paymentId).relay.paymentRequired,fresh.paymentRequired);assert.equal(f.state.publicationAttempts.length,0);
-  } finally {Date.now=realNow;f.state.holdWork.release();}
+    const results=await Promise.all([first,second]);
+    assert.equal(results[0].hash,results[1].hash);assert.equal(results[0].paymentSignature,results[1].paymentSignature);
+    assert.equal(app.ledger.usage().pendingRaw,'40');assert.equal(f.state.publicationAttempts.length,0);
+  } finally { f.state.holdWork.release(); }
 });

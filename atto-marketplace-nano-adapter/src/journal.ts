@@ -201,11 +201,12 @@ export class NanoJournal {
             if (record[key] !== input[key])
                 fail('HANDLE_REUSE', 'This Nano operation identity is already bound to different terms.');
     }
-    save(id: string, candidate: Pick<JournalRecord, 'epoch' | 'previous' | 'previousBalance' | 'representative' | 'blockJson' | 'blockHash'>): JournalRecord {
+    save(id: string, candidate: Pick<JournalRecord, 'epoch' | 'previous' | 'previousBalance' | 'representative' | 'blockJson' | 'blockHash'>, header?: string): JournalRecord {
         return this.transaction(() => {
             const result = this.db.prepare(`UPDATE operations SET state='PREPARED',epoch=?,previous=?,previousBalance=?,representative=?,blockJson=?,blockHash=? WHERE id=? AND state='PREPARING' AND owner=? AND blockHash IS NULL`).run(candidate.epoch, candidate.previous, candidate.previousBalance, candidate.representative, candidate.blockJson, candidate.blockHash, id, this.token);
             if (result.changes !== 1)
                 fail('JOURNAL_CONFLICT');
+            if (header !== undefined) this.db.prepare('INSERT INTO relay_headers(id,header) VALUES(?,?)').run(id, header);
             return this.find(id)!;
         });
     }

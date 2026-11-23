@@ -12,10 +12,10 @@ const termsSchema = z.strictObject({ paymentId: z.string().uuid(), purpose: z.en
   termsHash: hash, versionHash: hash, baselineHeight: integer, baselineFrontier: hash.nullable() });
 export type RelayTerms = z.infer<typeof termsSchema>;
 export interface RelayRequest { requestId: string; origin: string; audience: string; terms: RelayTerms; paymentRequired: string; index?: number }
-export interface RelayProof { challengeId: string; message: string; signature: string }
-export interface RelayOffer { header: string; raw: Record<string, unknown>; terms: RelayTerms; expiresAt: number }
+interface RelayProof { challengeId: string; message: string; signature: string }
+export interface RelayOffer { header: string; raw: Record<string, unknown>; terms: RelayTerms; audience: string }
 export interface RelayRecord extends RelayRequest { version: 1; paymentSignature?: string }
-export const MARKETPLACE_BINDING = 'marketplace-binding';
+const MARKETPLACE_BINDING = 'marketplace-binding';
 function invalid(message = 'The x402 offer differs from the frozen Marketplace payment.'): never { throw new AttoError('PAYMENT_PROTOCOL', message); }
 function object(value: unknown): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(); return value as Record<string, unknown>; }
 export function decodePaymentHeader(header: string): Record<string, unknown> {
@@ -24,7 +24,7 @@ export function decodePaymentHeader(header: string): Record<string, unknown> {
   if (bytes.length > 65_536 || bytes.toString('base64') !== header) invalid('Invalid x402 header.');
   try { return parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return invalid('Invalid x402 JSON.'); }
 }
-export function parseRelayOffer(request: RelayRequest, allowExpired = false, now = Date.now()): RelayOffer {
+export function parseRelayOffer(request: RelayRequest, retained = false): RelayOffer {
   const terms = termsSchema.parse(request.terms);
   let origin: URL;
   try { origin = new URL(request.origin); } catch { return invalid(); }
@@ -45,58 +45,41 @@ export function parseRelayOffer(request: RelayRequest, allowExpired = false, now
   // Nano proposal3432@96f65c29 does not declare transfer-method/flow metadata.
   if (terms.asset === 'XNO' && accepted.extra !== undefined) invalid('Unsupported Nano x402 profile metadata.');
   const extensions = object(raw.extensions);
-  if (Object.keys(extensions).sort().join(',') !== 'marketplace-binding,payment-identifier') invalid('Unsupported x402 extension.');
+  if (Object.keys(extensions).some(key => key !== 'payment-identifier' && !(retained && key === MARKETPLACE_BINDING))) invalid('Unsupported x402 extension.');
   const identifier = object(extensions['payment-identifier']), idInfo = object(identifier.info);
   object(identifier.schema);
-  if (idInfo.required !== true || Object.keys(idInfo).some(key => !['required', 'id'].includes(key))
+  if (Object.keys(identifier).sort().join(',') !== 'info,schema' || idInfo.required !== true || Object.keys(idInfo).some(key => !['required', 'id'].includes(key))
     || (idInfo.id !== undefined && idInfo.id !== request.requestId)) invalid();
-  const binding = object(extensions[MARKETPLACE_BINDING]), info = object(binding.info);
-  object(binding.schema);
-  const { offerExpiresAt, ...boundTerms } = info;
-  if (!isDeepStrictEqual(boundTerms, { required: true, version: 1, ...terms }) || Object.keys(binding).sort().join(',') !== 'info,schema'
-    || typeof offerExpiresAt !== 'string' || !/^\d{4}-\d\d-\d\dT/.test(offerExpiresAt)) invalid();
-  const expiresAt = Date.parse(offerExpiresAt);
-  if (!Number.isSafeInteger(expiresAt) || (!allowExpired && expiresAt <= now)) invalid('The unused x402 offer expired. Recover the original request before preparing a replacement.');
-  return { header: request.paymentRequired, raw, terms, expiresAt };
+  if (Object.hasOwn(extensions, MARKETPLACE_BINDING)) {
+    // Older journals froze application terms inside the offer. Verify them before using its candidate.
+    const binding = object(extensions[MARKETPLACE_BINDING]);
+    const { offerExpiresAt, ...boundTerms } = object(binding.info);
+    object(binding.schema);
+    if (!isDeepStrictEqual(boundTerms, { required: true, version: 1, ...terms }) || Object.keys(binding).sort().join(',') !== 'info,schema'
+      || typeof offerExpiresAt !== 'string' || !/^\d{4}-\d\d-\d\dT/.test(offerExpiresAt) || !Number.isSafeInteger(Date.parse(offerExpiresAt))) invalid();
+  }
+  return { header: request.paymentRequired, raw, terms, audience: request.audience };
 }
-/** Only an unused, expired offer window can change; every other offered byte remains semantically identical. */
-export function validateRelayOfferRefresh(previous: RelayRequest, next: RelayRequest, now = Date.now()): void {
+
+/** An unsigned reservation may adopt a standard offer for its original payment. */
+export function validateRelayOfferRefresh(previous: RelayRequest, next: RelayRequest): void {
   const definition = (request: RelayRequest) => ({ requestId: request.requestId, origin: request.origin, audience: request.audience, terms: request.terms, index: request.index });
-  const oldOffer = parseRelayOffer(previous, true, now), freshOffer = parseRelayOffer(next, false, now);
-  const withoutWindow = (offer: RelayOffer) => {
-    const extensions = object(offer.raw.extensions), binding = object(extensions[MARKETPLACE_BINDING]);
-    const { offerExpiresAt: _unused, ...info } = object(binding.info);
-    return { ...offer.raw, extensions: { ...extensions, [MARKETPLACE_BINDING]: { ...binding, info } } };
-  };
-  if (oldOffer.expiresAt > now || freshOffer.expiresAt <= oldOffer.expiresAt || !isDeepStrictEqual(definition(previous), definition(next))
-    || !isDeepStrictEqual(withoutWindow(oldOffer), withoutWindow(freshOffer))) invalid('Only an expired unused offer window may be refreshed for the original payment.');
+  parseRelayOffer(previous, true);
+  parseRelayOffer(next);
+  if (!isDeepStrictEqual(definition(previous), definition(next))) invalid('The refreshed offer differs from the original payment.');
 }
-export function relayEvidenceBinding(terms: RelayTerms, transactionHash: string): string {
+function relayEvidenceBinding(terms: RelayTerms, transactionHash: string): string {
   return createHash('sha256').update(['Marketplace payment evidence v1', terms.paymentId, terms.versionHash, terms.termsHash,
     terms.ownerAccountId, terms.network, terms.senderAddress, terms.recipientAddress, terms.amountAtomic, transactionHash.toLowerCase()].join('\n')).digest('hex');
 }
-const relayChallenge = z.strictObject({
+const signedProof = z.strictObject({
   challengeId: z.string().uuid(),
   message: z.string().min(1).max(4096),
-  signature: z.string().regex(/^[a-fA-F0-9]{128}$/).optional(),
+  signature: z.string().regex(/^[a-fA-F0-9]{128}$/),
 });
-const signedProof = relayChallenge.required();
 
-/** Check the unsigned challenge before either wallet opens its signing key. */
-export function validateRelayChallenge(terms: RelayTerms, transactionHash: string, audience: string, challenge: unknown, now = Date.now()) {
-  const parsed = relayChallenge.safeParse(challenge);
-  if (!parsed.success) invalid('Invalid payment proof.');
-  return validateChallengeFrame(terms, transactionHash, audience, parsed.data, false, now);
-}
-
-export function validateRelayProof(offer: RelayOffer, transactionHash: string, audience: string, proof: RelayProof, allowExpired = false, now = Date.now()): void {
-  const parsed = signedProof.safeParse(proof);
-  if (!parsed.success) invalid('Invalid payment proof.');
-  validateChallengeFrame(offer.terms, transactionHash, audience, parsed.data, allowExpired, now);
-}
-
-function validateChallengeFrame(terms: RelayTerms, transactionHash: string, audience: string,
-  challenge: Pick<RelayProof, 'challengeId' | 'message'>, allowExpired: boolean, now: number) {
+// Only existing journals can contain this retired authorization frame.
+function validateLegacyProof(terms: RelayTerms, transactionHash: string, audience: string, challenge: RelayProof): void {
   const lines = challenge.message.split('\n');
   if (lines.length !== 10 || /[\r\0]/.test(challenge.message) || lines[0] !== `${terms.asset === 'ATTO' ? '' : 'Nano '}Marketplace Agent Controller Proof v1`
     || lines[1] !== `Audience: ${audience}` || lines[2] !== `Network: ${terms.asset === 'ATTO' ? 'live' : terms.network}`
@@ -106,17 +89,36 @@ function validateChallengeFrame(terms: RelayTerms, transactionHash: string, audi
   const issuedAt = lines[8]!.slice('Issued At: '.length);
   const expiresAt = lines[9]!.slice('Expiration Time: '.length);
   const issued = Date.parse(issuedAt), expires = Date.parse(expiresAt);
-  if (!Number.isSafeInteger(issued) || !Number.isSafeInteger(expires) || expires <= issued || expires - issued > 300_000
-    || (!allowExpired && (issued > now + 30_000 || expires <= now))) invalid('Payment proof expired or has invalid timing.');
-  return { issuedAt, expiresAt };
+  if (!Number.isSafeInteger(issued) || !Number.isSafeInteger(expires) || expires <= issued || expires - issued > 300_000) invalid('Invalid saved proof timing.');
 }
-export function relayPaymentPayload(offer: RelayOffer, requestId: string, payload: Record<string, unknown>, proof: RelayProof): string {
-  const extensions = object(offer.raw.extensions), identifier = object(extensions['payment-identifier']), binding = object(extensions[MARKETPLACE_BINDING]);
-  const raw = { x402Version: 2, resource: offer.raw.resource, accepted: (offer.raw.accepts as unknown[])[0], payload,
-    extensions: { ...extensions, 'payment-identifier': { ...identifier, info: { ...object(identifier.info), id: requestId } },
-      [MARKETPLACE_BINDING]: { ...binding, proof } } };
-  const json = JSON.stringify(raw);
+
+function encodePayload(offer: RelayOffer, payload: Record<string, unknown>, extensions: Record<string, unknown>): string {
+  const json = JSON.stringify({ x402Version: 2, resource: offer.raw.resource, accepted: (offer.raw.accepts as unknown[])[0], payload, extensions });
   if (Buffer.byteLength(json) > 65_536) invalid('The x402 payload exceeds its byte limit.');
   return Buffer.from(json).toString('base64');
 }
-export function relayProofFromHeader(header: string): RelayProof { return object(object(decodePaymentHeader(header).extensions)[MARKETPLACE_BINDING]).proof as RelayProof; }
+
+function identifierExtension(offer: RelayOffer, requestId: string) {
+  const identifier = object(object(offer.raw.extensions)['payment-identifier']);
+  return { ...identifier, info: { ...object(identifier.info), id: requestId } };
+}
+
+export function relayPaymentPayload(offer: RelayOffer, requestId: string, payload: Record<string, unknown>): string {
+  return encodePayload(offer, payload, { 'payment-identifier': identifierExtension(offer, requestId) });
+}
+
+export function validateRetainedRelayPayload(offer: RelayOffer, requestId: string, header: string, transactionHash: string) {
+  const envelope = decodePaymentHeader(header), payload = object(envelope.payload), extensions = object(envelope.extensions);
+  let expected: string, proof: RelayProof | undefined;
+  if (Object.hasOwn(extensions, MARKETPLACE_BINDING)) {
+    const original = object(offer.raw.extensions), binding = object(original[MARKETPLACE_BINDING]);
+    proof = signedProof.parse(object(extensions[MARKETPLACE_BINDING]).proof);
+    validateLegacyProof(offer.terms, transactionHash, offer.audience, proof);
+    expected = encodePayload(offer, payload, { ...original, 'payment-identifier': identifierExtension(offer, requestId),
+      [MARKETPLACE_BINDING]: { ...binding, proof: object(extensions[MARKETPLACE_BINDING]).proof } });
+  } else {
+    expected = relayPaymentPayload(offer, requestId, payload);
+  }
+  if (expected !== header) invalid('The saved payment header differs from the original offer.');
+  return { payload, proof };
+}
