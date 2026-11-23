@@ -24,6 +24,8 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
   const page = publicHistoryPage(receipt);
   const xnoPage = structuredClone(page);
   for (const item of xnoPage.items) item.task.asset = 'XNO';
+  // Older Marketplace servers returned refunded tasks in unfiltered history.
+  page.items[1].task.state = 'REFUNDED';
   const requests = [];
   const http = await listen(async (req, res) => {
     requests.push({ method: req.method, path: req.url, authorization: req.headers.authorization });
@@ -54,6 +56,9 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
     const alternatives = tool.inputSchema.anyOf ?? tool.inputSchema.oneOf;
     assert.equal(alternatives.length, 2);
     assert.ok(alternatives.every((schema) => schema.additionalProperties === false));
+    for (const schema of alternatives) {
+      assert.deepEqual(schema.properties.state.enum, ['COMPLETED', 'CANCELLED', 'EXPIRED']);
+    }
     assert.ok(alternatives.some((schema) => schema.required?.includes('agentId')
       && schema.properties.role.enum.includes('BUYER') && schema.properties.role.enum.includes('WORKER')));
     assert.ok(alternatives.some((schema) => !schema.required?.includes('agentId')
@@ -69,9 +74,10 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
     const malformedQuery = await client.callTool({ name: 'marketplace_tasks_history_search', arguments: { q: 'bad\u0000query' } });
     const oversizedQuery = await client.callTool({ name: 'marketplace_tasks_history_search', arguments: { q: '🧭'.repeat(121) } });
     const activeState = await client.callTool({ name: 'marketplace_tasks_history_search', arguments: { state: 'CLOSED' } });
+    const refundedState = await client.callTool({ name: 'marketplace_tasks_history_search', arguments: { state: 'REFUNDED' } });
     const oversizedCursor = await client.callTool({ name: 'marketplace_tasks_history_search', arguments: { cursor: 'x'.repeat(513) } });
     const mismatchedCursor = await client.callTool({ name: 'marketplace_tasks_history_search', arguments: {
-      cursor: 'cursor-bound-to-other-filters', state: 'REFUNDED',
+      cursor: 'cursor-bound-to-other-filters', state: 'EXPIRED',
     } });
     const unsafeProjection = await client.callTool({ name: 'marketplace_tasks_history_search', arguments: { q: 'unsafe' } });
 
@@ -98,7 +104,7 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
     }
     assert.deepEqual(JSON.parse(contentText(defaultPage)).result.items[1].worker, null);
     assert.deepEqual(JSON.parse(contentText(defaultPage)).result.items[1].receipt, null);
-    for (const rejected of [roleWithoutAgent, unknownFilter, malformedAgent, malformedQuery, oversizedQuery, activeState, oversizedCursor]) {
+    for (const rejected of [roleWithoutAgent, unknownFilter, malformedAgent, malformedQuery, oversizedQuery, activeState, refundedState, oversizedCursor]) {
       assert.equal(rejected.isError, true);
     }
     assert.equal(mismatchedCursor.structuredContent.error.code, 'INVALID_PUBLIC_HISTORY_QUERY');
