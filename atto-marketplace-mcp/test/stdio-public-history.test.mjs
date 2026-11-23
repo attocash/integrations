@@ -50,6 +50,7 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
     const tool = catalog.tools.find((entry) => entry.name === 'marketplace_tasks_history_search');
     assert.ok(tool);
     assert.equal(tool.annotations.readOnlyHint, true);
+    assert.match(tool.description, /marketplace_public_receipt_get with task\.taskId \(not receipt\.receiptId\)/);
     const alternatives = tool.inputSchema.anyOf ?? tool.inputSchema.oneOf;
     assert.equal(alternatives.length, 2);
     assert.ok(alternatives.every((schema) => schema.additionalProperties === false));
@@ -210,14 +211,15 @@ test('oversized public history pages give a bounded smaller-page retry without w
   }
 });
 
-test('marketplace_public_receipt_get verifies a public signature without participant authorization', async () => {
-  // Given the anonymous public receipt route, the pinned public key route, and receipt failures.
+test('marketplace_public_receipt_get verifies a receipt discovered in history without participant authorization', async () => {
+  // Given public history, a public receipt and key, and receipt failures.
   const { receipt, key } = signedReceipt();
   let successfulReceiptReads = 0;
   const requests = [];
   const http = await listen(async (req, res) => {
     requests.push({ method: req.method, path: req.url, authorization: req.headers.authorization });
     const url = new URL(req.url ?? '/', 'http://marketplace.test');
+    if (url.pathname === '/v1/discovery/task-history') return json(res, 200, publicHistoryPage(receipt));
     if (url.pathname === `/v1/tasks/${taskId}/receipt`) {
       successfulReceiptReads++;
       if (successfulReceiptReads === 2) {
@@ -254,8 +256,18 @@ test('marketplace_public_receipt_get verifies a public signature without partici
     assert.deepEqual(Object.keys(publicTool.inputSchema.properties), ['taskId']);
     assert.equal(publicTool.inputSchema.additionalProperties, false);
 
+    const history = await client.callTool({
+      name: 'marketplace_tasks_history_search', arguments: { state: 'COMPLETED', limit: 10 },
+    });
+    assert.equal(history.isError, undefined);
+    const { items } = JSON.parse(contentText(history)).result;
+    const row = items.find((item) => item.receipt !== null);
+    assert.ok(row);
+    assert.notEqual(row.task.taskId, row.receipt.receiptId);
     const extraInput = await client.callTool({ name: 'marketplace_public_receipt_get', arguments: { taskId, accountId } });
-    const valid = await client.callTool({ name: 'marketplace_public_receipt_get', arguments: { taskId } });
+    const valid = await client.callTool({
+      name: 'marketplace_public_receipt_get', arguments: { taskId: row.task.taskId },
+    });
     const tampered = await client.callTool({ name: 'marketplace_public_receipt_get', arguments: { taskId } });
     const mismatch = await client.callTool({ name: 'marketplace_public_receipt_get', arguments: {
       taskId: '99999999-9999-4999-8999-999999999999',
@@ -272,6 +284,8 @@ test('marketplace_public_receipt_get verifies a public signature without partici
     assert.equal(valid.isError, undefined);
     assert.equal(extraInput.isError, true);
     const exported = JSON.parse(contentText(valid)).result;
+    assert.equal(exported.taskId, row.task.taskId);
+    assert.equal(exported.receiptId, row.receipt.receiptId);
     assert.equal(exported.signatureBase64, receipt.signatureBase64);
     assert.equal(exported.canonicalBase64, receipt.canonicalBase64);
     assert.deepEqual(tampered.structuredContent.error.code, 'RECEIPT_INVALID');
@@ -289,7 +303,13 @@ test('marketplace_public_receipt_get verifies a public signature without partici
       assert.equal(JSON.stringify(failure).includes('cursor hidden'), false);
     }
     assert.ok(requests.every((request) => request.method === 'GET' && request.authorization === undefined));
-    assert.equal(requests.length, 9);
+    assert.equal(requests.length, 10);
+    const historyRequest = new URL(requests[0].path, 'http://marketplace.test');
+    assert.equal(historyRequest.pathname, '/v1/discovery/task-history');
+    assert.deepEqual(Object.fromEntries(historyRequest.searchParams), { state: 'COMPLETED', limit: '10' });
+    assert.deepEqual(requests.slice(1, 3).map((request) => request.path), [
+      `/v1/tasks/${row.task.taskId}/receipt`, `/v1/receipts/keys/${key.version}`,
+    ]);
     assert.equal(requests.filter((request) => request.path === `/v1/receipts/keys/${key.version}`).length, 3);
     assert.equal(successfulReceiptReads, 2);
   } finally {

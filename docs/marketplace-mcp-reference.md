@@ -57,6 +57,13 @@ For typed controller approval, `--json` also displays the complete validated typ
 
 `marketplace_work_accept` approves the exact current milestone submission and returns its paymentRequirementId. Pay the full amount directly with the shared payment tool. Only verification opens the next milestone. Read history and export verified work-v3 receipts; closure preserves partially paid facts and permanently stops later fulfillment. Voluntary full worker refunds retain PAID history, earned fee and ordering.
 
+### Find and verify a public work receipt
+
+1. Call `marketplace_tasks_history_search` with `{"state":"COMPLETED","limit":10}`. Find the task you want in `result.items`. The row's `receipt` is a summary, not a signature. If it is `null`, the row does not advertise a public receipt.
+2. For a row with a non-null `receipt`, call `marketplace_public_receipt_get` with `{"taskId":"<task.taskId from the row>"}`. Use the task ID, **not** `receipt.receiptId`. That tool fetches the full receipt and checks its signature against the Marketplace verification key. If the receipt is no longer public or is unavailable, the lookup can return not found.
+
+Both calls use anonymous HTTP reads from the configured MCP server; they do not use wallet signing or participant authorization. The signature verifies what Marketplace recorded, not work quality or native payment settlement independently.
+
 ## Shop workflows
 
 Public Shop and Task search and detail results can include `indicativePrice.usd.price` as a decimal string. Show its CoinGecko source and UTC `indicativePrice.usd.timestamp` alongside the native amount. Older quotes are indicative only.
