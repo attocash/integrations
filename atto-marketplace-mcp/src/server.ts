@@ -14,7 +14,7 @@ import { managedWalletEnvironment } from './wallet-home.js';
 import { verifyWorkReceipt } from './work-receipt.js';
 import { productPaidContent, productPurchaseResult, productReceipt,
   productSellerOrder, verifyProductReceipt } from './product-purchase.js';
-import { payRequirement, paymentRequirement } from './direct-payments.js';
+import { payRequirement, paymentRequirement, reauthorizeRelay, relayDeadline } from './direct-payments.js';
 import { isProductionMarketplace } from './defaults.js';
 import { callWallet } from './wallet-process.js';
 import { publishVerifiedResponse, resolveDownloadDestination, validateFilename,
@@ -294,6 +294,13 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
   register('marketplace_payment_pay', 'Pay this immutable requirement using the selected wallet’s external-transfer grant and spending limits. The wallet signs the native SEND and saves the x402 payment. Marketplace relays it and independently confirms settlement. Retry the same paymentId after uncertainty. VERIFIED means paid.', {paymentId:uuid},async args=>{
     requireAccess(profile,['payments:read','payments:write']);
     return payRequirement({api,profile,env:walletEnv,paymentId:String(args.paymentId), nanoWork});
+  },{},true);
+  register('marketplace_payment_relay_reauthorize', 'With explicit payer approval for this deadline, allow Marketplace to relay the same previously signed Nano publication fee. Use the original requestId and transactionHash from marketplace_payment_get when relay.authorizationRequired is true. validUntil must be an exact UTC deadline within five minutes. Retry with identical arguments after uncertainty. Read payment status for independent verification.', {
+    paymentId:uuid, requestId, transactionHash:z.string().regex(/^[a-fA-F0-9]{64}$/), validUntil:relayDeadline,
+  }, async args => {
+    requireAccess(profile,['payments:read','payments:write']);
+    return reauthorizeRelay({api,profile,env:walletEnv,paymentId:String(args.paymentId),requestId:String(args.requestId),
+      transactionHash:String(args.transactionHash),validUntil:String(args.validUntil)});
   },{},true);
   register('marketplace_payment_evidence', 'Report the native SEND hash for a payment already broadcast by your wallet. Marketplace independently checks the transfer against this requirement. Retry with the same requestId and transactionHash.', {
     paymentId:uuid,requestId,transactionHash:z.string().regex(/^[a-fA-F0-9]{64}$/),

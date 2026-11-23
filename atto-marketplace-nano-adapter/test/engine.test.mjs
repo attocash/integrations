@@ -953,6 +953,29 @@ test('fixture cleanup closes restarted wallets before removing exact signed reco
 });
 
 
+test('reauthorization checks the original Nano fee journal against current grants and the existing reservation', async t => {
+    const f = await fixture(t, {limit:'40'}), wallet = f.open();
+    const p = {...terms('XNO', f.source, f.destination), purpose:'PUBLICATION_FEE'};
+    const request = {requestId:paymentId, origin:'http://localhost:8080', audience:'marketplace', terms:p, paymentRequired:offer(p, 'http://localhost:8080')};
+    const prepared = await wallet.call('payment.prepare', request);
+    const pinCount = f.pinCount;
+    const args = {requestId:paymentId, transactionHash:prepared.hash.toLowerCase()};
+    const check = () => wallet.call('payment.reauthorization.check', args);
+    const policy = (externalTransfers, maxPaymentAtomic) => approveNanoWalletPolicy({dataDir:f.dir,
+        grants:{externalTransfers, controllerPurposes:[]}, limits:{maxPaymentAtomic, rolling24hAtomic:'40'}, terminalConfirmed:true});
+    const expected = {requestId:paymentId, hash:prepared.hash, terms:p, origin:request.origin, audience:request.audience};
+    assert.deepEqual(await check(), expected);
+    await assert.rejects(wallet.call('payment.reauthorization.check', {...args, transactionHash:'e'.repeat(64)}), {code:'JOURNAL_CONFLICT'});
+    await policy(false, '40');
+    await assert.rejects(check(), {code:'PERMISSION_DENIED'});
+    await policy(true, '39');
+    await assert.rejects(check(), {code:'SPEND_LIMIT'});
+    await policy(true, '40');
+    assert.deepEqual(await check(), expected);
+    assert.equal(f.pinCount, pinCount);
+    assert.deepEqual(f.published, []);
+});
+
 test('x402 relay preparation and original header survive restart without Nano publication or a second allowance',async t=>{
     // Given immutable seller terms and the selected native wallet's existing transfer authority.
     const f=await fixture(t),p=terms('XNO',f.source,f.destination),request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,paymentRequired:offer(p,'http://localhost:8080')};

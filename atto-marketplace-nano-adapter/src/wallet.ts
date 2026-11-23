@@ -175,6 +175,17 @@ export class NanoWallet {
                 exactKeys(args, ['requestId']);
                 return this.relayStatus(this.requestId(args.requestId));
             }
+            case 'payment.reauthorization.check': {
+                exactKeys(args, ['requestId', 'transactionHash']);
+                const requestId = this.requestId(args.requestId);
+                const record = this.journal.find(`transfer:${requestId}`);
+                if (!record || record.blockHash !== canonicalHash(text(args.transactionHash, 64))
+                    || !['PREPARED', 'UNKNOWN'].includes(record.state)) fail('JOURNAL_CONFLICT');
+                const retained = this.relayResult(record);
+                if (!retained.paymentSignature) fail('JOURNAL_CONFLICT');
+                this.requireSigningAuthority(BigInt(record.amount));
+                return {requestId, origin: retained.origin, audience: retained.audience, terms: retained.terms, hash: record.blockHash};
+            }
             case 'transfer.status':
                 exactKeys(args, ['requestId']);
                 return await this.locked(() => this.transferStatus(this.requestId(args.requestId)));

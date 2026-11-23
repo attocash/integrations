@@ -3,7 +3,7 @@ const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??fileUR
 import {join} from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-const {payRequirement,relayTerms}=await import(pathToFileURL(join(packageDirectory,'dist/direct-payments.js')).href);
+const {payRequirement,relayTerms,reauthorizeRelay}=await import(pathToFileURL(join(packageDirectory,'dist/direct-payments.js')).href);
 const {offer,legacyOffer}=await import('../../test/support/relay.mjs');
 const {parseRelayOffer,relayPaymentPayload,decodePaymentHeader}=await import('@attocash/cli/internal-marketplace');
 const id='11111111-1111-4111-8111-111111111111',account='22222222-2222-4222-8222-222222222222';
@@ -119,4 +119,56 @@ test('a retained legacy candidate missing its envelope is completed using its or
   }};
   assert.equal((await payRequirement({api,profile,env:{},paymentId:id},native)).requirement.relay.transactionHash,retained.hash);
   assert.deepEqual(operations,['identity.list','payment.status','payment.prepare']);
+});
+
+function reauthorizationFixture() {
+  const transactionHash = 'd'.repeat(64);
+  const p = {...fixture('XNO'), purpose:'PUBLICATION_FEE',
+    relay:{requestId:id, transactionHash, attempted:false, status:'PENDING', reason:'deadline expired',
+      authorizationRequired:true, reauthorizedUntil:null}};
+  const validUntil = new Date(Date.now() + 240_000).toISOString();
+  const body = {requestId:id, transactionHash, validUntil};
+  const retained = {requestId:id, hash:transactionHash.toUpperCase(), origin:profile.origin, audience:profile.audience, terms:relayTerms(p)};
+  const calls = [], writes = [];
+  const native = {async callWallet(_env, request) {calls.push(request); return retained;}};
+  const api = {async request(path, options) {
+    if (options) {
+      assert.equal(path, `/v1/agent/payments/${id}/relay/reauthorize`);
+      writes.push(options);
+      p.relay = {...p.relay, reauthorizedUntil:validUntil, authorizationRequired:false};
+    } else assert.equal(path, `/v1/agent/payments/${id}`);
+    return {json:structuredClone(p)};
+  }};
+  return {p, retained, calls, writes, body, native, input:{api, profile, env:{}, paymentId:id, ...body}};
+}
+
+test('only explicit reauthorization grants the exact retained candidate a new deadline; lost responses recover via GET', async () => {
+  const f = reauthorizationFixture();
+  const read = await f.input.api.request(`/v1/agent/payments/${id}`);
+  assert.equal(read.json.relay.authorizationRequired, true);
+  const transport = f.input.api;
+  f.input.api = {async request(path, options) {
+    const response = await transport.request(path, options);
+    if (options) throw Error('lost response after commit');
+    return response;
+  }};
+  await assert.rejects(reauthorizeRelay(f.input, f.native), /lost response/);
+  const recovered = await reauthorizeRelay(f.input, f.native);
+  assert.equal(recovered.relay.reauthorizedUntil, f.body.validUntil);
+  assert.equal(recovered.status, 'PENDING');
+  assert.deepEqual(f.calls, [{asset:'XNO', operation:'payment.reauthorization.check',
+    input:{requestId:id, transactionHash:f.body.transactionHash}}]);
+  assert.deepEqual(f.writes, [{method:'POST', body:f.body}]);
+});
+
+test('a changed native journal, hash, deadline or unexpired relay cannot authorize publication', async () => {
+  for (const change of [f => {f.retained.terms.amountAtomic = '99';}, f => {f.retained.origin = 'https://other.example';},
+    f => {f.retained.hash = 'a'.repeat(64);}, f => {f.input.requestId = account;}, f => {f.input.transactionHash = 'e'.repeat(64);},
+    f => {f.input.validUntil = new Date(Date.now() + 600_000).toISOString();}, f => {f.p.relay.attempted = true;},
+    f => {f.p.relay.authorizationRequired = false;}, f => {delete f.p.relay.authorizationRequired;}]) {
+    const f = reauthorizationFixture();
+    change(f);
+    await assert.rejects(reauthorizeRelay(f.input, f.native));
+    assert.deepEqual(f.writes, []);
+  }
 });

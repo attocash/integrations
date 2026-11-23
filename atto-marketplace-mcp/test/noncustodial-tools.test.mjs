@@ -32,8 +32,10 @@ test('noncustodial MCP exposes direct evidence and ordered milestones while reti
     assert.ok(instructions.includes('For marketplace_payment_pay, the selected local wallet signs the native SEND and durably retains the x402 payment for retries. Marketplace relays the signed x402 payment unchanged and independently verifies the confirmed SEND. Marketplace holds no customer keys or balances.'));
     assert.doesNotMatch(instructions,/All native transactions sign and broadcast locally|never publishes customer payments/);
     assert.equal(tools.find(t=>t.name==='marketplace_tasks_search')?.description,'Search public open Marketplace tasks by exact asset, text and cursor.');
-    for(const name of ['marketplace_payment_get','marketplace_payment_pay','marketplace_payment_evidence','marketplace_publication_fee_get','marketplace_task_milestones'])assert.ok(names.includes(name),name);
+    for(const name of ['marketplace_payment_get','marketplace_payment_pay','marketplace_payment_relay_reauthorize','marketplace_payment_evidence','marketplace_publication_fee_get','marketplace_task_milestones'])assert.ok(names.includes(name),name);
     for(const name of ['marketplace_payment_challenge','marketplace_balances_get','marketplace_fund','marketplace_funding_status','marketplace_withdrawal_create','marketplace_withdrawals_list','marketplace_payout_address_mutate','marketplace_product_publication_quote'])assert.ok(!names.includes(name),name);
+    const recovery=tools.find(t=>t.name==='marketplace_payment_relay_reauthorize');
+    assert.deepEqual(recovery.inputSchema.required.sort(),['paymentId','requestId','transactionHash','validUntil']);
     const evidence=tools.find(t=>t.name==='marketplace_payment_evidence');
     assert.deepEqual(evidence.inputSchema.required.sort(),['paymentId','requestId','transactionHash']);
     assert.deepEqual(Object.keys(evidence.inputSchema.properties).sort(),evidence.inputSchema.required);

@@ -13,7 +13,8 @@ const requirement=z.object({id:z.string().uuid(),purpose:z.enum(['PUBLICATION_FE
   status:z.enum(['AWAITING_PAYMENT','PENDING','VERIFIED']),verifiedPayment:z.object({network:z.string(),transactionHash:hash,
     senderAddress:z.string(),recipientAddress:z.string(),amountAtomic:z.string(),senderHeight:z.number().int(),previousHash:hash}).nullable(),
   submissions:z.array(z.object({requestId:z.string(),transactionHash:hash,status:z.enum(['PENDING','REJECTED','VERIFIED']),reason:z.string().nullable()})),
-  relay:z.object({requestId:z.string().min(16).max(128),transactionHash:hash,attempted:z.boolean(),status:z.string(),reason:z.string().nullable()}).nullable(),
+  relay:z.object({requestId:z.string().min(16).max(128),transactionHash:hash,attempted:z.boolean(),status:z.string(),reason:z.string().nullable(),
+    authorizationRequired:z.boolean().optional(),reauthorizedUntil:z.iso.datetime().nullable().optional()}).nullable(),
 });
 export type PaymentRequirement=z.infer<typeof requirement>;
 function invalid(message='Marketplace returned inconsistent immutable payment instructions.'):never { throw new MarketplaceApiError('PAYMENT_PROTOCOL',message); }
@@ -35,6 +36,44 @@ export function relayTerms(p:PaymentRequirement):RelayTerms {
     network:p.network,senderAddress:p.senderAddress,recipientAddress:p.recipientAddress,amountAtomic:p.amountAtomic,
     termsHash:p.termsHash,versionHash:p.versionHash,baselineHeight:String(p.baselineHeight),baselineFrontier:p.baselineFrontier};
 }
+export const relayDeadline = z.iso.datetime().regex(/T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/,
+  'Provide an explicit UTC deadline with whole seconds or milliseconds.');
+
+export async function reauthorizeRelay(input: {
+  api:MarketplaceApiClient; profile:MarketplaceProfile; env:NodeJS.ProcessEnv;
+  paymentId:string; requestId:string; transactionHash:string; validUntil:string;
+}, native = {callWallet}) {
+  const {api, profile, env, paymentId, requestId, validUntil} = input;
+  const transactionHash = input.transactionHash.toLowerCase();
+  const path = `/v1/agent/payments/${paymentId}`;
+  const original = paymentRequirement((await api.request(path)).json, paymentId, profile.accountId);
+  const matchesCandidate = (p:PaymentRequirement) => p.relay?.requestId === requestId
+    && p.relay.transactionHash.toLowerCase() === transactionHash
+    && (!p.verifiedPayment || p.verifiedPayment.transactionHash.toLowerCase() === transactionHash);
+  if (original.asset !== 'XNO' || original.purpose !== 'PUBLICATION_FEE' || requestId !== paymentId || !matchesCandidate(original)) {
+    invalid('Reauthorization requires the originally admitted Nano publication fee, request ID and transaction hash.');
+  }
+  // Java Instant omits the fractional part for whole seconds. Keep all other digits exact.
+  const recorded = (p:PaymentRequirement) => p.relay?.reauthorizedUntil?.replace('.000Z', 'Z') === validUntil.replace('.000Z', 'Z');
+  if (recorded(original)) return original;
+  if (original.status !== 'PENDING' || original.relay?.status !== 'PENDING' || original.relay.attempted
+      || original.relay.authorizationRequired !== true) invalid('The admitted relay does not require a new authorization.');
+  const window = Date.parse(validUntil) - Date.now();
+  if (!(window > 0 && window <= 300_000)) invalid('The approved deadline must be in the next five minutes.');
+  const terms = relayTerms(original);
+  const retained = await native.callWallet(env, {asset:'XNO', operation:'payment.reauthorization.check', input:{requestId, transactionHash}});
+  if (retained.requestId !== requestId || retained.origin !== profile.origin || retained.audience !== profile.audience
+      || !isDeepStrictEqual(retained.terms, terms) || typeof retained.hash !== 'string' || retained.hash.toLowerCase() !== transactionHash) {
+    invalid('The selected wallet has no matching authorized candidate for this payment.');
+  }
+  const response = await api.request(`${path}/relay/reauthorize`, {method:'POST', body:{requestId, transactionHash, validUntil}});
+  const result = paymentRequirement(response.json, paymentId, profile.accountId);
+  if (!matchesCandidate(result) || !recorded(result) || !isDeepStrictEqual(relayTerms(result), terms)) {
+    invalid('The recovered payment differs from the original relay or approved deadline.');
+  }
+  return result;
+}
+
 /** The wallet retains the native candidate and final header; only Market publishes it. */
 export async function payRequirement(input:{api:MarketplaceApiClient;profile:MarketplaceProfile;env:NodeJS.ProcessEnv;paymentId:string;nanoWork?:NanoWorkProvider | undefined},native={callWallet}) {
   const {api,profile,env,paymentId}=input;

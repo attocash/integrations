@@ -10,7 +10,7 @@ import { selectedAttoWallet } from './wallet-access.js';
 import { canonicalWalletDestination, normalizeWalletResult, publicWalletIdentity } from './wallet-results.js';
 
 export const walletOperations = ['controller.sign','identity.list','balance.get',
-  'transfer.send','transfer.status','receive','receivable.list','payment.prepare','payment.status'] as const;
+  'transfer.send','transfer.status','receive','receivable.list','payment.prepare','payment.status','payment.reauthorization.check'] as const;
 export type WalletOperation = typeof walletOperations[number];
 export type WalletAsset = 'ATTO' | 'XNO';
 export interface WalletRequest {
@@ -25,13 +25,15 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
     destination:canonicalWalletDestination(request.asset, request.input.destination)}};
   const internal = request.operation === 'controller.sign';
   if (!internal && Object.hasOwn(request.input, 'index')) throw walletError('INVALID_REQUEST');
+  if (request.operation === 'payment.reauthorization.check') {
+    if (request.asset !== 'XNO') throw walletError('INVALID_REQUEST');
+    return dispatchNanoOperation(env, request.operation, request.input);
+  }
   if (request.asset === 'XNO') {
-    const names: Record<WalletOperation,string> = {'controller.sign':'message.sign','identity.list':'identity.list','balance.get':'balance.get',
-      'payment.prepare':'payment.prepare','payment.status':'payment.status',
-      'transfer.send':'transfer.send','transfer.status':'transfer.status',receive:'receive','receivable.list':'receivable.list'};
+    const operation = request.operation === 'controller.sign' ? 'message.sign' : request.operation;
     const selected=request.operation==='controller.sign'&&env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR
       ? {...env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR}:env;
-    const dispatch = () => dispatchNanoOperation(selected, names[request.operation], request.input,
+    const dispatch = () => dispatchNanoOperation(selected, operation, request.input,
       workProvider && (configuration => usesMarketplaceWork(configuration) ? workProvider : undefined));
     if (request.operation === 'controller.sign' || request.operation === 'payment.prepare'
       || request.operation === 'payment.status') return dispatch();
@@ -73,7 +75,7 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
       if (!allowed) throw walletError('PERMISSION_DENIED');
     }});
   try {
-    const names: Record<WalletOperation,string> = {'controller.sign':'message_sign','identity.list':'wallet_status','balance.get':'balances_get',
+    const names: Record<typeof request.operation,string> = {'identity.list':'wallet_status','balance.get':'balances_get',
       'payment.prepare':'payment_prepare','payment.status':'payment_status',
       'transfer.send':'send','transfer.status':'journal_get',receive:'receive','receivable.list':'receivables_list'};
     const args = {...request.input};
