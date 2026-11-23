@@ -791,6 +791,25 @@ test('receive requires explicit external-transfer approval and does not debit sp
     }
 });
 
+test('receive succeeds after the rolling limit drops below recent outgoing spend', async t => {
+    const f = await fixture(t), wallet = f.open();
+    const outgoing = await wallet.call('transfer.send', transfer(f, '40'));
+    assert.equal(outgoing.state, 'CONFIRMED');
+    await approveNanoWalletPolicy({ dataDir: f.dir, grants: f.grants,
+        limits: { maxPaymentAtomic: '0', rolling24hAtomic: '0' }, terminalConfirmed: true });
+    await assert.rejects(wallet.call('transfer.send', transfer(f, '1')), { code: 'SPEND_LIMIT' });
+
+    const send = fundingSend(f);
+    f.rpc.receivableExists = async hash => hash === send.hash;
+    const args = { network: 'nano:dev', hash: send.hash };
+    const received = await wallet.call('receive', args);
+    assert.equal(received.state, 'CONFIRMED');
+    assert.equal(received.amountAtomic, '10');
+    assert.equal(f.account.confirmedBalance, 970n);
+    assert.equal((await wallet.call('receive', args)).state, 'CONFIRMED');
+    assert.equal(f.published.length, 2);
+});
+
 test('receive rechecks local authority after asynchronous work and retains signed recovery after revocation', async t => {
     const f = await fixture(t), send = fundingSend(f), wallet = f.open();
     t.after(() => wallet.close());
