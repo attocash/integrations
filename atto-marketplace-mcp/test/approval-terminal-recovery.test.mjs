@@ -143,3 +143,76 @@ function request(address, now) {
     action: {kind: 'credential', operation: 'REVOKE', command: {operation: 'REVOKE', targetApiKeyId: targetId, idempotencyKey}},
     challenge: {challengeId, issuedAt, expiresAt, message: `Nano Marketplace Agent Controller Proof v1\nAudience: marketplace\nNetwork: nano:dev\nAddress: ${address}\nPurpose: API-key revocation\nRequest ID: ${challengeId}\nBinding Hash: ${binding}\nNonce: ${'a'.repeat(64)}\nIssued At: ${issuedAt}\nExpiration Time: ${expiresAt}`}};
 }
+
+test('two link roles use their own Nano wallets and pin the authorizer through terminal review', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'marketplace-link-approval-'));
+  t.after(() => rm(root, {recursive:true, force:true}));
+  const home = join(root, 'marketplace');
+  await mkdir(home, {mode:0o700});
+  for (const stream of [process.stdin, process.stderr]) {
+    const previous = Object.getOwnPropertyDescriptor(stream, 'isTTY');
+    Object.defineProperty(stream, 'isTTY', {configurable:true, value:true});
+    t.after(() => { if (previous) Object.defineProperty(stream, 'isTTY', previous); else delete stream.isTTY; });
+  }
+  async function wallet(name, index) {
+    const dataDir = join(root, name), seedFile = join(dataDir, 'seed.hex');
+    await mkdir(dataDir, {mode:0o700});
+    await writeFile(seedFile, Buffer.alloc(32, index).toString('hex'), {mode:0o600});
+    return provisionNanoWallet({dataDir, seedFile, derivationIndex:index, network:'nano:dev', rpcUrl:'http://localhost:17076',
+      origin:'https://marketplace.example', audience:'marketplace', terminalConfirmed:true});
+  }
+  const authorizer = await wallet('controller', 1), target = await wallet('spending', 7);
+  const env = {MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR:join(root, 'controller'), MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:join(root, 'spending')};
+  const store = await MarketplaceProfileStore.open(home);
+  t.after(() => store.close());
+  store.createProfile({id:'agent', origin:'https://marketplace.example', audience:'marketplace', accountId, agentId, identityId,
+    controllerNetwork:'NANO', controllerAddress:authorizer.address, controllerIndex:authorizer.index, authMode:'controller-session',
+    accessToken:'fixture-session-token', accessExpiresAt:Date.now()+120000, refreshToken:'fixture-refresh-token', refreshExpiresAt:Date.now()+240000});
+  const linkId = randomUUID();
+  function link(operation, terms = {}) {
+    const signer = operation === 'AUTHORIZE' ? authorizer : target;
+    const purpose = operation === 'AUTHORIZE' ? 'link authorizer' : 'link new identity';
+    const base = request(signer.address, Date.now());
+    const action = {kind:'identity-link', operation, linkId, authorizingIdentityId:identityId,
+      authorizingAddress:authorizer.address, authorizingNetworkId:'nano:dev', newIdentityAddress:target.address, newIdentityNetworkId:'nano:dev', ...terms};
+    const binding = createHash('sha256').update([accountId, linkId, `${action.authorizingNetworkId}:${action.authorizingAddress}`,
+      `${action.newIdentityNetworkId}:${action.newIdentityAddress}`].join('\n')).digest('hex');
+    return {...base, purpose, action, controller:{...base.controller, index:signer.index},
+      challenge:{...base.challenge, message:base.challenge.message.replace('API-key revocation', purpose).replace(/Binding Hash: [a-f0-9]{64}/, 'Binding Hash: '+binding)}};
+  }
+  async function prepare(envelope) {
+    saveHandoff(store, envelope);
+    return writeApprovalRequest(home, 'agent', envelope.handoffId, envelope);
+  }
+  for (const [operation, directory] of [['AUTHORIZE', env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR], ['NEW_IDENTITY', env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR]]) {
+    const envelope = link(operation), path = await prepare(envelope);
+    const result = await approveMarketplaceController(path, {home, env, prompt:preview => {
+      for (const value of [directory, authorizer.address, target.address, accountId, identityId, linkId, envelope.purpose]) assert.ok(preview.includes(value));
+      return true;
+    }});
+    const response = JSON.parse(await readFile(result.responsePath,'utf8'));
+    assert.equal(response.controllerAddress, envelope.controller.address);
+    assert.equal(response.controllerIndex, envelope.controller.index);
+    assert.equal(response.message, envelope.challenge.message);
+    assert.equal(result.recovered, false);
+  }
+  for (const invalid of [
+    link('AUTHORIZE', {newIdentityNetworkId:'nano:mainnet'}),
+    link('NEW_IDENTITY', {authorizingAddress:(await wallet('unrelated', 9)).address}),
+    request(target.address, Date.now()),
+  ]) {
+    const path = await prepare(invalid);
+    await assert.rejects(approveMarketplaceController(path, {home, env, prompt:() => assert.fail('invalid request reached consent')}), {code:'APPROVAL_BINDING'});
+    await assert.rejects(readFile(approvalResponsePath(home, 'agent', invalid.handoffId)), {code:'ENOENT'});
+  }
+  const pending = link('NEW_IDENTITY'), path = await prepare(pending);
+  await assert.rejects(approveMarketplaceController(path, {home, env, prompt:() => {
+    store.setHandoffState('agent', pending.handoffId, 'EXPIRED');
+    return true;
+  }}), {code:'APPROVAL_BINDING'});
+  await assert.rejects(readFile(approvalResponsePath(home, 'agent', pending.handoffId)), {code:'ENOENT'});
+  for (const signer of [authorizer, target]) {
+    const config = JSON.parse(await readFile(signer.configurationPath, 'utf8'));
+    assert.deepEqual(config.grants, {externalTransfers:false, controllerPurposes:[]});
+  }
+});

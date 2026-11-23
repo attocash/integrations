@@ -2,7 +2,7 @@ import { nanoWorkResult } from './nano-work.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isProductionMarketplace } from './defaults.js';
-import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
+import { MarketplaceProfileStore, ProfileError, requireSession, type MarketplaceProfile } from './profile-store.js';
 
 const NANO_WORK_PATH = '/v1/agent/wallets/xno/work';
 const retryNanoWork = 'Retry the same request ID or incoming SEND hash.';
@@ -25,7 +25,7 @@ export interface RequestOptions {
   body?: unknown;
   headers?: Record<string, string>;
   query?: Record<string, string | number | undefined>;
-  auth?: 'required' | 'none' | 'live-controller';
+  auth?: 'required' | 'none' | 'live-controller' | 'controller-session';
   signal?: AbortSignal;
   requiredBrowserGrant?: string;
   allowStatus?: number[];
@@ -111,6 +111,7 @@ export class MarketplaceApiClient {
   private async fetchResponse(profile: MarketplaceProfile, path: string, options: RequestOptions,
     timeoutMs: number): Promise<ApiResponse> {
     if (options.auth === 'live-controller') requireLiveController(profile);
+    if (options.auth === 'controller-session') requireSession(profile);
     const url = new URL(apiUrl(profile.origin, path));
     for (const [key, value] of Object.entries(options.query ?? {})) {
       if (value !== undefined) url.searchParams.set(key, String(value));

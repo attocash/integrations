@@ -39,7 +39,7 @@ function same(actual: unknown, expected: unknown): void { if (actual !== expecte
 function base(identity: WalletIdentity) {
   return {asset:identity.asset,network:identity.network,address:identity.address,index:identity.index};
 }
-export function publicWalletIdentity(value: WalletIdentity): WalletIdentity {
+export function publicWalletIdentity(value: unknown): WalletIdentity {
   const result = identitySchema.safeParse(value);
   if (!result.success) return invalid();
   const parsed = result.data;

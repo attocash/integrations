@@ -107,3 +107,31 @@ for (const network of ['ATTO','NANO']) test(`${network} browser sign-in approval
     {...request,action:{...action,message:'arbitrary'}},
   ]) assert.throws(() => validateTypedApproval(changed),{code:'APPROVAL_BINDING'});
 });
+
+for (const nanoNetwork of ['nano:mainnet', 'nano:dev']) {
+  test(`ATTO and ${nanoNetwork} link proofs bind the exact pair, network IDs, and signing roles`, () => {
+    const binding = hash([accountId, linkId, `atto:live:${atto}`, `${nanoNetwork}:${nano}`]);
+    const pair = {kind:'identity-link', linkId, authorizingIdentityId:identityId,
+      authorizingAddress:atto, authorizingNetworkId:'live', newIdentityAddress:nano, newIdentityNetworkId:nanoNetwork};
+    for (const [operation, purpose, network, address, nativeNetwork] of [
+      ['AUTHORIZE','link authorizer','ATTO',atto,'live'],
+      ['NEW_IDENTITY','link new identity','NANO',nano,nanoNetwork],
+    ]) {
+      const action = {...pair, operation};
+      const request = envelope({action, purpose, network, address, nativeNetwork, binding});
+      assert.deepEqual(validateTypedApproval(request, {nativeNetwork}), request);
+      const {authorizingNetworkId, newIdentityNetworkId, ...legacyAction} = action;
+      const legacy = {...request, action:legacyAction};
+      if (nanoNetwork === 'nano:mainnet') assert.deepEqual(validateTypedApproval(legacy), legacy);
+      else assert.throws(() => validateTypedApproval(legacy), {code:'APPROVAL_BINDING'});
+      for (const change of [
+        {...request, action:{...action, newIdentityNetworkId:nanoNetwork === 'nano:dev' ? 'nano:mainnet' : 'nano:dev'}},
+        {...request, action:{...action, authorizingAddress:nano, newIdentityAddress:atto}},
+        {...request, action:{...action, linkId:targetId}},
+        {...request, action:{...action, operation:operation === 'AUTHORIZE' ? 'NEW_IDENTITY' : 'AUTHORIZE'}},
+        {...request, action:{...action, authorizingNetworkId:undefined}},
+        {...request, accountId:targetId},
+      ]) assert.throws(() => validateTypedApproval(change), {code:'APPROVAL_BINDING'});
+    }
+  });
+}

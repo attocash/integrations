@@ -63,7 +63,7 @@ export function validateMarketplaceUserProofApproval(input: unknown, options: {
     || message.audience !== request.audience || message.address !== request.controller.address
     || message.network !== options.nativeNetwork || message.challengeId !== request.challenge.challengeId
     || message.issuedAt !== request.challenge.issuedAt || message.expiresAt !== request.challenge.expiresAt
-    || message.bindingHash !== bindingHash(request)) throw protocolFailure();
+    || message.bindingHash !== bindingHash(request, message.network)) throw protocolFailure();
   const issued = millis(request.challenge.issuedAt), expires = millis(request.challenge.expiresAt);
   if (expires <= issued || expires - issued > 300_000 || issued > (options.now ?? Date.now()) + 30_000
     || (!options.allowExpired && expires <= (options.now ?? Date.now()))) {
@@ -163,7 +163,7 @@ export function inspectMarketplaceProofApproval(input: unknown, connection: Mark
   if (issuedAt > now + 30_000 || expiresAt <= now || expiresAt <= issuedAt || expiresAt - issuedAt > 300_000) {
     throw new AttoError('MARKETPLACE_APPROVAL_EXPIRED', 'The Marketplace approval challenge has expired or is outside its five-minute lifetime. Request a new challenge.');
   }
-  const binding = bindingHash(request);
+  const binding = bindingHash(request, message.network);
   if (binding === undefined ? message.bindingHash !== undefined : message.bindingHash !== binding) throw protocolFailure();
 
   const preview: MarketplaceProofApprovalPreview = {
@@ -261,7 +261,7 @@ function validActionKeys(action: Record<string, unknown>): boolean {
   if (action.kind === 'browser-sign-in-grant') return onlyKeys(action, ['kind','browserOrigin','grantHash']);
   if (action.kind === 'login') return onlyKeys(action, ['kind','network','address']);
   if (action.kind === 'identity-link') return onlyKeys(action,
-    ['kind','operation','linkId','authorizingIdentityId','authorizingAddress','newIdentityAddress']);
+    ['kind','operation','linkId','authorizingIdentityId','authorizingAddress','newIdentityAddress','authorizingNetworkId','newIdentityNetworkId']);
   if (action.kind === 'identity-unlink') return onlyKeys(action,
     ['kind','targetIdentityId','authorizingIdentityId']);
   if (action.kind === 'credential') {
@@ -283,7 +283,7 @@ function validActionKeys(action: Record<string, unknown>): boolean {
   return false;
 }
 
-function bindingHash(request: MarketplaceUserProofApprovalRequest): string | undefined {
+function bindingHash(request: MarketplaceUserProofApprovalRequest, signerNetworkId: string): string | undefined {
   const action = request.action;
   if (action.kind === 'login') {
     if (action.network !== request.controller.network || action.address !== request.controller.address
@@ -304,13 +304,16 @@ function bindingHash(request: MarketplaceUserProofApprovalRequest): string | und
     const newIdentityAddress = action.newIdentityAddress;
     if (!['AUTHORIZE','NEW_IDENTITY'].includes(String(operation)) || !linkId
       || !authorizingIdentityId || authorizingIdentityId !== request.identityId
-      || typeof authorizingAddress !== 'string' || !identityNetwork(authorizingAddress)
-      || typeof newIdentityAddress !== 'string' || !identityNetwork(newIdentityAddress)
+      || (action.authorizingNetworkId === undefined) !== (action.newIdentityNetworkId === undefined)
       || authorizingAddress === newIdentityAddress
       || (operation === 'AUTHORIZE' && request.controller.address !== authorizingAddress)
       || (operation === 'NEW_IDENTITY' && request.controller.address !== newIdentityAddress)) throw protocolFailure();
-    return sha256([request.accountId, linkId, `${identityNetwork(authorizingAddress)}:${authorizingAddress}`,
-      `${identityNetwork(newIdentityAddress)}:${newIdentityAddress}`].join('\n'));
+    const authorizerNetwork = linkNetwork(authorizingAddress, action.authorizingNetworkId);
+    const targetNetwork = linkNetwork(newIdentityAddress, action.newIdentityNetworkId);
+    const signerNetwork = operation === 'AUTHORIZE' ? authorizerNetwork : targetNetwork;
+    if (signerNetwork !== (request.controller.network === 'ATTO' ? `atto:${signerNetworkId}` : signerNetworkId)) throw protocolFailure();
+    return sha256([request.accountId, linkId, `${authorizerNetwork}:${authorizingAddress}`,
+      `${targetNetwork}:${newIdentityAddress}`].join('\n'));
   }
   if (action.kind === 'identity-unlink') {
     const targetIdentityId = uuid(action.targetIdentityId);
@@ -588,8 +591,14 @@ function javaTrim(value: string): string { return value.replace(/^[\u0000-\u0020
 function sha256(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
 function protocolFailure(): AttoError { return new AttoError('MARKETPLACE_APPROVAL_PROTOCOL', 'This typed Marketplace wallet-approval request is invalid. Request a fresh approval file from Marketplace.'); }
 
-function identityNetwork(address: string): 'atto:live' | 'nano:mainnet' | undefined {
-  if (/^atto:\/\/[a-z2-7]{61}$/.test(address)) return 'atto:live';
-  if (/^nano_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(address)) return 'nano:mainnet';
-  return undefined;
+function linkNetwork(address: unknown, networkId: unknown): string {
+  if (typeof address === 'string') {
+    if (/^atto:\/\/[a-z2-7]{61}$/.test(address) && (networkId === undefined || networkId === 'live')) return 'atto:live';
+    if (/^nano_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(address)) {
+      // Older envelopes predate explicit network IDs and bind Nano mainnet.
+      if (networkId === undefined || networkId === 'nano:mainnet') return 'nano:mainnet';
+      if (networkId === 'nano:dev') return networkId;
+    }
+  }
+  throw protocolFailure();
 }

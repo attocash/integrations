@@ -1,5 +1,6 @@
 import { asRecord, parseMarketplaceDto, redact, uuid } from './marketplace-results.js';
 import { applicationMessageText, applicationMessagesPage, applicationMessageResult, validateSavedApplicationMessage } from './application-messages.js';
+import { startIdentityLink, resumeIdentityLink } from './identity-links.js';
 import { browserSignIn } from './browser-sign-in.js';
 import { fundingNetworks } from './asset-network.js';
 import { mutate } from './marketplace-mutation.js';
@@ -221,6 +222,14 @@ export function createMarketplaceMcpServer(input: { profiles: MarketplaceProfile
       server.registerTool(name, { description, inputSchema, annotations }, invoke);
     }
   };
+
+  const linkContext = {profiles:input.profiles, profileId:input.profileId, api, env:walletEnv};
+  register('marketplace_identity_link_start', 'Start linking the selected local ATTO or XNO wallet as an additional controller for the authenticated Marketplace account. Return the separate local terminal approvals for the current controller and new wallet. Resume with the original requestId.', {
+    requestId, asset,
+  }, args => startIdentityLink(linkContext, String(args.requestId), args.asset as 'ATTO'|'XNO'), {}, true);
+  register('marketplace_identity_link_complete', 'Complete an authenticated wallet link using both saved terminal approvals. Returns outstanding approvals or the confirmed linked identity. Retry the same requestId after an uncertain response.', {
+    requestId,
+  }, args => resumeIdentityLink(linkContext, String(args.requestId)), {}, true);
 
   register('marketplace_browser_signin', 'Open the system browser at a Marketplace path using the browser sign-in grant approved in the local terminal. On manual_sign_in, give the user the ordinary Marketplace link. A paired result means the browser can finish sign-in.', {
     path: z.string().min(1).max(2048).optional().describe('Root-relative Marketplace path including optional query and fragment. Defaults to /workspace.'),

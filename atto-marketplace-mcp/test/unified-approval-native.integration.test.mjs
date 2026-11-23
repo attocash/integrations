@@ -133,9 +133,10 @@ async function fixture(t, network, origin, actualBackend = false) {
   const credentialAccount = createHash('sha256').update(wallet).digest('hex');
   let fixturePhrase = actualBackend ? null : phrase;
   const app = new AttoApplication({directory: wallet, secrets: {get: async () => fixturePhrase, set: async value => {fixturePhrase = value;}, remove: async () => {}}});
-  let atto;
-  try {await app.createWallet(actualBackend ? undefined : phrase); atto = (await app.call('wallet_status', {})).identity.address;}
+  let attoStatus;
+  try {await app.createWallet(actualBackend ? undefined : phrase); attoStatus = await app.call('wallet_status', {});}
   finally {await app.close();}
+  const atto = attoStatus.identity.address;
   assert.match(fixturePhrase, /^[a-z]+(?: [a-z]+){23}$/);
   await writeFile(join(bin, 'secret-tool'), `#!/bin/sh\n[ "$*" = 'lookup service Atto MCP account ${credentialAccount} key_type mnemonic' ] || exit 77\nprintf '%s' '${fixturePhrase}'\n`, {mode: 0o700});
   const assertPrivateOutput = output => assert.equal(output.includes(fixturePhrase), false, 'Recovery phrase leaked into terminal output.');
@@ -154,7 +155,10 @@ async function fixture(t, network, origin, actualBackend = false) {
   assert.equal(savedNano.keySource.recoverySource.directory, wallet);
   assertPrivateOutput(JSON.stringify(savedNano));
   await assert.rejects(readFile(join(nano, 'seed.hex')), {code: 'ENOENT'});
-  await saveWalletSelection(home, {attoDirectory: wallet, nanoDirectory: nano});
+  await saveWalletSelection(home, {attoDirectory: wallet, nanoDirectory: nano, ...(actualBackend && {
+    attoAccess: {address: atto, index: 0, fingerprint: attoStatus.identity.fingerprint,
+      network: `atto:${attoStatus.settings.network.toLowerCase()}`, externalTransfers: false},
+  })});
   const address = network === 'ATTO' ? atto : nanoConfig.address;
   let profile;
   if (actualBackend) {
@@ -320,5 +324,48 @@ for (const network of ['ATTO','NANO']) test(`${network}: terminal browser sign-i
     assert.match(output, /"browserSignIn":"disabled"/);
     assert.ok(output.includes(accountId) && output.includes(f.address) && output.includes('Browser origin: https://atto.market'));
     assert.doesNotMatch(output, /Binding Hash:|Nonce:|fixture-access-token/);
+    await f.assertStandalonePreserved();
+  });
+
+for (const network of ['ATTO', 'NANO']) test(`${network}: two local wallets link through stdio and the real Marketplace API`,
+  {skip: !live || process.platform !== 'linux', timeout: 120_000}, async t => {
+    const origin = process.env.UNIFIED_APPROVAL_BACKEND_ORIGIN ?? 'http://localhost:8080';
+    assert.ok(['localhost', '127.0.0.1', '[::1]'].includes(new URL(origin).hostname));
+    const f = await fixture(t, network, origin, true);
+    const client = await f.connect();
+    t.after(() => client.close());
+    const listIdentities = async () => {
+      const response = await fetch(new URL('/v1/account/identities', origin), {
+        headers: {authorization: `Bearer ${f.profile.accessToken}`},
+      });
+      assert.equal(response.status, 200);
+      return response.json();
+    };
+
+    // Given an account with one controller and a separate, unfunded local wallet.
+    assert.equal((await listIdentities()).length, 1);
+    const requestId = randomUUID();
+    const started = await tool(client, 'marketplace_identity_link_start', {
+      requestId, asset: network === 'ATTO' ? 'XNO' : 'ATTO',
+    });
+    assert.equal(started.status, 'approval_required');
+    assert.equal(started.approvals.length, 2);
+
+    // When each wallet reviews and signs its own server-issued challenge.
+    for (const approval of started.approvals) {
+      assert.equal((await listIdentities()).length, 1);
+      const path = join(f.home, 'approvals', 'acceptance', `${approval.handoffId}.request.json`);
+      await terminalApprove(f, path);
+    }
+    const completed = await tool(client, 'marketplace_identity_link_complete', {requestId});
+
+    // Then Marketplace lists exactly the two reviewed controllers, including after a retry.
+    assert.equal(completed.status, 'completed');
+    assert.equal(completed.linkId, started.linkId);
+    const replay = await tool(client, 'marketplace_identity_link_complete', {requestId});
+    assert.equal(replay.identity.identityId, completed.identity.identityId);
+    const linked = await listIdentities();
+    assert.deepEqual(linked.map(identity => identity.address).sort(), started.approvals.map(item => item.address).sort());
+    assert.equal(linked.find(identity => identity.identityId === completed.identity.identityId)?.network, network === 'ATTO' ? 'NANO' : 'ATTO');
     await f.assertStandalonePreserved();
   });

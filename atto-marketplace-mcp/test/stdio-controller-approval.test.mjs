@@ -1,12 +1,13 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { chmod, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { join } from 'node:path';
 import { Client } from '@modelcontextprotocol/client';
 import { StdioClientTransport } from '@modelcontextprotocol/client/stdio';
+import { provisionNanoWallet, derivePrivateKey, offchainSign, upperHex } from '@attocash/atto-marketplace-nano-adapter';
 import { AttoPrivateKey } from '@attocash/commons-core';
 import { MarketplaceProfileStore } from '../dist/profile-store.js';
 import { approvalRequestDigest } from '../dist/approval-files.js';
@@ -649,14 +650,114 @@ async function signAttoMessage(message) {
   return (await controllerSigner.signMessage(Int8Array.from(Buffer.from(message,'utf8')))).toString();
 }
 
-async function writeApprovalResponse(requestPath,request) {
+async function writeApprovalResponse(requestPath,request,sign = signAttoMessage) {
   const responsePath=requestPath.replace(/\.request\.json$/,'.response.json');
   const response={version:1,type:'marketplace-controller-approval-response',profileId:request.profileId,handoffId:request.handoffId,
     requestDigest:approvalRequestDigest(request),challengeId:request.challenge.challengeId,message:request.challenge.message,
-    signature:await signAttoMessage(request.challenge.message),controllerAddress:request.controller.address,controllerIndex:request.controller.index};
+    signature:await sign(request.challenge.message),controllerAddress:request.controller.address,controllerIndex:request.controller.index};
   await writeFile(responsePath,`${JSON.stringify(response)}\n`,{mode:0o600});
   await chmod(responsePath,0o600);
 }
 
 function json(res,status,body) { res.writeHead(status,{'content-type':'application/json'}); res.end(JSON.stringify(body)); }
 function contentText(result) { return result.content?.filter(part=>part.type==='text').map(part=>part.text).join('\n')??''; }
+
+test('authenticated wallet link keeps separate approvals and replays the exact completion after a lost response', async () => {
+  const linkId = randomUUID(), requestId = randomUUID(), newIdentityId = randomUUID();
+  const calls = [], received = Promise.withResolvers(), release = Promise.withResolvers();
+  let nanoAddress, serverFailure, alreadyLinked;
+  const http = await listen(async (req, res) => {
+    try {
+      const body = await readBody(req);
+      calls.push({path:req.url, body});
+      assert.equal(req.method, 'POST');
+      assert.equal(req.headers.authorization, 'Bearer controller-session-token');
+      if (req.url === '/v1/account/identity-links') {
+        assert.deepEqual(body, {network:'NANO', address:nanoAddress, authorizingIdentityId:identityId});
+        if (alreadyLinked) return json(res, 200, {status:'COMPLETED', linkId, identity:alreadyLinked});
+        received.resolve();
+        await release.promise;
+        const binding = hash([accountId, linkId, 'atto:live:' + controllerAddress, 'nano:dev:' + nanoAddress]);
+        const authorizingProof = challenge(randomUUID(), 'link authorizer', binding);
+        const newIdentityProof = challenge(randomUUID(), 'link new identity', binding);
+        newIdentityProof.message = newIdentityProof.message.replace(/^Marketplace/, 'Nano Marketplace')
+          .replace('Network: live', 'Network: nano:dev').replace(controllerAddress, nanoAddress);
+        return json(res, 201, {status:'PENDING', linkId, authorizingProof, newIdentityProof, expiresAt:authorizingProof.expiresAt});
+      }
+      assert.equal(req.url, '/v1/account/identity-links/' + linkId + '/complete');
+      if (calls.length === 2) return req.socket.destroy();
+      assert.deepEqual(body, calls[1].body);
+      return json(res, 200, {identityId:newIdentityId, network:'NANO', address:nanoAddress, verificationMethod:'NANO_NOMS',
+        createdAt:new Date().toISOString(), lastVerifiedAt:new Date().toISOString(), revokedAt:null});
+    } catch (error) { serverFailure = error; received.resolve(); throw error; }
+  });
+  const fixture = await profileHome(http.origin);
+  let client;
+  try {
+    const native = join(fixture.home, 'wallets', 'nano');
+    await mkdir(native, {recursive:true, mode:0o700});
+    const seedFile = join(native, 'seed.hex');
+    await writeFile(seedFile, '03'.repeat(32), {mode:0o600});
+    const wallet = await provisionNanoWallet({dataDir:native, seedFile, derivationIndex:1, network:'nano:dev',
+      rpcUrl:'http://127.0.0.1:17076', origin:http.origin, audience:'marketplace', terminalConfirmed:true});
+    nanoAddress = wallet.address;
+    const nanoKey = derivePrivateKey(Buffer.alloc(32, 3), 1);
+    fixture.store.createProfile({id:'scoped',origin:http.origin,audience:'marketplace',accountId,agentId,identityId,
+      controllerNetwork:'ATTO',controllerAddress,authMode:'scoped-api-key',apiKey:'scoped-test-token',apiScopes:['tasks:read']});
+    client = await connect(fixture.home, 'scoped');
+    const start = id => client.callTool({name:'marketplace_identity_link_start', arguments:{asset:'XNO', requestId:id}});
+    const complete = () => client.callTool({name:'marketplace_identity_link_complete', arguments:{requestId}});
+    for (const denied of [await start(requestId), await complete()]) assert.equal(denied.structuredContent.error.code, 'SETUP_REQUIRED');
+    assert.equal(calls.length, 0);
+    await client.close();
+    client = await connect(fixture.home, 'agent');
+    const starting = start(requestId);
+    await Promise.race([received.promise, starting.then(result => { throw Error(JSON.stringify(result)); })]);
+    const otherRequest = await start(randomUUID());
+    assert.equal(otherRequest.structuredContent.error.code, 'LINK_IN_PROGRESS');
+    assert.equal(calls.length, 1);
+    release.resolve();
+    const pending = (await starting).structuredContent.result;
+    assert.equal(pending.status, 'approval_required');
+    assert.deepEqual(pending.approvals.map(approval => approval.purpose), ['link authorizer', 'link new identity']);
+    assert.equal(pending.linkId, linkId);
+    assert.equal(JSON.stringify(pending).includes('Binding Hash'), false);
+    assert.deepEqual((await start(requestId)).structuredContent.result, pending);
+    const [first, second] = pending.approvals;
+    for (const [role, signer] of [[first,signAttoMessage], [second,message => upperHex(offchainSign(nanoKey,message))]]) {
+      const file = join(fixture.home, 'approvals', 'agent', role.handoffId + '.request.json');
+      const request = JSON.parse(await readFile(file, 'utf8'));
+      assert.equal(request.controller.address, role.address);
+      if (role === second) {
+        await writeApprovalResponse(file, request, signAttoMessage);
+        assert.equal((await complete()).structuredContent.error.code, 'APPROVAL_FILE');
+        assert.equal(calls.length, 1);
+      }
+      await writeApprovalResponse(file, request, signer);
+      if (role === first) {
+        assert.deepEqual((await complete()).structuredContent.result.approvals, [second]);
+        assert.equal(calls.length, 1);
+      }
+    }
+    const lost = await complete();
+    assert.equal(lost.structuredContent.error.code, 'MARKETPLACE_UNAVAILABLE');
+    await client.close();
+    client = await connect(fixture.home, 'agent');
+    const linked = (await complete()).structuredContent.result;
+    assert.equal(linked.status, 'completed');
+    assert.deepEqual([linked.linkId, linked.identity.identityId, linked.identity.address], [linkId,newIdentityId,nanoAddress]);
+    assert.doesNotMatch(JSON.stringify(linked), /signature|Binding Hash|session-token/i);
+    assert.deepEqual((await complete()).structuredContent.result, linked);
+    assert.equal(calls.length, 3);
+    const repeatId = randomUUID();
+    alreadyLinked = {...linked.identity, revokedAt:new Date().toISOString()};
+    assert.equal((await start(repeatId)).structuredContent.error.code, 'MARKETPLACE_PROTOCOL');
+    alreadyLinked = linked.identity;
+    assert.deepEqual((await start(repeatId)).structuredContent.result, {...linked, requestId:repeatId});
+    assert.equal(calls.length, 5);
+    assert.ifError(serverFailure);
+  } finally {
+    release.resolve(); await client?.close(); http.close(); fixture.store.close();
+    await rm(fixture.home, {recursive:true,force:true});
+  }
+});

@@ -37,6 +37,8 @@ For typed controller approval, `--json` also displays the complete validated typ
 | Tool | Behavior |
 | --- | --- |
 | marketplace_browser_signin | Pair the system browser with the connected controller after local opt-in. Accepts an optional root-relative Marketplace `path` and defaults to `/workspace`. |
+| marketplace_identity_link_start | Start linking the selected local wallet for `asset` (`ATTO` or `XNO`) to the signed-in controller account. Supply a fresh `requestId`. Review the authorizing wallet and the new wallet, then run each returned terminal approval command. |
+| marketplace_identity_link_complete | Submit the two approved proofs using the same `requestId`. A completed result identifies the linked wallet. Reuse the request ID if the response is lost. |
 | marketplace_payment_get | Immutable owner/source/network/sender/recipient/exact amount, terms/version hashes, baseline and independent status/reasons |
 | marketplace_payment_pay | Local native signing under existing external-transfer grant; retain/recover the same candidate and ATTO/NOMS proof; submit the x402 payload for unchanged Market relay |
 | marketplace_payment_challenge | Exact ownership challenge bound to the retained candidate transactionHash; also used for already-broadcast recovery |

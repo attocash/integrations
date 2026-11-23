@@ -78,6 +78,7 @@ export async function approveMarketplaceController(requestPath: string, options:
   const summary = { marketplaceOrigin: request.marketplaceOrigin, audience: request.audience,
     walletDirectory: native.directory, controllerNetwork: request.controller.network,
     nativeNetwork: native.network, controllerAddress: request.controller.address, controllerIndex: request.controller.index,
+    ...(request.action.kind === 'identity-link' && {accountId: request.accountId, profileId: request.profileId}),
     purpose: request.purpose, action: request.action, expiresAt: request.challenge.expiresAt };
   const terms=options.json?JSON.stringify(details,null,2):terminalFields(summary);
   if (loginAuthorizationFile === undefined) {
@@ -267,11 +268,18 @@ async function pinnedProfile(home: string, request: MarketplaceProofApprovalRequ
         const handoff = store.getHandoff(request.profileId, request.handoffId);
         const prepared = (JSON.parse(handoff.privatePayload) as Record<string, unknown>).request as MarketplaceProofApprovalRequest;
         if (handoff.kind !== 'CONTROLLER_APPROVAL' || !prepared || approvalRequestDigest(prepared) !== approvalRequestDigest(request)) throw invalid();
+        if (request.action.kind === 'identity-link' && !recovery && handoff.state !== 'WAITING_APPROVAL') throw invalid();
       }
     }
     if (pin.origin !== request.marketplaceOrigin || pin.audience !== request.audience
-      || pin.accountId !== request.accountId || pin.identityId !== request.identityId
-      || pin.controllerNetwork !== request.controller.network || pin.controllerAddress !== request.controller.address
+      || pin.accountId !== request.accountId || pin.identityId !== request.identityId) throw invalid();
+    if (request.action.kind === 'identity-link' && request.action.operation === 'NEW_IDENTITY') {
+      // The new key signs only the named link. The account and authorizing identity remain the profile's.
+      if (setupPayload || request.action.authorizingIdentityId !== pin.identityId
+        || request.action.authorizingAddress !== pin.controllerAddress
+        || pin.controllerNetwork !== (String(pin.controllerAddress).startsWith('atto://') ? 'ATTO' : 'NANO')
+        || request.action.newIdentityAddress !== request.controller.address) throw invalid();
+    } else if (pin.controllerNetwork !== request.controller.network || pin.controllerAddress !== request.controller.address
       || pin.controllerIndex !== request.controller.index) throw invalid();
     return canonicalJson({...pin,...(setupPayload?{setupPayload}:{})});
   } catch (error) {
@@ -283,6 +291,18 @@ async function pinnedProfile(home: string, request: MarketplaceProofApprovalRequ
 async function nativeIdentity(env: NodeJS.ProcessEnv, request: MarketplaceProofApprovalRequest): Promise<{
   directory: string; network: string; configuration?: unknown;
 }> {
+  const link = request.action.kind === 'identity-link' ? request.action : undefined;
+  const newIdentity = link?.operation === 'NEW_IDENTITY';
+  if (link) {
+    const otherAddress = newIdentity ? link.authorizingAddress : link.newIdentityAddress;
+    if (typeof otherAddress === 'string' && otherAddress.startsWith('nano_')) {
+      const otherDirectory = newIdentity ? env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR! : env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR!;
+      const other = loadConfiguration(otherDirectory);
+      const networkId = newIdentity ? link.authorizingNetworkId : link.newIdentityNetworkId;
+      if (other.sourceAddress !== otherAddress || other.network !== (networkId ?? 'nano:mainnet')
+        || other.origin !== request.marketplaceOrigin || other.audience !== request.audience) throw invalid();
+    }
+  }
   if (request.controller.network === 'ATTO') {
     const directory = env.MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR!;
     const application = createApplication({ directory });
@@ -295,7 +315,7 @@ async function nativeIdentity(env: NodeJS.ProcessEnv, request: MarketplaceProofA
         settings: status.settings, controller, messageSigningIndexes: status.messageSigningIndexes } };
     } finally { await application.close(); }
   }
-  const directory = env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR!;
+  const directory = newIdentity ? env.MARKETPLACE_MCP_NANO_WALLET_DATA_DIR! : env.MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR!;
   const configuration = loadConfiguration(directory);
   if (configuration.sourceAddress !== request.controller.address || configuration.derivationIndex !== request.controller.index
     || configuration.origin !== request.marketplaceOrigin || configuration.audience !== request.audience) throw invalid();

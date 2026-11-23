@@ -609,11 +609,33 @@ export class MarketplaceProfileStore {
     });
   }
 
-  claimHandoff(profileId: string, handle: string, expectedState: string, nextState: string): boolean {
+  // Issuing the same link twice replaces both backend challenges. Serialize issuance for
+  // this account/authorizer/target, including across local profiles sharing the session.
+  reserveIdentityLinkIssue(profileId: string, handle: string, requestHash: string, target: string, owner: string): boolean {
+    return this.transaction(() => {
+      const now = Date.now();
+      const current = this.db.prepare('SELECT state FROM handoffs WHERE profile_id=? AND handle=?')
+        .get(profileId, handle) as {state:string} | undefined;
+      if (current && current.state !== 'PREPARING' && !current.state.startsWith('ISSUING:')) return false;
+      const busy = this.db.prepare(`SELECT m.request_id FROM mutations m JOIN handoffs h
+        ON h.profile_id=m.profile_id AND h.handle=m.result_identity
+        WHERE m.operation='identity-link' AND m.target=? AND h.state NOT IN ('COMPLETE','PREPARING') AND h.expires_at>? LIMIT 1`)
+        .get(target, now) as {request_id:string} | undefined;
+      if (busy) throw new ProfileError('LINK_IN_PROGRESS', `The wallet link already has an active request. Resume requestId ${busy.request_id} in its original profile.`);
+      this.db.prepare(`INSERT INTO handoffs(profile_id,handle,kind,request_hash,state,private_payload,created_at,expires_at)
+        VALUES(?,?,'IDENTITY_LINK',?,?,?,?,?)
+        ON CONFLICT(profile_id,handle) DO UPDATE SET state=excluded.state,expires_at=excluded.expires_at`)
+        .run(profileId, handle, requestHash, owner, '{}', now, now + 60_000);
+      return true;
+    });
+  }
+
+  claimHandoff(profileId: string, handle: string, expectedState: string, nextState: string, privatePayload?: string, expiresAt?: number): boolean {
     assertOpaqueHandle(handle);
     return this.transaction(() => {
-      const result = this.db.prepare(`UPDATE handoffs SET state=? WHERE profile_id=? AND handle=? AND state=?`)
-        .run(nextState, profileId, handle, expectedState);
+      const result = this.db.prepare(`UPDATE handoffs SET state=?,private_payload=COALESCE(?,private_payload),
+        expires_at=COALESCE(?,expires_at) WHERE profile_id=? AND handle=? AND state=?`)
+        .run(nextState, privatePayload ?? null, expiresAt ?? null, profileId, handle, expectedState);
       return Number(result.changes) === 1;
     });
   }

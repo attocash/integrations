@@ -32,6 +32,8 @@ To let a connected controller profile sign in to `atto.market` from a local MCP 
 
 Ask the MCP client to open your workspace or a Marketplace page. `marketplace_browser_signin` opens the system browser and pairs the launched tab with the selected controller. Pass a root-relative `path` such as `/shop` or omit it for `/workspace`. The tool returns the ordinary Marketplace link when automatic pairing is unavailable. The browser shows whether sign-in completed.
 
+To link another local wallet as a controller, call `marketplace_identity_link_start` with a new UUID `requestId` and the selected wallet’s `asset` (`ATTO` or `XNO`). Review the two terminal approval commands, one for the existing controller and one for the new wallet. Call `marketplace_identity_link_complete` with the same `requestId` to submit both proofs and see the confirmed wallet address and identity ID. If the connection breaks, repeat completion with the original ID.
+
 ### Preauthorize Login only for a dedicated Atto wallet
 
 An administrator can provision a non-root Unix agent with standing authorization for one Marketplace profile and an existing dedicated ATTO wallet on the live network. Supply a root-owned regular JSON file that the agent can read. Mount it as a file with no symlink at the final path and leave group and other write permissions disabled, for example mode `0644`. Use canonical absolute directories and the exact controller address and derivation index:
