@@ -146,7 +146,11 @@ function request(address, now) {
 
 test('two link roles use their own Nano wallets and pin the authorizer through terminal review', async t => {
   const root = await mkdtemp(join(tmpdir(), 'marketplace-link-approval-'));
-  t.after(() => rm(root, {recursive:true, force:true}));
+  let store;
+  t.after(async () => {
+    store?.close();
+    await rm(root, {recursive:true, force:true});
+  });
   const home = join(root, 'marketplace');
   await mkdir(home, {mode:0o700});
   for (const stream of [process.stdin, process.stderr]) {
@@ -163,8 +167,7 @@ test('two link roles use their own Nano wallets and pin the authorizer through t
   }
   const authorizer = await wallet('controller', 1), target = await wallet('spending', 7);
   const env = {MARKETPLACE_MCP_NANO_CONTROLLER_DATA_DIR:join(root, 'controller'), MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:join(root, 'spending')};
-  const store = await MarketplaceProfileStore.open(home);
-  t.after(() => store.close());
+  store = await MarketplaceProfileStore.open(home);
   store.createProfile({id:'agent', origin:'https://marketplace.example', audience:'marketplace', accountId, agentId, identityId,
     controllerNetwork:'NANO', controllerAddress:authorizer.address, controllerIndex:authorizer.index, authMode:'controller-session',
     accessToken:'fixture-session-token', accessExpiresAt:Date.now()+120000, refreshToken:'fixture-refresh-token', refreshExpiresAt:Date.now()+240000});
