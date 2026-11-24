@@ -107,6 +107,30 @@ test('named public and private reads run through the actual stdio MCP transport'
   }
 });
 
+test('Nano transfer recovery reports a wallet failure when the selected configuration is invalid', async t => {
+  // Given a selected Nano wallet with an incomplete configuration.
+  const fixture = await profileHome({origin:'http://localhost:8080',authMode:'scoped-api-key',apiKey:'test-key'});
+  t.after(async () => {
+    fixture.store.close();
+    await rm(fixture.home, {recursive:true,force:true});
+  });
+  const wallet = join(fixture.home, 'wallets', 'nano');
+  await mkdir(wallet, {recursive:true,mode:0o700});
+  await writeFile(join(wallet, 'wallet.json'), '{}', {mode:0o600});
+  const client = await connect(fixture.home, 'agent', {});
+  try {
+    // When the caller checks setup and looks up an existing request ID.
+    const status = await client.callTool({name:'wallet_status',arguments:{asset:'XNO'}});
+    const recovery = await client.callTool({name:'wallet_transfer_status',arguments:{
+      asset:'XNO',requestId:'44444444-4444-4444-8444-444444444444',
+    }});
+    // Then setup is required and recovery cannot report a journal outcome.
+    assert.equal(recovery.isError, true);
+    assert.equal(recovery.structuredContent.error.code, 'LOCAL_SIGNER');
+    assert.equal(status.structuredContent.error.code, 'WALLET_SETUP_REQUIRED');
+  } finally { await client.close(); }
+});
+
 test('profile publication explains required fields and retries the original request exactly once', async () => {
   // Given a controller profile whose Marketplace API reports the missing publication fields.
   const publishRequestId='88888888-8888-4888-8888-888888888888';
@@ -596,9 +620,9 @@ async function profileHome(auth) {
   return {home,store};
 }
 
-async function connect(home,profile) {
+async function connect(home,profile,env=process.env) {
   const client=new Client({name:'test-marketplace',version:'1.0.0'});
-  const environment=Object.fromEntries(Object.entries(process.env).filter(([key,value])=>typeof value==='string'&&key!=='NODE_TEST_CONTEXT'&&!key.startsWith('NODE_TEST_')));
+  const environment=Object.fromEntries(Object.entries(env).filter(([key,value])=>typeof value==='string'&&key!=='NODE_TEST_CONTEXT'&&!key.startsWith('NODE_TEST_')));
   const executable=process.env.ATTO_TEST_MARKETPLACE_MCP_BIN;
   await client.connect(new StdioClientTransport({command:executable??process.execPath,args:[...(executable?[]:[serverMain]),'--profile',profile,'--home',home],env:environment,stderr:'pipe'}));
   return client;
