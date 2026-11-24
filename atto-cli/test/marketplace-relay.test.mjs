@@ -1,9 +1,11 @@
 import test from 'node:test';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { once } from 'node:events';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import assert from 'node:assert/strict';
+import { AttoTransaction } from '@attocash/commons-core';
 import { fixture, gate, until } from './support/payments.mjs';
 import { offer, legacyOffer, legacyHeader, terms, legacyChallenge, paymentId } from '../../test/support/relay.mjs';
 import { derivedSigner, mnemonicSeed } from '../dist/wallet/signing.js';
@@ -90,6 +92,59 @@ test('Marketplace relay signs locally, retains exact authorization through resta
   assert.deepEqual(Object.keys(decoded.extensions),['payment-identifier']);
   assert.equal(decoded.extensions['payment-identifier'].info.id,paymentId);
   await assert.rejects(reopened.marketplaceRelay('payment_prepare',{...request,terms:{...p,amountAtomic:'41'}}));
+});
+
+test('ATTO durable relay retains its grant and exact wire payload across restart and shares wallet limits', {timeout:20000}, async t=>{
+  const f=await fixture(t,['100','100'],undefined,'50');
+  const p={...terms('ATTO',f.addresses[0].address,f.recipient.address),baselineFrontier:'01'.repeat(32)};
+  const request={requestId:paymentId,origin:'https://marketplace.example',audience:'marketplace',terms:p,index:0};
+  const app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
+  const durable={...request,mode:'DURABLE_NATIVE'};
+  await assert.rejects(app.marketplaceRelay('payment_prepare',{...durable,terms:{...p,amountAtomic:'51'}}),{code:'SPENDING_LIMIT'});
+  assert.equal(app.ledger.get(paymentId),undefined);
+  const prepared=await app.marketplaceRelay('payment_prepare',durable);
+  const {relay, transactionJson}=app.ledger.get(paymentId);
+  assert.equal(relay.mode,'DURABLE_NATIVE');
+  assert.equal(relay.nativePayloadJson,JSON.stringify(prepared.payload));
+  assert.equal(prepared.payload.transaction.block.receiverAddress,p.recipientAddress);
+  assert.equal(prepared.payload.transaction.block.amount,'40');
+  assert.ok(prepared.payload.transaction.signature);
+  assert.ok(prepared.payload.transaction.work);
+  assert.equal(prepared.paymentSignature,undefined);
+  const otherId=randomUUID();
+  await assert.rejects(app.marketplaceRelay('payment_prepare',{...durable,requestId:otherId,index:1,
+    terms:{...p,paymentId:otherId,senderAddress:f.addresses[1].address,amountAtomic:'11'}}),{code:'SPENDING_LIMIT'});
+  await app.close();
+  f.forbidSecrets();
+  let allow=true;
+  const reopened=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{
+    if (!allow) throw Object.assign(new Error('revoked grant'),{code:'PERMISSION_DENIED'});
+  }});
+  const recovered=await reopened.marketplaceRelay('payment_status',{requestId:paymentId,index:0});
+  assert.deepEqual(recovered,prepared);
+  const checkArgs={requestId:paymentId,index:0,transactionHash:prepared.hash};
+  assert.deepEqual(await reopened.marketplaceRelay('payment_relay_check',checkArgs),prepared);
+  allow=false;
+  await assert.rejects(reopened.marketplaceRelay('payment_relay_check',checkArgs),{code:'PERMISSION_DENIED'});
+  allow=true;
+  const initialPolicy=f.app.ledger.policy();
+  f.app.ledger.setPolicy({...initialPolicy,rolling:[{days:1,amount:'39',unit:'RAW'}]});
+  await assert.rejects(reopened.marketplaceRelay('payment_relay_check',checkArgs),{code:'SPENDING_LIMIT'});
+  f.app.ledger.setPolicy(initialPolicy);
+  assert.equal(reopened.ledger.get(paymentId).transactionJson,transactionJson);
+  assert.equal(reopened.ledger.usage().pendingRaw,'40');
+  await assert.rejects(reopened.marketplaceRelay('payment_prepare',{...request,paymentRequired:offer(p)}),{code:'REQUEST_CONFLICT'});
+  await assert.rejects(reopened.call('send',f.request(paymentId,'40',{index:0})),{code:'REQUEST_CONFLICT'});
+  assert.equal(f.state.publicationAttempts.length,0);
+  // The server confirms the original dated SEND two days later. Count that
+  // confirmed outflow in the current day before allowing another payment.
+  const transaction=AttoTransaction.fromJson(transactionJson);
+  const later=Number(transaction.block.timestamp.toEpochMilliseconds())+2*86400000;
+  t.mock.method(Date,'now',()=>later);
+  f.observeCanonical(transaction);
+  await assert.rejects(reopened.call('send',f.request(otherId,'11',{index:1})),{code:'SPENDING_LIMIT'});
+  assert.equal(reopened.ledger.get(paymentId).publishedAt,later);
+  assert.equal(reopened.ledger.usage().pendingRaw,'0');
 });
 
 test('standard relay offers require the exact payment resource, identifier and transfer terms',()=>{

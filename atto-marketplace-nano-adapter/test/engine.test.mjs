@@ -90,7 +90,7 @@ async function fixture(t, { grants = { externalTransfers: true, controllerPurpos
         }, async receivableExists(hash) {
             return (await this.receivable(source)).some(row => row.hash === hash);
         }, async verifyFrontierState() {
-            return {};
+            return {height:3n};
         }, validSourceBlock(e, source) {
             return e.blockAccount === source && e.block.validSignature();
         }, validConfirmedBlock(e, source) {
@@ -1007,6 +1007,86 @@ test('x402 relay preparation and original header survive restart without Nano pu
     const confirmed=await wallet.call('payment.status',{requestId:paymentId});
     assert.equal(confirmed.state,'CONFIRMED');assert.equal(f.published.length,1);
     assert.equal(confirmed.paymentSignature,recovered.paymentSignature);
+});
+
+test('durable XNO relay retains original authorization and releases the lane only on native evidence',async t=>{
+    const f=await fixture(t,{limit:'50'}),p={...terms('XNO',f.source,f.destination),baselineFrontier:'a'.repeat(64)};
+    const request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p};
+    const durable={...request,mode:'DURABLE_NATIVE'};
+    let wallet=f.open();
+    await assert.rejects(wallet.call('payment.prepare',{...durable,terms:{...p,amountAtomic:'51'}}),{code:'SPEND_LIMIT'});
+    const prepared=await wallet.call('payment.prepare',durable);
+    assert.equal(prepared.mode,'DURABLE_NATIVE');
+    assert.equal(prepared.paymentSignature,undefined);
+    assert.equal(prepared.payload.block.balance,'960');
+    assert.equal(prepared.payload.block.link_as_account,f.destination);
+    assert.ok(prepared.payload.block.work);
+    assert.ok(prepared.payload.block.signature);
+    const journal=new NanoJournal(f.dir),row=journal.find(`transfer:${paymentId}`);
+    assert.equal(JSON.parse(row.requestJson).relay.mode,'DURABLE_NATIVE');
+    assert.equal(journal.relayHeader(row.id),undefined);
+    assert.equal(row.blockJson,JSON.stringify(prepared.payload.block));
+    journal.close();
+    wallet.close();
+    wallet=f.open();
+    const pinCount=f.pinCount;
+    assert.deepEqual(await wallet.call('payment.status',{requestId:paymentId}),prepared);
+    assert.equal(f.pinCount,pinCount);
+    const checkArgs={requestId:paymentId,transactionHash:prepared.hash};
+    assert.deepEqual(await wallet.call('payment.relay.check',checkArgs),prepared);
+    const policy=(externalTransfers,limit)=>approveNanoWalletPolicy({dataDir:f.dir,
+        grants:{...f.grants,externalTransfers},limits:{maxPaymentAtomic:limit,rolling24hAtomic:limit},terminalConfirmed:true});
+    await policy(false,'50');
+    await assert.rejects(wallet.call('payment.relay.check',checkArgs),{code:'PERMISSION_DENIED'});
+    await policy(true,'40');
+    assert.deepEqual(await wallet.call('payment.relay.check',checkArgs),prepared);
+    await policy(true,'39');
+    await assert.rejects(wallet.call('payment.relay.check',checkArgs),{code:'SPEND_LIMIT'});
+    await policy(true,'50');
+    await assert.rejects(wallet.call('payment.reauthorization.check',{requestId:paymentId,transactionHash:prepared.hash}),{code:'JOURNAL_CONFLICT'});
+    await assert.rejects(wallet.call('payment.prepare',{...request,paymentRequired:offer(p,request.origin)}),{code:'HANDLE_REUSE'});
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'40',paymentId)),{code:'HANDLE_REUSE'});
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'10')),{code:'SOURCE_FENCED'});
+    assert.equal(f.published.length,0);
+    await f.rpc.process(NanoStateBlock.parse(prepared.payload.block),'send');
+    await assert.rejects(wallet.call('transfer.send',transfer(f,'11')),{code:'DAILY_LIMIT'});
+    assert.equal((await wallet.call('transfer.send',transfer(f,'10'))).state,'CONFIRMED');
+    assert.equal(f.published.length,2);
+});
+
+test('a stale Nano wallet refuses to sign before the frozen baseline and retains its unsigned relay intent',async t=>{
+    const f=await fixture(t),wallet=f.open(),p={...terms('XNO',f.source,f.destination),baselineHeight:'4'};
+    const request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p,mode:'DURABLE_NATIVE'};
+    await assert.rejects(wallet.call('payment.prepare',request),{code:'NATIVE_BASELINE_UNAVAILABLE'});
+    const saved=await wallet.call('payment.status',{requestId:paymentId});
+    assert.equal(saved.mode,'DURABLE_NATIVE');
+    assert.equal(saved.hash,null);
+    assert.equal(saved.payload,null);
+    assert.equal(f.published.length,0);
+});
+
+test('an aborted Nano x402 preparation retains its mode after another transfer takes the lane',async t=>{
+    const f=await fixture(t),wallet=f.open(),p=terms('XNO',f.source,f.destination);
+    const request={requestId:paymentId,origin:'http://localhost:8080',audience:'marketplace',terms:p};
+    const originalWork=f.rpc.generateWork;
+    f.rpc.generateWork=async()=>{throw Error('temporary local work failure');};
+    await assert.rejects(wallet.call('payment.prepare',{...request,paymentRequired:offer(p,request.origin)}),/local work failure/);
+    f.rpc.generateWork=originalWork;
+    assert.equal((await wallet.call('transfer.send',transfer(f,'1'))).state,'CONFIRMED');
+    const saved=await wallet.call('payment.status',{requestId:paymentId});
+    assert.equal(saved.hash,null);
+    assert.equal(saved.mode,undefined);
+    assert.equal(saved.paymentRequired,offer(p,request.origin));
+    await assert.rejects(wallet.call('payment.prepare',{...request,mode:'DURABLE_NATIVE'}),{code:'HANDLE_REUSE'});
+    assert.ok((await wallet.call('payment.prepare',{...request,paymentRequired:saved.paymentRequired})).paymentSignature);
+});
+
+test('a durable Nano relay requires the selected wallet external-transfer grant',async t=>{
+    const f=await fixture(t,{grants:{externalTransfers:false,controllerPurposes:['login']}});
+    const p=terms('XNO',f.source,f.destination),wallet=f.open();
+    await assert.rejects(wallet.call('payment.prepare',{requestId:paymentId,origin:'http://localhost:8080',
+        audience:'marketplace',terms:p,mode:'DURABLE_NATIVE'}),{code:'PERMISSION_DENIED'});
+    assert.deepEqual(await wallet.call('payment.status',{requestId:paymentId}),{requestId:paymentId,state:'NOT_FOUND'});
 });
 
 test('x402 relay rejects changed terms and requires the existing transfer grant',async t=>{

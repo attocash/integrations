@@ -569,7 +569,9 @@ export class AttoApplication {
     this.requireReady();
     if (!this.internalMarketplaceAuthorizeWrite) throw new AttoError('UNKNOWN_OPERATION', 'Private wallet operation unavailable.');
     const call = name === 'payment_prepare' ? this.payments.prepareRelay(input)
-      : name === 'payment_status' ? this.payments.relayStatus(input) : Promise.reject(new AttoError('UNKNOWN_OPERATION', 'Unknown private wallet operation.'));
+      : name === 'payment_status' ? this.payments.relayStatus(input)
+      : name === 'payment_relay_check' ? this.payments.checkDurableRelayAuthorization(input)
+      : Promise.reject(new AttoError('UNKNOWN_OPERATION', 'Unknown private wallet operation.'));
     this.calls.add(call);
     try { return await call; } finally { this.calls.delete(call); }
   }

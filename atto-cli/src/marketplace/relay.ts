@@ -11,10 +11,14 @@ const termsSchema = z.strictObject({ paymentId: z.string().uuid(), purpose: z.en
   senderAddress: z.string().min(1).max(160), recipientAddress: z.string().min(1).max(160), amountAtomic: z.string().regex(/^[1-9][0-9]{0,38}$/),
   termsHash: hash, versionHash: hash, baselineHeight: integer, baselineFrontier: hash.nullable() });
 export type RelayTerms = z.infer<typeof termsSchema>;
-export interface RelayRequest { requestId: string; origin: string; audience: string; terms: RelayTerms; paymentRequired: string; index?: number }
+interface RelayBinding { requestId: string; origin: string; audience: string; terms: RelayTerms; index?: number }
+export interface RelayRequest extends RelayBinding { mode?: never; paymentRequired: string }
+export interface DurableRelayRequest extends RelayBinding { mode: 'DURABLE_NATIVE'; paymentRequired?: never }
+export type WalletRelayRequest = RelayRequest | DurableRelayRequest;
 interface RelayProof { challengeId: string; message: string; signature: string }
 export interface RelayOffer { header: string; raw: Record<string, unknown>; terms: RelayTerms; audience: string }
-export interface RelayRecord extends RelayRequest { version: 1; paymentSignature?: string }
+export type RelayRecord = (RelayRequest & { paymentSignature?: string; nativePayloadJson?: never }
+  | DurableRelayRequest & { paymentSignature?: never; nativePayloadJson?: string }) & { version: 1 };
 const MARKETPLACE_BINDING = 'marketplace-binding';
 function invalid(message = 'The x402 offer differs from the frozen Marketplace payment.'): never { throw new AttoError('PAYMENT_PROTOCOL', message); }
 function object(value: unknown): Record<string, unknown> { if (!value || typeof value !== 'object' || Array.isArray(value)) invalid(); return value as Record<string, unknown>; }
@@ -24,7 +28,7 @@ export function decodePaymentHeader(header: string): Record<string, unknown> {
   if (bytes.length > 65_536 || bytes.toString('base64') !== header) invalid('Invalid x402 header.');
   try { return parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return invalid('Invalid x402 JSON.'); }
 }
-export function parseRelayOffer(request: RelayRequest, retained = false): RelayOffer {
+function parseRelayBinding(request: RelayBinding): RelayTerms {
   const terms = termsSchema.parse(request.terms);
   let origin: URL;
   try { origin = new URL(request.origin); } catch { return invalid(); }
@@ -34,6 +38,24 @@ export function parseRelayOffer(request: RelayRequest, retained = false): RelayO
     || request.requestId !== terms.paymentId || !/^[A-Za-z0-9_-]{16,128}$/.test(request.requestId)) invalid();
   if (terms.asset === 'ATTO' ? !/^atto:(live|beta|dev|local)$/.test(terms.network) || BigInt(terms.amountAtomic) > (1n << 64n) - 1n
     : !/^nano:(mainnet|dev)$/.test(terms.network) || BigInt(terms.amountAtomic) > (1n << 128n) - 1n) invalid();
+  return terms;
+}
+
+export function parseDurableRelayRequest(request: DurableRelayRequest): RelayTerms {
+  if (request.mode !== 'DURABLE_NATIVE' || request.paymentRequired !== undefined
+    || typeof request.requestId !== 'string' || request.requestId !== request.requestId.toLowerCase()) {
+    invalid('Invalid durable Marketplace relay authorization.');
+  }
+  const terms = parseRelayBinding(request);
+  if (terms.termsHash !== terms.termsHash.toLowerCase() || terms.versionHash !== terms.versionHash.toLowerCase()) {
+    invalid('Durable relay requires canonical payment terms and version hashes.');
+  }
+  return terms;
+}
+
+export function parseRelayOffer(request: RelayRequest, retained = false): RelayOffer {
+  if (request.mode !== undefined) invalid();
+  const terms = parseRelayBinding(request);
   const raw = decodePaymentHeader(request.paymentRequired), resource = object(raw.resource);
   if (raw.x402Version !== 2 || resource.url !== `${request.origin}/v1/agent/payments/${terms.paymentId}`
     || !Array.isArray(raw.accepts) || raw.accepts.length !== 1) invalid();

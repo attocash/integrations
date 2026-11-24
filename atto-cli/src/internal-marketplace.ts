@@ -5,7 +5,7 @@ import type { ApplicationSession } from './core.js';
 const marketplaceWalletOperations = new Set([
   'wallet_status', 'balances_get', 'receivables_list', 'send', 'journal_get', 'limits_get', 'receive',
   'message_sign',
-  'payment_prepare', 'payment_status',
+  'payment_prepare', 'payment_status', 'payment_relay_check',
 ]);
 
 /** Narrow private child facade. Additional authority can only restrict the normal MCP grants. */
@@ -54,6 +54,6 @@ export { inspectMarketplaceWalletSetup, withUnchangedMarketplaceWalletSetup, mar
   type MarketplaceWalletSetupSnapshot, type MarketplacePaymentMode, type MarketplacePaymentIntent, type MarketplacePaymentPlan } from './marketplace/wallet-setup.js';
 
 export { assertPrivatePermissions, assertPrivatePermissionsBatch, securePrivatePermissions, syncPrivateDirectory, type PrivatePath } from './storage/private-permissions.js';
-export { parseRelayOffer, decodePaymentHeader, relayPaymentPayload, validateRetainedRelayPayload, validateRelayOfferRefresh,
-  type RelayRequest, type RelayTerms, type RelayRecord, type RelayOffer } from './marketplace/relay.js';
+export { parseRelayOffer, parseDurableRelayRequest, decodePaymentHeader, relayPaymentPayload, validateRetainedRelayPayload, validateRelayOfferRefresh,
+  type RelayRequest, type DurableRelayRequest, type WalletRelayRequest, type RelayTerms, type RelayRecord, type RelayOffer } from './marketplace/relay.js';
 export { parseJsonObject } from './marketplace/strict-json.js';

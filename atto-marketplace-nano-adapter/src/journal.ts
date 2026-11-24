@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 import { canonical, sha256 } from './configuration.js';
 import { privateFiles, processIdentity, processOwnerAlive, writePrivateNew } from './private-files.js';
 import { fail } from './errors.js';
-import { parseJsonObject, validateRelayOfferRefresh, type RelayRequest } from '@attocash/cli/internal-marketplace';
+import { parseJsonObject, validateRelayOfferRefresh, type WalletRelayRequest } from '@attocash/cli/internal-marketplace';
 export type OperationState = 'PREPARING' | 'PREPARED' | 'UNKNOWN' | 'CONFIRMED' | 'COMPETING';
 export interface JournalRecord {
     id: string;
@@ -86,6 +86,14 @@ export class NanoJournal {
         BEGIN SELECT RAISE(ABORT,'immutable relay authorization'); END;
       CREATE TRIGGER IF NOT EXISTS retain_relay_header BEFORE DELETE ON relay_headers
         BEGIN SELECT RAISE(ABORT,'retain relay authorization'); END;
+      CREATE TABLE IF NOT EXISTS relay_intents (id TEXT PRIMARY KEY, requestJson TEXT NOT NULL, digest TEXT NOT NULL);
+      INSERT OR IGNORE INTO relay_intents(id,requestJson,digest)
+        SELECT id,requestJson,digest FROM operations WHERE kind='transfer'
+        AND CASE WHEN json_valid(requestJson) THEN json_type(requestJson,'$.relay')='object' ELSE FALSE END;
+      CREATE TRIGGER IF NOT EXISTS frozen_relay_intent BEFORE UPDATE ON relay_intents
+        BEGIN SELECT RAISE(ABORT,'immutable relay intent'); END;
+      CREATE TRIGGER IF NOT EXISTS retain_relay_intent BEFORE DELETE ON relay_intents
+        BEGIN SELECT RAISE(ABORT,'retain relay intent'); END;
       COMMIT;`);
             if (process.platform !== 'win32') privateJournalFiles(path);
         } catch (error) {
@@ -134,6 +142,13 @@ export class NanoJournal {
     relayHeader(id: string): string | undefined {
         return (this.db.prepare('SELECT header FROM relay_headers WHERE id=?').get(id) as {header:string}|undefined)?.header;
     }
+    relayIntent(id: string): WalletRelayRequest | undefined {
+        const row = this.db.prepare('SELECT requestJson,digest FROM relay_intents WHERE id=?').get(id) as Pick<JournalRecord,'requestJson'|'digest'> | undefined;
+        if (!row) return undefined;
+        const relay = parseJsonObject(row.requestJson).relay as WalletRelayRequest | undefined;
+        if (!relay || sha256(row.requestJson) !== row.digest || `transfer:${relay.requestId}` !== id) fail('JOURNAL_CONFLICT');
+        return relay;
+    }
     authorizeRelay(id: string, header: string): void {
         this.transaction(() => {
             const record = this.find(id), existing = this.relayHeader(id);
@@ -152,10 +167,18 @@ export class NanoJournal {
     }
     begin(input: Pick<JournalRecord, 'id' | 'kind' | 'digest' | 'requestJson' | 'uniqueId' | 'source' | 'network' | 'amount' | 'destination'>, now: number, limit: bigint | null): JournalRecord {
         return this.transaction(() => {
+            const retainedIntent = this.relayIntent(input.id);
+            const nextIntent = parseJsonObject(input.requestJson).relay as WalletRelayRequest | undefined;
+            if (retainedIntent) {
+                if (!nextIntent || nextIntent.mode !== retainedIntent.mode) fail('HANDLE_REUSE');
+                if (retainedIntent.mode === undefined && nextIntent.mode === undefined && retainedIntent.paymentRequired !== nextIntent.paymentRequired)
+                    validateRelayOfferRefresh(retainedIntent, nextIntent);
+                else if (canonical(retainedIntent) !== canonical(nextIntent)) fail('HANDLE_REUSE');
+            }
             const prior = this.find(input.id);
             if (prior) {
                 const oldTerms = parseJsonObject(prior.requestJson), nextTerms = parseJsonObject(input.requestJson);
-                const relay = oldTerms.relay as RelayRequest | undefined;
+                const relay = oldTerms.relay as WalletRelayRequest | undefined;
                 if (relay !== undefined && prior.state === 'PREPARING') {
                     this.requireUnsigned(prior);
                     if (this.ownerAlive(prior.owner)) fail('PAYMENT_IN_PROGRESS');
@@ -163,9 +186,10 @@ export class NanoJournal {
                     for (const key of ['id','kind','uniqueId','source','network','amount','destination'] as const) {
                         if (prior[key] !== input[key]) fail('HANDLE_REUSE');
                     }
-                    const nextRelay = nextTerms.relay as RelayRequest | undefined;
-                    if (nextRelay === undefined) fail('HANDLE_REUSE');
-                    if (relay.paymentRequired !== nextRelay.paymentRequired) validateRelayOfferRefresh(relay, nextRelay);
+                    const nextRelay = nextTerms.relay as WalletRelayRequest | undefined;
+                    if (nextRelay === undefined || relay.mode !== nextRelay.mode) fail('HANDLE_REUSE');
+                    if (relay.mode === undefined && nextRelay.mode === undefined && relay.paymentRequired !== nextRelay.paymentRequired)
+                        validateRelayOfferRefresh(relay, nextRelay);
                     else this.requireTerms(prior, input);
                     if (sha256(prior.requestJson) !== prior.digest || sha256(input.requestJson) !== input.digest) fail('JOURNAL_CONFLICT');
                     this.db.prepare(`UPDATE operations SET owner=?,requestJson=?,digest=? WHERE id=? AND state='PREPARING' AND blockHash IS NULL`).run(this.token,input.requestJson,input.digest,input.id);
@@ -195,6 +219,7 @@ export class NanoJournal {
                     fail('DAILY_LIMIT', 'The Nano payment exceeds the approved rolling 24-hour spend ceiling.');
             }
             this.db.prepare(`INSERT INTO operations(id,kind,digest,requestJson,uniqueId,source,network,amount,destination,createdAt,state,owner) VALUES(?,?,?,?,?,?,?,?,?,?,'PREPARING',?)`).run(input.id, input.kind, input.digest, input.requestJson, input.uniqueId, input.source, input.network, input.amount, input.destination, now, this.token);
+            if (nextIntent && !retainedIntent) this.db.prepare('INSERT INTO relay_intents(id,requestJson,digest) VALUES(?,?,?)').run(input.id,input.requestJson,input.digest);
             return this.find(input.id)!;
         });
     }

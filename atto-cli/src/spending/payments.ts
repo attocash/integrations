@@ -21,7 +21,8 @@ import { SpendLedger, type ConsolidationStep, type SendRecord } from './ledger.j
 import { planPayment, type PoolAccount } from './pool.js';
 import { reconcileBlock, reconcileSend } from './reconcile.js';
 import { wireTransaction } from './atto-x402.js';
-import { parseRelayOffer, relayPaymentPayload, validateRetainedRelayPayload, type RelayRequest } from '../marketplace/relay.js';
+import { parseDurableRelayRequest, parseRelayOffer, relayPaymentPayload, validateRetainedRelayPayload, type WalletRelayRequest } from '../marketplace/relay.js';
+import { parseJsonObject } from '../marketplace/strict-json.js';
 
 interface PaymentWallet {
   settings(): WalletSettings;
@@ -322,7 +323,7 @@ export class Payments {
       plan: record.plan && { indexes: record.plan.indexes, steps: record.plan.steps.map(({ id, kind, index, sourceAddress, destination, raw, sourceStepId }) =>
         ({ id, kind, index, sourceAddress, destination, raw, sourceStepId })) },
       stepId: step?.id, sourceHash: step?.kind === 'receive' ? record.plan!.steps.find(value => value.id === step.sourceStepId)?.hash : undefined,
-      ...(record.relay ? { relay: { ...record.relay, paymentSignature: undefined } } : {}),
+      ...(record.relay ? { relay: { ...record.relay, paymentSignature: undefined, nativePayloadJson: undefined } } : {}),
     })).digest('hex');
   }
 
@@ -382,15 +383,17 @@ export class Payments {
   }
 
   async prepareRelay(input: Record<string, unknown>): Promise<unknown> {
-    const parsed = z.strictObject({ requestId: z.string().uuid(), origin: z.string(), audience: z.string(), terms: z.record(z.string(), z.unknown()),
-      paymentRequired: z.string(), index: z.number().int().min(0).max(0x7fff_ffff) }).parse(input);
-    const request = parsed as unknown as RelayRequest & { index: number };
+    const binding = z.strictObject({ requestId: z.string().uuid(), origin: z.string(), audience: z.string(), terms: z.record(z.string(), z.unknown()),
+      index: z.number().int().min(0).max(0x7fff_ffff) });
+    const parsed = z.union([binding.extend({ paymentRequired: z.string() }), binding.extend({ mode: z.literal('DURABLE_NATIVE') })]).parse(input);
+    const request = parsed as unknown as WalletRelayRequest & { index: number };
     const prior = this.ledger.get(request.requestId);
-    const offer = parseRelayOffer(request, Boolean(prior?.hash));
-    if (offer.terms.asset !== 'ATTO' || offer.terms.network !== `atto:${this.wallet.settings().network.toLowerCase()}`
-      || this.wallet.addresses().find(value => value.index === request.index)?.address !== offer.terms.senderAddress
-      || parseAddress(offer.terms.recipientAddress).value !== offer.terms.recipientAddress
-      || offer.terms.senderAddress === offer.terms.recipientAddress) throw new AttoError('NETWORK_MISMATCH', 'The relay sender, destination or network differs from the selected wallet.');
+    const offer = request.mode === undefined ? parseRelayOffer(request, Boolean(prior?.hash)) : undefined;
+    const terms = request.mode === 'DURABLE_NATIVE' ? parseDurableRelayRequest(request) : offer!.terms;
+    if (terms.asset !== 'ATTO' || terms.network !== `atto:${this.wallet.settings().network.toLowerCase()}`
+      || this.wallet.addresses().find(value => value.index === request.index)?.address !== terms.senderAddress
+      || parseAddress(terms.recipientAddress).value !== terms.recipientAddress
+      || terms.senderAddress === terms.recipientAddress) throw new AttoError('NETWORK_MISMATCH', 'The relay sender, destination or network differs from the selected wallet.');
     // Market may have confirmed an older relay while this wallet process was offline.
     // Canonical observation releases only completed/competing candidates; it never publishes.
     await this.reconcile();
@@ -398,11 +401,15 @@ export class Payments {
       const record = await this.store.withWalletLock(async () => {
         this.wallet.requireWrite();
         const existing = this.ledger.get(request.requestId);
-        if (existing && !existing.relay) throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another native operation.');
+        if (existing && (!existing.relay || existing.relay.mode !== request.mode)) {
+          throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another wallet operation or relay mode.');
+        }
         if (!existing) this.ledger.assertAccountAvailable(request.index);
-        if (existing?.relay && existing.relay.paymentRequired !== request.paymentRequired) this.ledger.refreshUnusedRelay(existing.id, { ...request, version: 1 });
-        const saved = this.ledger.reserve({ id: request.requestId, index: request.index, destination: offer.terms.recipientAddress,
-          raw: offer.terms.amountAtomic, sourceAddress: offer.terms.senderAddress, network: this.wallet.settings().network,
+        if (request.mode === undefined && existing?.relay && existing.relay.paymentRequired !== request.paymentRequired) {
+          this.ledger.refreshUnusedRelay(existing.id, { ...request, version: 1 });
+        }
+        const saved = this.ledger.reserve({ id: request.requestId, index: request.index, destination: terms.recipientAddress,
+          raw: terms.amountAtomic, sourceAddress: terms.senderAddress, network: this.wallet.settings().network,
           selection: 'explicit', createdAt: existing?.createdAt ?? Date.now(), relay: { ...request, version: 1 } });
         this.requireApproved(saved, saved.status !== 'published');
         return saved;
@@ -416,10 +423,10 @@ export class Payments {
             await this.store.withWalletLock(async () => {
               const current = this.ledger.get(record.id)!;
               this.requireApproved(current); this.checkBlock(current, block);
-              if (!(block instanceof AttoSendBlock) || BigInt(block.height.toString()) <= BigInt(offer.terms.baselineHeight)
-                || (BigInt(block.height.toString()) === BigInt(offer.terms.baselineHeight) + 1n
-                  && offer.terms.baselineFrontier !== null && block instanceof AttoSendBlock
-                  && block.previous.toString().toLowerCase() !== offer.terms.baselineFrontier.toLowerCase())) {
+              if (!(block instanceof AttoSendBlock) || BigInt(block.height.toString()) <= BigInt(terms.baselineHeight)
+                || (BigInt(block.height.toString()) === BigInt(terms.baselineHeight) + 1n
+                  && terms.baselineFrontier !== null
+                  && block.previous.toString().toLowerCase() !== terms.baselineFrontier.toLowerCase())) {
                 throw new AttoError('TRANSACTION_MISMATCH', 'The candidate predates the frozen sender baseline.');
               }
             });
@@ -429,11 +436,13 @@ export class Payments {
           await this.store.withWalletLock(async () => {
             const current = this.ledger.get(record.id)!;
             this.requireApproved(current); this.checkBlock(current, transaction.block);
-            const header = relayPaymentPayload(offer, record.id, { transaction: wireTransaction(transaction) });
-            this.ledger.signed(record.id, transaction.hash.toString(), transaction.block.toJson(), transaction.toJson(), this.candidateBinding(current), header);
+            const payload = { transaction: wireTransaction(transaction) };
+            const authorization = offer ? { paymentSignature: relayPaymentPayload(offer, record.id, payload) }
+              : { nativePayloadJson: JSON.stringify(payload) };
+            this.ledger.signed(record.id, transaction.hash.toString(), transaction.block.toJson(), transaction.toJson(), this.candidateBinding(current), authorization);
           });
         } finally { wallet?.close(); seed.value.fill(0); }
-      } else if (!record.relay!.paymentSignature) {
+      } else if (offer && !record.relay!.paymentSignature) {
         // Complete a pre-upgrade prepare using the original signed transaction.
         const transaction = await this.retainedTransaction(record);
         const header = relayPaymentPayload(offer, record.id, { transaction: wireTransaction(transaction) });
@@ -450,6 +459,16 @@ export class Payments {
   private async relayResult(record: SendRecord): Promise<unknown> {
     if (!record.relay) throw new AttoError('REQUEST_CONFLICT', 'This request belongs to another wallet operation.');
     const transaction = record.hash ? await this.retainedTransaction(record) : undefined;
+    const result = { requestId: record.id, origin: record.relay.origin, audience: record.relay.audience, terms: record.relay.terms,
+      network: record.relay.terms.network, sourceAddress: record.sourceAddress, destination: record.destination, amountAtomic: record.raw,
+      hash: record.hash ?? null, state: record.status };
+    if (record.relay.mode === 'DURABLE_NATIVE') {
+      const payload = record.relay.nativePayloadJson ? parseJsonObject(record.relay.nativePayloadJson) : null;
+      if (transaction && !isDeepStrictEqual(payload, { transaction: wireTransaction(transaction) })) {
+        throw new AttoError('INVALID_STATE', 'The retained native payload differs from its original relay authorization.');
+      }
+      return { ...result, mode: record.relay.mode, payload };
+    }
     if (record.relay.paymentSignature) {
       if (!transaction) throw new AttoError('INVALID_STATE', 'Missing signed relay transaction.');
       const offer = parseRelayOffer(record.relay, true);
@@ -459,9 +478,7 @@ export class Payments {
         throw new AttoError('INVALID_STATE', 'The retained relay payload differs from its original authorization.');
       }
     }
-    return { requestId: record.id, origin: record.relay.origin, audience: record.relay.audience, terms: record.relay.terms, network: record.relay.terms.network, sourceAddress: record.sourceAddress,
-      destination: record.destination, amountAtomic: record.raw, hash: record.hash ?? null, state: record.status,
-      paymentRequired: record.relay.paymentRequired, paymentSignature: record.relay.paymentSignature ?? null };
+    return { ...result, paymentRequired: record.relay.paymentRequired, paymentSignature: record.relay.paymentSignature ?? null };
   }
 
   async relayStatus(input: Record<string, unknown>): Promise<unknown> {
@@ -469,9 +486,25 @@ export class Payments {
     if (!record) return { requestId, state: 'NOT_FOUND' };
     if (index !== undefined && index !== record.index) throw new AttoError('REQUEST_CONFLICT', 'The original relay belongs to another selected wallet account.');
     return this.store.withAccountLocks([record.index], async () => {
-      if (!record.relay) throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another native operation.');
-      await this.reconcileRecord(record);
+      const current = this.ledger.get(requestId)!;
+      if (!current.relay) throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another native operation.');
+      if (current.relay.mode !== 'DURABLE_NATIVE') await this.reconcileRecord(current);
       return this.relayResult(this.ledger.get(requestId)!);
+    });
+  }
+
+  async checkDurableRelayAuthorization(input: Record<string, unknown>): Promise<unknown> {
+    const { requestId, index, transactionHash } = z.strictObject({ requestId: z.string().uuid(),
+      index: z.number().int().min(0).max(0x7fff_ffff), transactionHash: z.string().regex(/^[a-fA-F0-9]{64}$/) }).parse(input);
+    return this.store.withAccountLocks([index], async () => {
+      const record = this.ledger.get(requestId);
+      if (record?.relay?.mode !== 'DURABLE_NATIVE' || record.index !== index || record.status === 'failed'
+        || record.hash?.toLowerCase() !== transactionHash.toLowerCase()) {
+        throw new AttoError('REQUEST_CONFLICT', 'This request has no matching signed durable relay authorization.');
+      }
+      const result = await this.relayResult(record);
+      await this.store.withWalletLock(async () => this.requireApproved(record));
+      return result;
     });
   }
 
@@ -516,8 +549,12 @@ export class Payments {
     }
     const outcome = await reconcileSend(this.reader(), record);
     await this.store.withWalletLock(async () => {
-      if (outcome.status === 'published') this.ledger.complete(record.id, this.paymentResult(this.ledger.get(record.id)!, outcome.transaction), Number(outcome.transaction.block.timestamp.toEpochMilliseconds()));
-      else if (outcome.status === 'rejected') this.ledger.reject(record.id);
+      if (outcome.status === 'published') {
+        const blockTime = Number(outcome.transaction.block.timestamp.toEpochMilliseconds());
+        // A queued durable SEND may be confirmed days after its original signing timestamp.
+        const publishedAt = record.relay?.mode === 'DURABLE_NATIVE' ? Math.max(Date.now(), blockTime) : blockTime;
+        this.ledger.complete(record.id, this.paymentResult(this.ledger.get(record.id)!, outcome.transaction), publishedAt);
+      } else if (outcome.status === 'rejected') this.ledger.reject(record.id);
     });
     if (outcome.status === 'published') this.work.prepareConfirmed(outcome.transaction.block);
   }

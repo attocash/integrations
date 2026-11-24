@@ -39,6 +39,7 @@ export interface NanoBlockEvidence {
   confirmed: boolean;
   subtype: string;
   blockAccount: string;
+  height?: bigint;
   successor?: string;
 }
 
@@ -178,8 +179,9 @@ export class NanoRpcClient {
       const confirmed = value.confirmed === true || value.confirmed === 'true';
       if (!(confirmed || value.confirmed === false || value.confirmed === 'false')) throw new NanoRpcError();
       const subtype = textField(value, 'subtype');
+      const height = value.height === undefined ? undefined : rawAmount(textField(value, 'height'));
       const successor = value.successor === undefined || value.successor === '' ? undefined : canonicalHash(textField(value, 'successor'));
-      return { block, confirmed, subtype, blockAccount, ...(successor ? { successor } : {}) };
+      return { block, confirmed, subtype, blockAccount, ...(height !== undefined ? { height } : {}), ...(successor ? { successor } : {}) };
     } catch { throw new NanoRpcError(); }
   }
 

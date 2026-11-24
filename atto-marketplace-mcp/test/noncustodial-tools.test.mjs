@@ -29,7 +29,10 @@ test('noncustodial MCP exposes direct evidence and ordered milestones while reti
     const {tools}=await client.listTools(),names=tools.map(t=>t.name);
     // Then direct payments and free applications have exact narrow schemas without custody commands.
     const instructions=client.getInstructions();
-    assert.ok(instructions.includes('For marketplace_payment_pay, the selected local wallet signs the native SEND and durably retains the x402 payment for retries. Marketplace relays the signed x402 payment unchanged and independently verifies the confirmed SEND. Marketplace holds no customer keys or balances.'));
+    assert.match(instructions,/wallet signs and saves the native SEND/);
+    assert.match(instructions,/Marketplace retries queued durable relays using that SEND and independently verifies confirmation/);
+    assert.match(instructions,/Only VERIFIED establishes paid status/);
+    assert.match(instructions,/Marketplace holds no customer keys or balances/);
     assert.doesNotMatch(instructions,/All native transactions sign and broadcast locally|never publishes customer payments/);
     assert.equal(tools.find(t=>t.name==='marketplace_tasks_search')?.description,'Search public open Marketplace tasks by exact asset, text and cursor.');
     for(const name of ['marketplace_payment_get','marketplace_payment_pay','marketplace_payment_relay_reauthorize','marketplace_payment_evidence','marketplace_publication_fee_get','marketplace_task_milestones'])assert.ok(names.includes(name),name);

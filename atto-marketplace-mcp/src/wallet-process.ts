@@ -117,6 +117,7 @@ function localSignerFailure(message: string): ProfileError {
 const walletDenials:Record<string,string>={
   WALLET_SETUP_REQUIRED:'Configure the selected account and wallet permissions in the local terminal.',
   NANO_WORK_INVALID:'The returned nonce did not meet the requested Nano difficulty. Retry the same request ID or incoming SEND hash.',
+  NATIVE_BASELINE_UNAVAILABLE:'The selected Nano wallet has not observed the frozen payment baseline. Retry the same payment ID after its node catches up.',
   WALLET_RESPONSE_INVALID:'The native wallet returned data inconsistent with the selected account or request.',
   RECEIVE_RECOVERY_UNAVAILABLE:'Recovery data is temporarily unavailable. Retry wallet_receive with the original incoming SEND hash; its candidate is unchanged.',
   REQUEST_CONFLICT:'Recover the original request with its unchanged account, route and payment terms.',

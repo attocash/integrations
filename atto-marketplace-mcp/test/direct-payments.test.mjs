@@ -3,7 +3,7 @@ const packageDirectory=process.env.ATTO_TEST_MARKETPLACE_MCP_PACKAGE_DIR??fileUR
 import {join} from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
-const {payRequirement,relayTerms,reauthorizeRelay}=await import(pathToFileURL(join(packageDirectory,'dist/direct-payments.js')).href);
+const {payRequirement,paymentRequirement,relayTerms,reauthorizeRelay}=await import(pathToFileURL(join(packageDirectory,'dist/direct-payments.js')).href);
 const {offer,legacyOffer}=await import('../../test/support/relay.mjs');
 const {parseRelayOffer,relayPaymentPayload,decodePaymentHeader}=await import('@attocash/cli/internal-marketplace');
 const id='11111111-1111-4111-8111-111111111111',account='22222222-2222-4222-8222-222222222222';
@@ -71,7 +71,7 @@ for(const kind of ['admitted','attempted','manual'])test(`an existing ${kind} pa
 });
 test('an unused wallet reservation negotiates before signing under the original requirement',async()=>{
   // Given a crash left no native candidate or signed header in the wallet's original reservation.
-  const p=fixture('XNO');
+  const p={...fixture('XNO'),nativeRelaySupported:true};
   const terms=relayTerms(p),fresh=offer(terms),operations=[];
   const saved={requestId:id,origin:profile.origin,audience:profile.audience,terms,network:p.network,sourceAddress:p.senderAddress,destination:p.recipientAddress,amountAtomic:p.amountAtomic,state:'PREPARING',hash:null,paymentRequired:legacyOffer(terms),paymentSignature:null};
   const native={async callWallet(_env,request){operations.push(request.operation);if(request.operation==='identity.list')return {address:p.senderAddress,network:p.network,index:0};
@@ -99,7 +99,7 @@ test('recovery rejects changed immutable terms before reusing a native candidate
 });
 
 test('a retained legacy candidate missing its envelope is completed using its original offer and hash',async()=>{
-  const p=fixture('XNO'),terms=relayTerms(p),paymentRequired=legacyOffer(terms),operations=[];
+  const p={...fixture('XNO'),nativeRelaySupported:true},terms=relayTerms(p),paymentRequired=legacyOffer(terms),operations=[];
   const request={requestId:id,origin:profile.origin,audience:profile.audience,terms,paymentRequired};
   const retained={...request,network:p.network,sourceAddress:p.senderAddress,destination:p.recipientAddress,amountAtomic:p.amountAtomic,
     state:'SIGNED',hash:'d'.repeat(64),paymentSignature:null};
@@ -119,6 +119,155 @@ test('a retained legacy candidate missing its envelope is completed using its or
   }};
   assert.equal((await payRequirement({api,profile,env:{},paymentId:id},native)).requirement.relay.transactionHash,retained.hash);
   assert.deepEqual(operations,['identity.list','payment.status','payment.prepare']);
+});
+
+function durableFixture(asset) {
+  const path = `/v1/agent/payments/${id}`, transactionHash = 'd'.repeat(64);
+  const p = {...fixture(asset), nativeRelaySupported:true, status:'AWAITING_PAYMENT',
+    amountAtomic:asset === 'ATTO' ? '9007199254740993' : '100000000000000000000000000001'};
+  const payload = {[asset === 'ATTO' ? 'transaction' : 'block']:{work:'retained-work',signature:'retained-signature',amount:p.amountAtomic}};
+  const pending = {...p, status:'PENDING', relay:{mode:'DURABLE_NATIVE', requestId:id, transactionHash,
+    status:'PENDING', attempted:true, reason:'native_rate_limited', nextCheckAt:'2026-11-24T10:15:30.123456Z'}};
+  const verified = {...pending, status:'VERIFIED', relay:{...pending.relay, status:'VERIFIED', reason:null, nextCheckAt:null},
+    verifiedPayment:{network:p.network, transactionHash, senderAddress:p.senderAddress, recipientAddress:p.recipientAddress,
+      amountAtomic:p.amountAtomic, senderHeight:8, previousHash:p.baselineFrontier}};
+  const preparations = [];
+  const checks = [];
+  let savedJson;
+  const wallet = () => ({async callWallet(_env, request) {
+    if (request.operation === 'identity.list') return {address:p.senderAddress, network:p.network, index:0};
+    if (request.operation === 'payment.status') return savedJson ? JSON.parse(savedJson) : {requestId:id,state:'NOT_FOUND'};
+    if (request.operation === 'payment.relay.check') {
+      assert.deepEqual(request.input,{requestId:id,transactionHash:transactionHash.toUpperCase()});
+      checks.push(request);
+      return JSON.parse(savedJson);
+    }
+    assert.equal(request.operation,'payment.prepare');
+    assert.deepEqual(request.input,{requestId:id, origin:profile.origin, audience:profile.audience, terms:relayTerms(p), mode:'DURABLE_NATIVE'});
+    preparations.push(request);
+    const signed = {...request.input, network:p.network, sourceAddress:p.senderAddress, destination:p.recipientAddress,
+      amountAtomic:p.amountAtomic, hash:transactionHash.toUpperCase(), state:'PREPARED', payload};
+    savedJson = JSON.stringify(signed);
+    return signed;
+  }});
+  const response = (json, status = 200, headers = {}) => ({status, json, headers:new Headers(headers)});
+  const recoveredBody = {requestId:id, transactionHash, termsHash:p.termsHash, versionHash:p.versionHash, payload};
+  return {p, path, pending, verified, preparations, checks, wallet, response, recoveredBody, paymentInput:{profile, env:{}, paymentId:id}};
+}
+
+for (const asset of ['ATTO','XNO']) test(`${asset} durable relay replays stable wire bytes and reports queued progress and independent settlement`,async()=>{
+  const f = durableFixture(asset);
+  const posts = [];
+  let current = f.p;
+  const api = {async request(path, options) {
+    if (!options) {
+      assert.equal(path,f.path);
+      return f.response(current);
+    }
+    assert.equal(path,`${f.path}/relay`);
+    assert.equal(options.method,'POST');
+    assert.deepEqual(options.allowStatus,[200,202]);
+    assert.equal(options.headers,undefined);
+    assert.deepEqual(options.body,f.recoveredBody);
+    posts.push(JSON.stringify(options.body));
+    if (posts.length === 1) throw Error('response lost before admission');
+    current = f.pending;
+    return f.response(current,202,{Location:f.path});
+  }};
+  const input = {...f.paymentInput, api};
+  await assert.rejects(payRequirement(input,f.wallet()),/response lost/);
+  const queued = await payRequirement(input,f.wallet());
+  assert.deepEqual(queued,f.pending);
+  assert.equal(posts[0],posts[1]);
+  assert.deepEqual(await payRequirement(input,f.wallet()),f.pending);
+  current = f.verified;
+  assert.deepEqual(await payRequirement(input,f.wallet()),f.verified);
+  assert.equal(posts.length,2);
+  assert.equal(f.preparations.length,1);
+  assert.equal(f.checks.length,1);
+});
+
+test('a successful durable POST requires a verified response bound to the retained candidate',async()=>{
+  const f = durableFixture('ATTO');
+  for (const change of [
+    reply => {reply.status = 202;},
+    reply => {reply.json.verifiedPayment.transactionHash = 'e'.repeat(64);},
+    reply => {reply.json.relay.requestId = account;},
+    reply => {reply.json.termsHash = 'e'.repeat(64);},
+    reply => {reply.json.verifiedPayment.senderAddress = 'other-sender';},
+    reply => {reply.headers.set('Location','https://other.example' + f.path);},
+    reply => {reply.headers.set('PAYMENT-RESPONSE','unexpected');},
+  ]) {
+    const api = {async request(_path, options) {
+      if (!options) return f.response(f.p);
+      const reply = f.response(structuredClone(f.verified));
+      change(reply);
+      return reply;
+    }};
+    await assert.rejects(payRequirement({...f.paymentInput,api},f.wallet()), {code:'PAYMENT_PROTOCOL'});
+  }
+  const api = {async request(_path, options) {return f.response(options ? f.verified : f.p);}};
+  assert.deepEqual(await payRequirement({...f.paymentInput,api},f.wallet()),f.verified);
+  assert.equal(f.preparations.length,1);
+});
+
+test('durable recovery returns the terminal relay and preserves admissions from other clients',async()=>{
+  const f = durableFixture('XNO');
+  const terminal = {...f.pending, status:'AWAITING_PAYMENT', relay:{...f.pending.relay, status:'REJECTED',
+    reason:'confirmed_competing_native_block', nextCheckAt:null}};
+  const other = {...f.pending, relay:{...f.pending.relay, requestId:account}};
+  for (const current of [terminal,other]) {
+    const api = {async request(path, options) {assert.equal(path,f.path);assert.equal(options,undefined);return f.response(current);}};
+    assert.deepEqual(await payRequirement({...f.paymentInput,api},f.wallet()),current);
+    assert.deepEqual(paymentRequirement(current,id,account),current);
+  }
+  assert.equal(f.preparations.length,0);
+});
+
+test('unadmitted durable recovery uses current wallet authority while already admitted recovery reads status',async()=>{
+  const f = durableFixture('XNO');
+  let current = f.p;
+  let posts = 0;
+  const api = {async request(_path, options) {
+    if (!options) return f.response(current);
+    posts++;
+    throw Error('response lost');
+  }};
+  const input = {...f.paymentInput,api};
+  await assert.rejects(payRequirement(input,f.wallet()),/response lost/);
+  const wallet = {async callWallet(env, request) {
+    if (request.operation === 'payment.relay.check') throw Error('grant revoked');
+    return f.wallet().callWallet(env,request);
+  }};
+  await assert.rejects(payRequirement(input,wallet),/grant revoked/);
+  assert.equal(posts,1);
+  current = f.pending;
+  assert.deepEqual(await payRequirement(input,wallet),f.pending);
+
+  current = {...f.verified,
+    verifiedPayment:{...f.verified.verifiedPayment,transactionHash:'e'.repeat(64)},
+    relay:{...f.verified.relay,status:'REJECTED',reason:'confirmed_competing_native_block'}};
+  assert.deepEqual(paymentRequirement(current,id,account),current);
+  assert.deepEqual(await payRequirement(input,wallet),{requirement:current,originalRelay:current.relay});
+
+  const originalRelay={requestId:id,transactionHash:f.pending.relay.transactionHash,status:'REJECTED',reason:'confirmed_competing_native_block'};
+  current={...current,relay:{...f.verified.relay,requestId:account,transactionHash:current.verifiedPayment.transactionHash},
+    submissions:[originalRelay]};
+  const noWallet={async callWallet() {throw Error('foreign admission is read-only');}};
+  assert.deepEqual(await payRequirement(input,noWallet),{requirement:current,originalRelay});
+  assert.equal(posts,1);
+  assert.equal(f.preparations.length,1);
+});
+
+test('server-side legacy admission keeps its original flow after durable support is advertised',async()=>{
+  const f = durableFixture('XNO');
+  const staged = {...f.pending, relay:{...f.pending.relay, mode:'X402', attempted:false}};
+  const api = {async request(path, options) {
+    assert.equal(path,f.path);
+    return options ? f.response(staged,202,{Location:f.path}) : f.response(staged);
+  }};
+  assert.equal((await payRequirement({...f.paymentInput,api},f.wallet())).requirement.relay.mode,'X402');
+  assert.equal(f.preparations.length,0);
 });
 
 function reauthorizationFixture() {

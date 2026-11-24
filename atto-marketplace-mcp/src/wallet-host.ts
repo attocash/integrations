@@ -10,7 +10,7 @@ import { selectedAttoWallet } from './wallet-access.js';
 import { canonicalWalletDestination, normalizeWalletResult, publicWalletIdentity } from './wallet-results.js';
 
 export const walletOperations = ['controller.sign','identity.list','balance.get',
-  'transfer.send','transfer.status','receive','receivable.list','payment.prepare','payment.status','payment.reauthorization.check'] as const;
+  'transfer.send','transfer.status','receive','receivable.list','payment.prepare','payment.status','payment.relay.check','payment.reauthorization.check'] as const;
 export type WalletOperation = typeof walletOperations[number];
 export type WalletAsset = 'ATTO' | 'XNO';
 export interface WalletRequest {
@@ -36,7 +36,7 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
     const dispatch = () => dispatchNanoOperation(selected, operation, request.input,
       workProvider && (configuration => usesMarketplaceWork(configuration) ? workProvider : undefined));
     if (request.operation === 'controller.sign' || request.operation === 'payment.prepare'
-      || request.operation === 'payment.status') return dispatch();
+      || request.operation === 'payment.status' || request.operation === 'payment.relay.check') return dispatch();
     const configuration = loadConfiguration(defaultDataDirectory(selected));
     const identity = publicWalletIdentity({asset:'XNO',network:configuration.network,address:configuration.sourceAddress,
       index:configuration.derivationIndex,permissions:{externalTransfers:configuration.grants.externalTransfers,receive:configuration.grants.externalTransfers}});
@@ -70,19 +70,20 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
         || currentIdentity.fingerprint !== originalIdentity.fingerprint) {
         throw walletError('WALLET_SETUP_REQUIRED');
       }
-      const allowed = request.operation === 'transfer.send' || request.operation === 'payment.prepare' ? current.permissions.externalTransfers
+      const allowed = request.operation === 'transfer.send' || request.operation === 'payment.prepare' || request.operation === 'payment.relay.check'
+        ? current.permissions.externalTransfers
         : request.operation === 'receive' ? current.permissions.receive : true;
       if (!allowed) throw walletError('PERMISSION_DENIED');
     }});
   try {
     const names: Record<typeof request.operation,string> = {'identity.list':'wallet_status','balance.get':'balances_get',
-      'payment.prepare':'payment_prepare','payment.status':'payment_status',
+      'payment.prepare':'payment_prepare','payment.status':'payment_status','payment.relay.check':'payment_relay_check',
       'transfer.send':'send','transfer.status':'journal_get',receive:'receive','receivable.list':'receivables_list'};
     const args = {...request.input};
     status = await app.call('wallet_status', {}) as Record<string, unknown>;
     selection = selectedAttoWallet(env, status);
     const identity = publicWalletIdentity({asset:'ATTO',...selection});
-    if (request.operation === 'payment.prepare' || request.operation === 'payment.status') {
+    if (request.operation === 'payment.prepare' || request.operation === 'payment.status' || request.operation === 'payment.relay.check') {
       args.index = identity.index;
       return await app.call(names[request.operation], args);
     }

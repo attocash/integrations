@@ -1,11 +1,15 @@
 import { isDeepStrictEqual } from 'node:util';
-import { parseRelayOffer, decodePaymentHeader, validateRetainedRelayPayload, type RelayTerms } from '@attocash/cli/internal-marketplace';
+import { parseRelayOffer, decodePaymentHeader, validateRetainedRelayPayload, type DurableRelayRequest, type RelayTerms } from '@attocash/cli/internal-marketplace';
 import { z } from 'zod';
 import { MarketplaceApiClient, MarketplaceApiError, type ApiResponse } from './marketplace-api.js';
 import type { MarketplaceProfile } from './profile-store.js';
 import type { NanoWorkProvider } from '@attocash/atto-marketplace-nano-adapter';
 import { callWallet } from './wallet-process.js';
 const hash=z.string().regex(/^[a-fA-F0-9]{64}$/);
+const lowercaseUuid=z.string().uuid().refine(value=>value===value.toLowerCase());
+const jsonObject=z.record(z.string(),z.unknown());
+const attoPayload=z.strictObject({transaction:jsonObject});
+const nanoPayload=z.strictObject({block:jsonObject});
 const requirement=z.object({id:z.string().uuid(),purpose:z.enum(['PUBLICATION_FEE','SHOP_ORDER','TASK_MILESTONE','BUYER_REFUND']),
   sourceReference:z.string(),ownerAccountId:z.string().uuid(),asset:z.enum(['ATTO','XNO']),network:z.string(),
   senderAddress:z.string().min(1).max(160),recipientAddress:z.string().min(1).max(160),amountAtomic:z.string().regex(/^[1-9][0-9]{0,64}$/),
@@ -14,7 +18,9 @@ const requirement=z.object({id:z.string().uuid(),purpose:z.enum(['PUBLICATION_FE
     senderAddress:z.string(),recipientAddress:z.string(),amountAtomic:z.string(),senderHeight:z.number().int(),previousHash:hash}).nullable(),
   submissions:z.array(z.object({requestId:z.string(),transactionHash:hash,status:z.enum(['PENDING','REJECTED','VERIFIED']),reason:z.string().nullable()})),
   relay:z.object({requestId:z.string().min(16).max(128),transactionHash:hash,attempted:z.boolean(),status:z.string(),reason:z.string().nullable(),
-    authorizationRequired:z.boolean().optional(),reauthorizedUntil:z.iso.datetime().nullable().optional()}).nullable(),
+    authorizationRequired:z.boolean().optional(),reauthorizedUntil:z.iso.datetime().nullable().optional(),
+    mode:z.enum(['DURABLE_NATIVE','X402']).optional(),nextCheckAt:z.iso.datetime().nullable().optional()}).nullable(),
+  nativeRelaySupported:z.boolean().optional(),
 });
 export type PaymentRequirement=z.infer<typeof requirement>;
 function invalid(message='Marketplace returned inconsistent immutable payment instructions.'):never { throw new MarketplaceApiError('PAYMENT_PROTOCOL',message); }
@@ -28,6 +34,13 @@ export function paymentRequirement(value:unknown,id:string,accountId:string):Pay
     const paid=p.verifiedPayment;
     if(paid.network!==p.network || paid.senderAddress!==p.senderAddress || paid.recipientAddress!==p.recipientAddress
       || paid.amountAtomic!==p.amountAtomic || paid.senderHeight<=p.baselineHeight) invalid();
+  }
+  if(p.relay?.mode==='DURABLE_NATIVE') {
+    const relay=p.relay;
+    if(!lowercaseUuid.safeParse(relay.requestId).success || relay.authorizationRequired || relay.reauthorizedUntil
+      || (relay.status==='PENDING' && p.status!=='PENDING')
+      || (relay.status==='VERIFIED' && p.verifiedPayment?.transactionHash.toLowerCase()!==relay.transactionHash.toLowerCase())
+      || !['PENDING','VERIFIED','REJECTED'].includes(relay.status)) invalid();
   }
   return p;
 }
@@ -50,7 +63,8 @@ export async function reauthorizeRelay(input: {
   const matchesCandidate = (p:PaymentRequirement) => p.relay?.requestId === requestId
     && p.relay.transactionHash.toLowerCase() === transactionHash
     && (!p.verifiedPayment || p.verifiedPayment.transactionHash.toLowerCase() === transactionHash);
-  if (original.asset !== 'XNO' || original.purpose !== 'PUBLICATION_FEE' || requestId !== paymentId || !matchesCandidate(original)) {
+  if (original.asset !== 'XNO' || original.purpose !== 'PUBLICATION_FEE' || original.relay?.mode === 'DURABLE_NATIVE'
+      || requestId !== paymentId || !matchesCandidate(original)) {
     invalid('Reauthorization requires the originally admitted Nano publication fee, request ID and transaction hash.');
   }
   // Java Instant omits the fractional part for whole seconds. Keep all other digits exact.
@@ -74,19 +88,48 @@ export async function reauthorizeRelay(input: {
   return result;
 }
 
-/** The wallet retains the native candidate and final header; only Market publishes it. */
-export async function payRequirement(input:{api:MarketplaceApiClient;profile:MarketplaceProfile;env:NodeJS.ProcessEnv;paymentId:string;nanoWork?:NanoWorkProvider | undefined},native={callWallet}) {
+interface PayInput {
+  api: MarketplaceApiClient;
+  profile: MarketplaceProfile;
+  env: NodeJS.ProcessEnv;
+  paymentId: string;
+  nanoWork?: NanoWorkProvider | undefined;
+}
+
+/** The wallet retains the signed candidate and its relay authority before Marketplace can publish it. */
+export async function payRequirement(input:PayInput,native={callWallet}) {
   const {api,profile,env,paymentId}=input;
   const path=`/v1/agent/payments/${paymentId}`;
   const p=paymentRequirement((await api.request(path)).json,paymentId,profile.accountId);
-  if(p.status==='VERIFIED') return p;
+  if(p.relay?.mode==='DURABLE_NATIVE' && p.relay.requestId!==p.id) {
+    const originalRelay=p.submissions.find(submission=>submission.requestId===p.id && submission.status==='REJECTED');
+    return originalRelay ? {requirement:p,originalRelay} : p;
+  }
+  if(p.status==='VERIFIED' && p.relay?.mode!=='DURABLE_NATIVE') return p;
   const identity=await native.callWallet(env,{asset:p.asset,operation:'identity.list',input:{}});
   if(identity.address!==p.senderAddress || identity.network!==p.network || !Number.isSafeInteger(identity.index)) invalid('The selected local wallet differs from the frozen sender or network.');
   let saved=await native.callWallet(env,{asset:p.asset,operation:'payment.status',input:{requestId:p.id}});
   const binding = { requestId: p.id, origin: profile.origin, audience: profile.audience, terms: relayTerms(p) };
   const hasRecord = saved.state !== 'NOT_FOUND';
-  if (hasRecord && (saved.requestId !== paymentId || saved.origin !== binding.origin || saved.audience !== binding.audience
-    || !isDeepStrictEqual(saved.terms, binding.terms))) invalid('The retained wallet request differs from the original payment terms.');
+  if (hasRecord) validateSavedBinding(saved,binding);
+
+  if (p.relay?.mode === 'DURABLE_NATIVE') {
+    if (hasRecord) {
+      validateSaved(saved,p);
+      if (saved.mode !== 'DURABLE_NATIVE' || String(saved.hash).toLowerCase() !== p.relay.transactionHash.toLowerCase()) {
+        invalid('Marketplace returned a different candidate from the original wallet authorization.');
+      }
+    }
+    if (p.verifiedPayment && p.verifiedPayment.transactionHash.toLowerCase() !== p.relay.transactionHash.toLowerCase()) {
+      return {requirement:p,originalRelay:p.relay};
+    }
+    return p;
+  }
+  if (saved.mode === 'DURABLE_NATIVE' && p.relay) invalid('Marketplace returned a different mode from the original wallet authorization.');
+  if (saved.mode === 'DURABLE_NATIVE' || (!hasRecord && !p.relay && p.nativeRelaySupported === true)) {
+    if (p.submissions.some(submission => submission.status === 'PENDING')) return p;
+    return payDurable(input,native,p,{ ...binding, mode:'DURABLE_NATIVE' },saved);
+  }
 
   let paymentRequired: string;
   const hasCandidate = hasRecord && saved.hash !== null;
@@ -108,15 +151,50 @@ export async function payRequirement(input:{api:MarketplaceApiClient;profile:Mar
     saved = await native.callWallet(env, { asset: p.asset, operation: 'payment.prepare', input: request }, input.nanoWork);
     if (hasCandidate && originalHash !== saved.hash) invalid('Payment recovery changed the retained native candidate.');
   }
+  validateSavedBinding(saved,binding);
   validateSaved(saved,p);
   if (saved.state==='failed'||saved.state==='COMPETING') return {requirement:p,wallet:saved};
   const transactionHash=String(saved.hash).toLowerCase();
-  if(typeof saved.paymentSignature!=='string')invalid('The wallet did not durably retain its signed payment.');
+  if(saved.mode!==undefined || typeof saved.paymentSignature!=='string')invalid('The wallet did not durably retain its signed x402 payment.');
   validateRetainedRelayPayload(offer,p.id,saved.paymentSignature,transactionHash);
   const response=await api.request(path,{method:'POST',headers:{'Idempotency-Key':p.id,'PAYMENT-SIGNATURE':saved.paymentSignature},allowStatus:[200,202,402]});
   if(response.status===402)invalid('The original relay was not settled. Preserve its wallet candidate and recover this payment ID; do not prepare another payment.');
   if(response.status===200) return confirmedResponse(response,p,profile.accountId,transactionHash);
   return pendingResponse(response,p,profile.accountId,profile.origin,transactionHash);
+}
+
+async function payDurable(input:PayInput,native:{callWallet:typeof callWallet},p:PaymentRequirement,
+  request:DurableRelayRequest,saved:Record<string,unknown>) {
+  if (saved.state === 'NOT_FOUND' || saved.hash === null) {
+    saved=await native.callWallet(input.env,{asset:p.asset,operation:'payment.prepare',input:{...request}},input.nanoWork);
+  } else if (saved.state!=='failed' && saved.state!=='COMPETING') {
+    const retained=saved;
+    saved=await native.callWallet(input.env,{asset:p.asset,operation:'payment.relay.check',input:{requestId:p.id,transactionHash:retained.hash}});
+    if(saved.hash!==retained.hash||!isDeepStrictEqual(saved.payload,retained.payload)) {
+      invalid('Wallet authorization changed the retained native candidate.');
+    }
+  }
+  validateSavedBinding(saved,request);
+  validateSaved(saved,p);
+  const payload=(p.asset==='ATTO'?attoPayload:nanoPayload).safeParse(saved.payload);
+  if(saved.mode!=='DURABLE_NATIVE'||!payload.success)invalid('The wallet did not retain its signed durable relay authorization.');
+  const transactionHash=String(saved.hash).toLowerCase();
+  if(saved.state==='failed'||saved.state==='COMPETING') return {requirement:p,wallet:{transactionHash,state:saved.state}};
+
+  const path=`/v1/agent/payments/${p.id}`;
+  const response=await input.api.request(`${path}/relay`,{method:'POST',allowStatus:[200,202],
+    body:{requestId:p.id,transactionHash,termsHash:p.termsHash,versionHash:p.versionHash,payload:payload.data}});
+  if(response.headers.has('PAYMENT-RESPONSE'))invalid('Durable relay returned an x402 settlement header.');
+  const location=response.headers.get('Location');
+  if(location) validateRecoveryLocation(location,input.profile.origin,path);
+  const result=paymentRequirement(response.json,p.id,input.profile.accountId);
+  if (!isDeepStrictEqual(relayTerms(result),request.terms) || result.relay?.mode!=='DURABLE_NATIVE' || result.relay.requestId!==request.requestId
+    || result.relay.transactionHash.toLowerCase()!==transactionHash
+    || (response.status===200 ? result.status!=='VERIFIED'||result.relay.status!=='VERIFIED'
+      : result.status!=='PENDING'||result.relay.status!=='PENDING')) {
+    invalid('Durable relay status differs from the original payment and native candidate.');
+  }
+  return result;
 }
 function confirmedResponse(response:ApiResponse,p:PaymentRequirement,accountId:string,transactionHash?:string) {
   const result=paymentRequirement(response.json,p.id,accountId),header=response.headers.get('PAYMENT-RESPONSE');
@@ -133,9 +211,7 @@ function pendingResponse(response:ApiResponse,p:PaymentRequirement,accountId:str
   if(response.headers.has('PAYMENT-RESPONSE'))invalid('An unresolved relay must not report successful settlement.');
   const location=response.headers.get('Location');
   if(!location)invalid('Pending payment omitted its original recovery location.');
-  let recovery:URL;
-  try {recovery=new URL(location,origin);}catch{return invalid('Invalid pending payment recovery location.');}
-  if(recovery.origin!==origin||recovery.pathname!==path||recovery.search||recovery.hash||recovery.username||recovery.password)invalid('Pending payment recovery left the original resource.');
+  validateRecoveryLocation(location,origin,path);
   const pending=z.object({success:z.literal(false),errorReason:z.literal('settlement_pending'),payer:z.literal(p.senderAddress),
     transaction:hash,network:z.literal(p.network),extensions:z.object({'marketplace-relay':z.object({info:z.object({attempted:z.literal(true),recovery:z.literal(path)})})})}).safeParse(response.json);
   if(pending.success) {
@@ -151,8 +227,20 @@ function pendingResponse(response:ApiResponse,p:PaymentRequirement,accountId:str
   return {requirement:staged,recovery:path};
 }
 
+function validateRecoveryLocation(location:string,origin:string,path:string):void {
+  let recovery:URL;
+  try {recovery=new URL(location,origin);}catch{return invalid('Invalid pending payment recovery location.');}
+  if(recovery.origin!==origin||recovery.pathname!==path||recovery.search||recovery.hash||recovery.username||recovery.password)invalid('Pending payment recovery left the original resource.');
+}
+
+function validateSavedBinding(saved:Record<string,unknown>,binding:Pick<DurableRelayRequest,'requestId'|'origin'|'audience'|'terms'>):void {
+  if(saved.requestId!==binding.requestId||saved.origin!==binding.origin||saved.audience!==binding.audience
+    ||!isDeepStrictEqual(saved.terms,binding.terms))invalid('The retained wallet request differs from the original payment terms.');
+}
+
 function validateSaved(saved:Record<string,unknown>,p:PaymentRequirement):void {
   if(saved.requestId!==p.id||saved.network!==p.network||saved.sourceAddress!==p.senderAddress
-    ||saved.destination!==p.recipientAddress||saved.amountAtomic!==p.amountAtomic||!hash.safeParse(saved.hash).success
-    ||!(saved.paymentSignature===null||typeof saved.paymentSignature==='string'))invalid('The retained wallet candidate differs from immutable payment instructions.');
+    ||saved.destination!==p.recipientAddress||saved.amountAtomic!==p.amountAtomic||!hash.safeParse(saved.hash).success) {
+    invalid('The retained wallet candidate differs from immutable payment instructions.');
+  }
 }
