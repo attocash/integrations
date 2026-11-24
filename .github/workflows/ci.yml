@@ -1,7 +1,6 @@
 name: CLI and MCP
 
 on:
-  push:
   pull_request:
   workflow_call:
 
