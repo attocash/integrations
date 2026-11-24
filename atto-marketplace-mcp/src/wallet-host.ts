@@ -37,7 +37,18 @@ export async function executeWalletRequest(request: WalletRequest, env: NodeJS.P
       workProvider && (configuration => usesMarketplaceWork(configuration) ? workProvider : undefined));
     if (request.operation === 'controller.sign' || request.operation === 'payment.prepare'
       || request.operation === 'payment.status' || request.operation === 'payment.relay.check') return dispatch();
-    const configuration = loadConfiguration(defaultDataDirectory(selected));
+    let configuration: ReturnType<typeof loadConfiguration>;
+    try {
+      configuration = loadConfiguration(defaultDataDirectory(selected));
+    } catch (error) {
+      // Report configuration errors only for the two preflight reads. Do not
+      // reinterpret RPC failures or the outcome of a write or recovery request.
+      if ((request.operation === 'identity.list' || request.operation === 'balance.get')
+        && ['PRIVATE_FILE','WALLET_CONFIGURATION','INVALID_REQUEST'].includes(errorCode(error) ?? '')) {
+        throw walletError('WALLET_SETUP_REQUIRED');
+      }
+      throw error;
+    }
     const identity = publicWalletIdentity({asset:'XNO',network:configuration.network,address:configuration.sourceAddress,
       index:configuration.derivationIndex,permissions:{externalTransfers:configuration.grants.externalTransfers,receive:configuration.grants.externalTransfers}});
     // Status describes the configured account and grants. Configuration loading

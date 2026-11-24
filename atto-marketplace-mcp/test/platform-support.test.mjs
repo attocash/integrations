@@ -98,6 +98,32 @@ test('native startup creates private storage and reaches the profile-required bo
   assertPrivatePermissions(join(home,'profiles.sqlite'), 'file');
 });
 
+test('Nano wallet preflight distinguishes unusable configuration from a general signer failure', {timeout:90_000}, async t => {
+  const home = await mkdtemp(join(tmpdir(), 'marketplace-nano-preflight-'));
+  t.after(() => rm(home, {recursive:true,force:true}));
+  const dataDir = join(home, 'selected Nano wallet');
+  const env = {MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir};
+  const requests = [
+    {asset:'XNO',operation:'identity.list',input:{}},
+    {asset:'XNO',operation:'balance.get',input:{network:'nano:mainnet'}},
+  ];
+  async function assertSetupRequired() {
+    for (const request of requests) {
+      await assert.rejects(callWallet(env, request), {
+        code:'WALLET_SETUP_REQUIRED',
+        message:'Configure the selected account and wallet permissions in the local terminal.',
+      });
+    }
+  }
+  await assertSetupRequired();
+  assert.deepEqual(await readdir(home), []);
+  await mkdir(dataDir, {mode:0o700});
+  const configuration = join(dataDir, 'wallet.json');
+  await writeFile(configuration, '{}', {mode:0o600});
+  await assertSetupRequired();
+  assert.equal(await readFile(configuration, 'utf8'), '{}');
+});
+
 test('native Nano provisioning and the private Node wallet child share the same selected identity', {timeout:150_000}, async t => {
   // Given synthetic import bytes in a private disposable directory and no live node.
   const parent = await mkdtemp(join(tmpdir(), "Nano O'Brien native-"));
@@ -108,7 +134,10 @@ test('native Nano provisioning and the private Node wallet child share the same 
     origin:'http://localhost:8080',audience:'native-platform-test',terminalConfirmed:true};
   // When native provisioning publishes the configuration and the actual Node stdio child reads it.
   const wallet = await provisionNanoWallet(options);
-  const identity = await callWallet({...process.env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir}, {asset:'XNO',operation:'identity.list',input:{}});
+  const env = {...process.env,MARKETPLACE_MCP_NANO_WALLET_DATA_DIR:dataDir};
+  const identity = await callWallet(env, {asset:'XNO',operation:'identity.list',input:{}});
+  await assert.rejects(callWallet(env, {asset:'XNO',operation:'balance.get',input:{network:'nano:mainnet'}}),
+    {code:'NETWORK_MISMATCH'});
   // Then the original identity and private native paths survive an exact setup retry without contacting RPC.
   assert.equal(identity.address, wallet.address);
   assert.equal((await provisionNanoWallet(options)).address, wallet.address);
