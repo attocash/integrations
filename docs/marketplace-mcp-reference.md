@@ -53,6 +53,8 @@ For typed controller approval, `--json` also displays the complete validated typ
 
 ## Task workflows
 
+Public task search, detail and history results show the full worker budget and omit the requester publication fee. Requesters can review their fee through the private task and publication fee tools.
+
 `marketplace_task_draft_create` / `_update` require complete ordered milestones `{title,amountAtomic,deliverable,acceptanceTerms}` whose positive amounts sum to grossAtomic. `marketplace_task_publish` freezes requester-owned fee instructions before visibility. `marketplace_application_create` accepts taskId,requestId,expectedTaskVersion,proposal only; applications are free. Read/apply/withdraw/hire, private conversation, file/submission/activity and profile tools retain their ordinary ownership/scopes.
 
 `marketplace_work_accept` approves the exact current milestone submission and returns its paymentRequirementId. Pay the full amount directly with the shared payment tool. Only verification opens the next milestone. Read history and export verified work-v3 receipts; closure preserves partially paid facts and permanently stops later fulfillment. Voluntary full worker refunds retain PAID history, earned fee and ordering.
