@@ -161,8 +161,16 @@ export function validateConfiguration(value: unknown): NanoWalletConfiguration {
 }
 export function loadConfiguration(dataDir: string): NanoWalletConfiguration {
     privateDirectory(dataDir, false);
-    recoverPublication(join(dataDir, 'wallet.json'));
-    const config = validateConfiguration(parseJsonObject(readPrivate(join(dataDir, 'wallet.json'), 32768).toString('utf8')));
+    const path = join(dataDir, 'wallet.json');
+    recoverPublication(path);
+    const contents = readPrivate(path, 32768).toString('utf8');
+    let config: NanoWalletConfiguration;
+    try {
+        config = validateConfiguration(parseJsonObject(contents));
+    } catch {
+        // Persisted parse and schema failures share a code without exposing file contents.
+        return fail('WALLET_CONFIGURATION');
+    }
     if (config.keySource.type === 'native-seed') privateDirectory(dirname(config.keySource.seedFile), false);
     requireSharedWalletBinding(config, dataDir);
     return config;

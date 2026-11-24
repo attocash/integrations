@@ -119,9 +119,14 @@ test('Nano wallet preflight distinguishes unusable configuration from a general 
   assert.deepEqual(await readdir(home), []);
   await mkdir(dataDir, {mode:0o700});
   const configuration = join(dataDir, 'wallet.json');
-  await writeFile(configuration, '{}', {mode:0o600});
-  await assertSetupRequired();
-  assert.equal(await readFile(configuration, 'utf8'), '{}');
+  for (const [name, contents] of [['invalid fields', '{}'], ['truncated JSON', '{']]) {
+    await t.test(name, async () => {
+      await writeFile(configuration, contents, {mode:0o600});
+      await assertSetupRequired();
+      assert.equal(await readFile(configuration, 'utf8'), contents);
+      assert.deepEqual(await readdir(dataDir), ['wallet.json']);
+    });
+  }
 });
 
 test('native Nano provisioning and the private Node wallet child share the same selected identity', {timeout:150_000}, async t => {

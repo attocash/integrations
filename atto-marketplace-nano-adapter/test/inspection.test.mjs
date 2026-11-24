@@ -4,7 +4,7 @@ import {mkdtemp,rm,symlink} from 'node:fs/promises';
 import {tmpdir} from '../../test/support/temporary-directory.mjs';
 import {join} from 'node:path';
 import test from 'node:test';
-import {inspectNanoSeed,inspectNanoWallet,provisionNanoWallet} from '../dist/index.js';
+import {inspectNanoSeed,inspectNanoWallet,loadConfiguration,provisionNanoWallet} from '../dist/index.js';
 import {validateConfiguration,withPrivateKey} from '../dist/configuration.js';
 test('a supplied missing seed never generates a replacement or creates wallet state',async t=>{
  // Given an explicit seed import whose file is absent.
@@ -27,6 +27,20 @@ test('identity inspection preserves keys and never initializes journals',async t
  assert.equal((await inspectNanoSeed(config.keySource.seedFile,1)).address,wallet.address);assert.deepEqual(await inspectNanoWallet(dataDir),config);
  // Then keys and wallet files remain unchanged and missing directories stay absent.
  assert.deepEqual(readFileSync(config.keySource.seedFile),seed);assert.deepEqual(readdirSync(dataDir),files);assert.equal(existsSync(join(dataDir,'nano-wallet.sqlite3')),false);
+});
+
+test('persisted Nano wallet parse and validation failures share a configuration code', async t => {
+ const dataDir = await mkdtemp(join(tmpdir(), 'nano-invalid-config-'));
+ t.after(() => rm(dataDir, {recursive:true,force:true}));
+ const path = join(dataDir, 'wallet.json');
+ assert.throws(() => loadConfiguration(dataDir), {code:'PRIVATE_FILE'});
+ for (const contents of ['{', '[]', '{"version":1,"version":1}', '{}']) {
+  writeFileSync(path, contents, {mode:0o600});
+  assert.throws(() => loadConfiguration(dataDir), {
+   code:'WALLET_CONFIGURATION', message:'The private Nano wallet rejected this operation.',
+  });
+  assert.equal(readFileSync(path, 'utf8'), contents);
+ }
 });
 
 test('current schema pins explicit native derivation and rejects old shapes and unsupported raw grants',async t=>{
