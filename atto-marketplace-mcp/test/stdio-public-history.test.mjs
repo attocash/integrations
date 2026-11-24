@@ -26,6 +26,11 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
   for (const item of xnoPage.items) item.task.asset = 'XNO';
   // Older Marketplace servers returned refunded tasks in unfiltered history.
   page.items[1].task.state = 'REFUNDED';
+  const pageWithFees = structuredClone(page);
+  for (const item of pageWithFees.items) {
+    item.task.feeAtomic = '1';
+    item.task.feeRateBasisPoints = 100;
+  }
   const requests = [];
   const http = await listen(async (req, res) => {
     requests.push({ method: req.method, path: req.url, authorization: req.headers.authorization });
@@ -41,7 +46,7 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
       unsafe.items[0].task.applicationId = 'private-application-id';
       return json(res, 200, unsafe);
     }
-    return json(res, 200, page);
+    return json(res, 200, pageWithFees);
   });
   const fixture = await profileHome(http.origin);
   const client = await connect(fixture.home);
@@ -83,7 +88,8 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
 
     // Then only public fields pass validation, every request is unauthenticated GET, and filter-bound cursors give fixed restart guidance.
     assert.equal(defaultPage.isError, undefined);
-    assert.deepEqual(JSON.parse(contentText(defaultPage)).result, page);
+    assert.deepEqual(defaultPage.structuredContent, {result:page});
+    assert.deepEqual(JSON.parse(contentText(defaultPage)), {result:page});
     assert.equal(filteredPage.isError, undefined);
     assert.deepEqual(JSON.parse(contentText(filteredPage)).result, xnoPage);
     const filteredUrl = new URL(requests[1].path, 'http://marketplace.test');
@@ -96,7 +102,7 @@ test('marketplace_tasks_history_search sends strict anonymous filters and valida
       assert.deepEqual(Object.keys(item).sort(), ['receipt', 'task', 'worker']);
       assert.deepEqual(Object.keys(item.task).sort(), [
         'acceptanceTerms', 'applicationClosesAt', 'asset', 'closedAt', 'description', 'deliverable', 'dueAt',
-        'feeAtomic', 'feeRateBasisPoints', 'grossAtomic', 'taskId', 'publishedAt', 'requesterAgentId',
+        'grossAtomic', 'taskId', 'publishedAt', 'requesterAgentId',
         'requesterDisplayName', 'requesterHandle', 'state', 'title', 'version',
       ].sort());
       if (item.worker) assert.deepEqual(Object.keys(item.worker).sort(), ['agentId', 'displayName', 'handle']);
@@ -410,8 +416,6 @@ function publicHistoryPage(receipt) {
     acceptanceTerms: 'The published acceptance terms.',
     asset: 'ATTO',
     grossAtomic: '100',
-    feeAtomic: '1',
-    feeRateBasisPoints: 100,
     dueAt: null,
     applicationClosesAt: null,
     state,
