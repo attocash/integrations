@@ -29,6 +29,7 @@ export interface RequestOptions {
   signal?: AbortSignal;
   requiredBrowserGrant?: string;
   allowStatus?: number[];
+  responseLimitBytes?: number | undefined;
 }
 
 export interface StreamRequestOptions {
@@ -164,7 +165,7 @@ export class MarketplaceApiClient {
       ? new MarketplaceApiError('PUBLIC_HISTORY_PAGE_TOO_LARGE',
         'The public history page exceeds the supported response size. Retry the same filters and cursor with limit:1, then continue using the returned cursor.',
         undefined, { recovery: { action: 'retry-page', scope: 'current-filters', limit: 1 } })
-      : undefined);
+      : undefined, response.ok ? options.responseLimitBytes : undefined);
     let json: unknown = null;
     if (text.length > 0) {
       try { json = JSON.parse(text); }
@@ -404,7 +405,8 @@ function missingProfilePublicationFields(value: unknown): Array<'handle' | 'disp
 
 export function newRequestId(): string { return randomUUID(); }
 
-async function readBounded(response: Response, overflowError?: MarketplaceApiError): Promise<string> {
+async function readBounded(response: Response, overflowError?: MarketplaceApiError,
+  limitBytes = RESPONSE_LIMIT_BYTES): Promise<string> {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
@@ -414,7 +416,7 @@ async function readBounded(response: Response, overflowError?: MarketplaceApiErr
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > RESPONSE_LIMIT_BYTES) {
+      if (size > limitBytes) {
         throw overflowError ?? new MarketplaceApiError('MARKETPLACE_PROTOCOL', 'Marketplace returned a response larger than the supported limit.');
       }
       chunks.push(value);

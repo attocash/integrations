@@ -273,6 +273,7 @@ try {
     join(root, 'atto-marketplace-mcp/test/direct-payments.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/noncustodial-tools.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/stdio-products.test.mjs'),
+    join(root, 'atto-marketplace-mcp/test/stdio-services.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/stdio-purchases.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/work-receipt.test.mjs'),
     join(root, 'atto-marketplace-mcp/test/unified-approval-native.integration.test.mjs'),

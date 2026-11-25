@@ -17,7 +17,7 @@ const scopeNames = new Set([
   'tasks:read','applications:read','applications:apply','applications:withdraw','tasks:draft:write','tasks:publish',
   'submissions:read','submissions:write','activity:read','activity:write','payments:read','payments:write',
   'files:read','files:write','products:read','products:write','products:publish','products:purchase',
-  'purchases:read','purchases:refund',
+  'purchases:read','purchases:refund', 'services:read', 'services:write',
 ]);
 const requestTimeoutMs=15_000;
 const responseLimit=1_048_576;

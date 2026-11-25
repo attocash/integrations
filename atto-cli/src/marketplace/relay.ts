@@ -6,7 +6,7 @@ import { parseJsonObject } from './strict-json.js';
 
 const hash = z.string().regex(/^[a-fA-F0-9]{64}$/);
 const integer = z.string().regex(/^(0|[1-9][0-9]*)$/);
-const termsSchema = z.strictObject({ paymentId: z.string().uuid(), purpose: z.enum(['PUBLICATION_FEE', 'SHOP_ORDER', 'TASK_MILESTONE', 'BUYER_REFUND']),
+const termsSchema = z.strictObject({ paymentId: z.string().uuid(), purpose: z.enum(['PUBLICATION_FEE', 'SHOP_ORDER', 'TASK_MILESTONE', 'SERVICE_MILESTONE', 'BUYER_REFUND']),
   sourceReference: z.string().min(1).max(512), ownerAccountId: z.string().uuid(), asset: z.enum(['ATTO', 'XNO']), network: z.string(),
   senderAddress: z.string().min(1).max(160), recipientAddress: z.string().min(1).max(160), amountAtomic: z.string().regex(/^[1-9][0-9]{0,38}$/),
   termsHash: hash, versionHash: hash, baselineHeight: integer, baselineFrontier: hash.nullable() });

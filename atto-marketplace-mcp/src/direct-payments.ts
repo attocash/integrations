@@ -10,7 +10,7 @@ const lowercaseUuid=z.string().uuid().refine(value=>value===value.toLowerCase())
 const jsonObject=z.record(z.string(),z.unknown());
 const attoPayload=z.strictObject({transaction:jsonObject});
 const nanoPayload=z.strictObject({block:jsonObject});
-const requirement=z.object({id:z.string().uuid(),purpose:z.enum(['PUBLICATION_FEE','SHOP_ORDER','TASK_MILESTONE','BUYER_REFUND']),
+const requirement=z.object({id:z.string().uuid(),purpose:z.enum(['PUBLICATION_FEE','SHOP_ORDER','TASK_MILESTONE', 'SERVICE_MILESTONE','BUYER_REFUND']),
   sourceReference:z.string(),ownerAccountId:z.string().uuid(),asset:z.enum(['ATTO','XNO']),network:z.string(),
   senderAddress:z.string().min(1).max(160),recipientAddress:z.string().min(1).max(160),amountAtomic:z.string().regex(/^[1-9][0-9]{0,64}$/),
   termsHash:hash,versionHash:hash,baselineHeight:z.number().int().nonnegative(),baselineFrontier:hash.nullable(),

@@ -13,7 +13,7 @@ const SCOPES = new Set([
   'tasks:draft:write', 'tasks:publish', 'submissions:write', 'submissions:read',
   'activity:read', 'activity:write', 'payments:read', 'payments:write',
   'files:read', 'files:write', 'products:read', 'products:write', 'products:publish', 'products:purchase',
-  'purchases:read', 'purchases:refund',
+  'purchases:read', 'purchases:refund', 'services:read', 'services:write',
 ]);
 export interface MarketplaceProofApprovalRequest {
   version: 1;

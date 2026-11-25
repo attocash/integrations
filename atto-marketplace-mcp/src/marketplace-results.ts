@@ -2,6 +2,13 @@ import { z } from 'zod';
 import { MarketplaceApiError } from './marketplace-api.js';
 
 export const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+export const catalogQuery = z.string().max(240).refine(value => Array.from(value).length <= 120 && !/[\p{Cc}]/u.test(value));
+export const indicativePrice = z.strictObject({
+  usd: z.strictObject({
+    price: z.string().regex(/^(0|[1-9][0-9]*)(\.[0-9]+)?$/),
+    timestamp: z.string().datetime({offset:true}),
+  }),
+});
 
 export function parseMarketplaceDto<T>(schema: z.ZodType<T>, value: unknown, label: string): T {
   const parsed = schema.safeParse(value);

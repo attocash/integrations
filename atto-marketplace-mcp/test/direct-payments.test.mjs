@@ -9,9 +9,9 @@ const {parseRelayOffer,relayPaymentPayload,decodePaymentHeader}=await import('@a
 const id='11111111-1111-4111-8111-111111111111',account='22222222-2222-4222-8222-222222222222';
 const profile={accountId:account,audience:'audience',origin:'https://marketplace.example'};
 function fixture(asset){return {id,purpose:'SHOP_ORDER',sourceReference:'order',ownerAccountId:account,asset,network:asset==='ATTO'?'atto:local':'nano:dev',senderAddress:'sender',recipientAddress:'seller',amountAtomic:'100000000000000000000000000001',termsHash:'a'.repeat(64),versionHash:'b'.repeat(64),baselineHeight:7,baselineFrontier:'c'.repeat(64),status:'PENDING',verifiedPayment:null,submissions:[],relay:null};}
-for(const asset of ['ATTO','XNO'])for(const outcome of ['pending','confirmed'])test(`${asset} lost relay responses replay the same durable native payload through ${outcome} without client publication`,async t=>{
+for(const purpose of ['SHOP_ORDER','SERVICE_MILESTONE'])for(const asset of ['ATTO','XNO'])for(const outcome of ['pending','confirmed'])test(`${asset} ${purpose} lost relay responses replay the same durable native payload through ${outcome} without client publication`,async t=>{
   // Given immutable instructions and one wallet-owned candidate/header journal.
-  const p=fixture(asset);p.amountAtomic=asset==='ATTO'?'9007199254740993':'100000000000000000000000000001';
+  const p={...fixture(asset),purpose};p.amountAtomic=asset==='ATTO'?'9007199254740993':'100000000000000000000000000001';
   const requests=[],operations=[],headers=[];let saved,lost=true;
   const native={async callWallet(_env,request){operations.push(request.operation);
     if(request.operation==='identity.list')return {address:'sender',network:p.network,index:0};
@@ -121,9 +121,9 @@ test('a retained legacy candidate missing its envelope is completed using its or
   assert.deepEqual(operations,['identity.list','payment.status','payment.prepare']);
 });
 
-function durableFixture(asset) {
+function durableFixture(asset, purpose='SHOP_ORDER') {
   const path = `/v1/agent/payments/${id}`, transactionHash = 'd'.repeat(64);
-  const p = {...fixture(asset), nativeRelaySupported:true, status:'AWAITING_PAYMENT',
+  const p = {...fixture(asset), purpose, nativeRelaySupported:true, status:'AWAITING_PAYMENT',
     amountAtomic:asset === 'ATTO' ? '9007199254740993' : '100000000000000000000000000001'};
   const payload = {[asset === 'ATTO' ? 'transaction' : 'block']:{work:'retained-work',signature:'retained-signature',amount:p.amountAtomic}};
   const pending = {...p, status:'PENDING', relay:{mode:'DURABLE_NATIVE', requestId:id, transactionHash,
@@ -155,8 +155,8 @@ function durableFixture(asset) {
   return {p, path, pending, verified, preparations, checks, wallet, response, recoveredBody, paymentInput:{profile, env:{}, paymentId:id}};
 }
 
-for (const asset of ['ATTO','XNO']) test(`${asset} durable relay replays stable wire bytes and reports queued progress and independent settlement`,async()=>{
-  const f = durableFixture(asset);
+for (const purpose of ['SHOP_ORDER','SERVICE_MILESTONE']) for (const asset of ['ATTO','XNO']) test(`${asset} ${purpose} durable relay replays stable wire bytes and reports queued progress and independent settlement`,async()=>{
+  const f = durableFixture(asset,purpose);
   const posts = [];
   let current = f.p;
   const api = {async request(path, options) {

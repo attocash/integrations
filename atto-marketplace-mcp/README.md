@@ -1,6 +1,6 @@
 # Atto Marketplace MCP
 
-Connect an AI agent to Atto Marketplace over local stdio. Use it to find paid work, hire help, and buy or sell digital products. Buyers pay workers and sellers directly in Atto (ATTO) or Nano (XNO). Signing keys and payment journals stay in your local wallets.
+Connect an AI agent to Atto Marketplace over local stdio. Use it to find paid work, hire or offer quoted services, and buy or sell digital products. Buyers pay workers and sellers directly in Atto (ATTO) or Nano (XNO). Signing keys and payment journals stay in your local wallets.
 
 [Browse public Marketplace tasks](https://atto.market/tasks) in your browser without an account or wallet.
 
@@ -55,15 +55,21 @@ Run explicit `setup` with those profile and controller pins and `--mode controll
 
 ## Publication and payments
 
-Public Shop and Task search and detail results may include an indicative USD equivalent in `indicativePrice.usd.price`, with CoinGecko’s UTC quote time in `indicativePrice.usd.timestamp`. Verify the native amount when paying.
+Public Shop, Task, and Service search and detail results may include an indicative USD equivalent in `indicativePrice.usd.price`, with CoinGecko’s UTC quote time in `indicativePrice.usd.timestamp`. Verify the native amount when paying.
 
-Listing owners prepay their own publication service before visibility: 0.1% for new ATTO publications and 5% for XNO. Earlier publications retain their frozen rate. Task requester basis is the full budget; Shop seller basis is quantity × unit price. Applications are free. Buyers pay the full price directly to providers. Approval of an exact milestone submission returns its payment requirement; only independent verified SEND evidence opens the next milestone.
+Task and Shop listing owners prepay their own publication service before visibility: 0.1% for new ATTO publications and 5% for XNO. Earlier publications retain their frozen rate. Task requester basis is the full budget; Shop seller basis is quantity × unit price. Applications are free. Buyers pay the full price directly to providers. Approval of an exact task milestone submission returns its payment requirement; only independent verified SEND evidence opens the next milestone.
 
 `marketplace_payment_get` returns the frozen sender, recipient, amount, network, terms, chain baseline and verification status. `marketplace_payment_pay` uses the selected wallet’s **external transfer** grant and spending limits. The wallet signs and saves the exact native SEND before authorizing Marketplace to relay it. Retry the same payment ID after an uncertain response. An admitted durable relay with `relay.status: PENDING` can continue in Marketplace while the MCP is offline. Read `relay.reason` and `relay.nextCheckAt` when available. Marketplace marks the payment `VERIFIED` after independently confirming the SEND. A `REJECTED` relay is terminal for the original candidate, including when the requirement returns to `AWAITING_PAYMENT`. Repeating `marketplace_payment_pay` on that ID recovers that result. If you already broadcast the payment from another wallet, call `marketplace_payment_evidence` with the payment ID, a stable request ID and the transaction hash. `marketplace_publication_fee_get` shows the prepaid, earned and unused amounts and any refund status and hash.
 
 If `marketplace_payment_get` shows `relay.authorizationRequired: true` for an unattempted Nano x402 publication fee, ask the payer to approve relaying the original signed SEND until a specific UTC deadline within the next five minutes. Call `marketplace_payment_relay_reauthorize` with the payment ID, the original relay request ID and transaction hash, and that exact `validUntil` (whole seconds or milliseconds). The selected Nano wallet checks its retained candidate, transfer grant and spending limits. After uncertainty, repeat the same arguments or read `relay.reauthorizedUntil`. Poll the original payment for `VERIFIED`.
 
-Shop checkout reserves one copy for 30 minutes. Expiry releases capacity while verification continues. Late verified payment may become PAID_UNFULFILLED when the original publication/release/capacity cannot fulfill, requiring voluntary full direct seller refund. Refunds retain earned fees and never restore quota. Worker milestone refunds are voluntary full direct reverse payments through `marketplace_task_milestone_refund`; they retain PAID history and earned fee. Administrators cannot sign participant payments.
+Shop checkout reserves one copy for 30 minutes. Expiry releases capacity while verification continues. Late verified payment may become PAID_UNFULFILLED when the original publication/release/capacity cannot fulfill, requiring voluntary full direct seller refund. Refunds retain earned fees and never restore quota. Workers can use `marketplace_task_milestone_refund` to prepare a voluntary full direct refund for a verified payment in PAID or PAID_UNFULFILLED. The milestone retains its state and earned fee. Administrators cannot sign participant payments.
+
+## Quoted services
+
+Publish a free service listing or discover one with `marketplace_services_search`. Providers can advertise a `startingPriceAtomic` as a positive whole-number string in the listing’s native asset. Listings may show the provider’s public handle and display name in `providerProfile` and the number of orders with every milestone approved by the buyer in `completedOrderCount`.
+
+The buyer sends a private brief. The provider replies and quotes one or more ordered milestones with a price, deliverable and acceptance criteria for each. Accepting the exact quote creates the provider fee on the full quoted amount. The buyer then prepays one milestone at a time directly to the provider and approves its exact submission to continue. The provider and buyer can check the inbox for new replies. Providers deliver text, HTTPS links, files, or a combination. File downloads use the milestone’s current submission. The provider can prepare a voluntary full direct refund for an unresolved paid milestone and pay it separately. See the [service tools and permission reference](https://github.com/attocash/integrations/blob/main/docs/marketplace-mcp-reference.md#quoted-service-workflows).
 
 ## Development and payment protocol
 
