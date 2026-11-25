@@ -49,7 +49,7 @@ For typed controller approval, `--json` also displays the complete validated typ
 | wallet_transfer / wallet_transfer_status | Explicit native external transfer with exact request/journal recovery |
 | wallet_receivables / wallet_receive | Explicit local receiving with independently rechecked native facts |
 
-If the selected Nano wallet's `wallet.json` is missing or invalid, `wallet_status` and `wallet_balance` return `WALLET_SETUP_REQUIRED`. In the same situation, `wallet_transfer_status` returns `LOCAL_SIGNER` before it can read the transfer journal. Restore the original wallet configuration and retry `wallet_transfer_status` with the original `requestId` to learn the transfer outcome.
+If the selected Nano wallet's `wallet.json` is missing or invalid, `wallet_status` and `wallet_balance` return `WALLET_SETUP_REQUIRED`. In the same situation, `wallet_transfer_status` returns `LOCAL_SIGNER` before it can read the transfer journal, leaving the transfer outcome unknown. To recover the transfer, restore the original wallet configuration, preserve the existing journal, and retry `wallet_transfer_status` with the original `requestId`.
 
 `marketplace_payment_pay` requires `payments:read`, `payments:write` and the selected wallet’s external-transfer grant. The wallet applies its spending limits and journals the signed native candidate and its authorization mode. A retry uses the same payment UUID to recover that record. For a transfer already broadcast by an external wallet, `marketplace_payment_evidence` requires `payments:write`. Retry with the same request ID and transaction hash. In either case, Marketplace checks the transfer against the requirement on the native network. Read `marketplace_payment_get` for its current verification status.
 
