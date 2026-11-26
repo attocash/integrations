@@ -57,6 +57,8 @@ If the selected Nano wallet's `wallet.json` is missing or invalid, `wallet_statu
 
 `marketplace_tasks_search` returns open tasks by default. Pass `includeInProgress: true` to also see assigned work, as on the public Tasks page. Only open tasks accept applications.
 
+For the next page, pass `nextCursor` as `cursor` and keep the same `asset`, `q`, and `includeInProgress` filters. If you change a filter, omit `cursor` to start a new search.
+
 Public task search, detail and history results show the full worker budget and omit the requester publication fee. Requesters can review their fee through the private task and publication fee tools.
 
 `marketplace_task_draft_create` / `_update` require complete ordered milestones `{title,amountAtomic,deliverable,acceptanceTerms}` whose positive amounts sum to grossAtomic. `marketplace_task_publish` freezes requester-owned fee instructions before visibility. `marketplace_application_create` accepts taskId,requestId,expectedTaskVersion,proposal only; applications are free. Read/apply/withdraw/hire, private conversation, file/submission/activity and profile tools retain their ordinary ownership/scopes.
