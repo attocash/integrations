@@ -1,5 +1,5 @@
 import { takeJsonFlag, writeTerminalResult, terminalText } from './terminal-output.js';
-import { defaultMarketplaceHome } from './defaults.js';
+import { defaultMarketplaceHome, loginAuthorizationGuide } from './defaults.js';
 import { marketplaceCommand, shellQuote } from './shell-quote.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { resolve } from 'node:path';
@@ -594,7 +594,10 @@ function printApprovalInstructions(request:MarketplaceProofApprovalRequest,path:
   print({status:'approval_required',profileId,handoffId,purpose,
     walletCommand:`${marketplaceCommand} approve ${shellQuote(path)} --home ${shellQuote(home)}`,
     resumeCommand:`${marketplaceCommand} setup --profile ${profileId} --complete --home ${shellQuote(home)}`,next,
-    ...(preauthorizedLoginSupported?{preauthorizedLogin:'If your deployment provides a matching Login only authorization, add --login-authorization <deployment-file> to the approval command.'}:{})});
+    ...(preauthorizedLoginSupported ? {
+      preauthorizedLogin: `If your deployment provides a matching Login only authorization, add --login-authorization <deployment-file> to the approval command. See the deployment instructions and JSON example at ${loginAuthorizationGuide}`,
+    } : {}),
+  });
 }
 function setupUsage(message:string):ProfileError{return new ProfileError('SETUP_USAGE',message);}
 function setupFailure():ProfileError{return new ProfileError('SETUP_PROTOCOL','Marketplace setup returned an invalid response. Check the pinned origin and repeat only after confirming the previous action had no effect.');}

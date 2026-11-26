@@ -8,6 +8,13 @@ export function isProductionMarketplace(connection: {origin:string; audience:str
   return connection.origin === productionMarketplaceOrigin && connection.audience === productionMarketplaceAudience;
 }
 export const defaultMarketplaceProfile = 'main';
+export const loginAuthorizationGuide = 'https://github.com/attocash/integrations/tree/main/atto-marketplace-mcp#preauthorize-login-only-for-a-dedicated-atto-wallet';
+export const loginAuthorizationHelp = [
+  'For unattended Login only, a non-root Unix agent with an existing dedicated live ATTO wallet can pass an administrator-provisioned --login-authorization file to approve.',
+  'On Linux, signing still requires secret-tool and access to the unlocked Secret Service and D-Bus session for the wallet user.',
+  `See the deployment instructions and JSON example at ${loginAuthorizationGuide}`,
+].join('\n');
+
 export function defaultMarketplaceHome(env: NodeJS.ProcessEnv = process.env): string {
   return process.platform === 'win32'
     ? join(env.LOCALAPPDATA || join(homedir(), 'AppData', 'Local'), 'Atto Marketplace MCP')

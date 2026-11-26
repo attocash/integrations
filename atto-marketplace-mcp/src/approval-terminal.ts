@@ -1,5 +1,5 @@
 import { takeJsonFlag, terminalFields, writeTerminalResult } from './terminal-output.js';
-import { defaultMarketplaceHome } from './defaults.js';
+import { defaultMarketplaceHome, loginAuthorizationHelp } from './defaults.js';
 import { existsSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { createInterface } from 'node:readline/promises';
@@ -216,7 +216,10 @@ export async function approveBrowserSignInGrant(request: MarketplaceProofApprova
 
 export async function runApproval(argv: string[], env: NodeJS.ProcessEnv): Promise<void> {
   const selected = takeJsonFlag(argv); argv = selected.argv;
-  if (argv.length === 1 && ['--help','-h'].includes(argv[0]!)) { process.stdout.write(`${approvalUsage}\n`); return; }
+  if (argv.length === 1 && ['--help','-h'].includes(argv[0]!)) {
+    process.stdout.write(`${approvalUsage}\n\n${loginAuthorizationHelp}\n`);
+    return;
+  }
   const path = argv[0];
   if (!path) throw new ProfileError('SETUP_USAGE', approvalUsage);
   let home: string | undefined;

@@ -61,6 +61,7 @@ for (const help of ['--help', '-h']) {
         assert.ok(result.stdout.includes(option), option);
       }
       assert.match(result.stdout, /Guided setup: atto-marketplace-mcp setup/);
+      assert.match(result.stdout, /#preauthorize-login-only-for-a-dedicated-atto-wallet/);
       assert.doesNotMatch(result.stderr, /requires an interactive|TERMINAL_REQUIRED|Type APPROVE/);
       await assert.rejects(readdir(home), { code: 'ENOENT' });
       const wallet = await execute(process.execPath, [fileURLToPath(new URL('../dist/main.js', import.meta.url)),
@@ -70,6 +71,15 @@ for (const help of ['--help', '-h']) {
     } finally { await rm(directory, { recursive: true, force: true }); }
   });
 }
+
+test('approve help points headless operators to deployment instructions', async () => {
+  const main = fileURLToPath(new URL('../dist/main.js', import.meta.url));
+  const { stdout } = await execute(process.execPath, [main, 'approve', '--help'], { timeout: 10_000 });
+
+  assert.match(stdout, /--login-authorization <deployment-file>/);
+  assert.match(stdout, /#preauthorize-login-only-for-a-dedicated-atto-wallet/);
+  assert.match(stdout, /unlocked Secret Service/);
+});
 
 for(const args of [['--json','setup'],['setup','--json'],['--json','wallet','setup'],['wallet','setup','--json']]){
   test(`explicit JSON does not bypass guided terminal approval: ${args.join(' ')}`,async()=>{

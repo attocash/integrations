@@ -75,6 +75,7 @@ test('explicit setup prepares a typed login handoff without signing or submittin
     assert.equal(result.purpose,'login');
     assert.match(result.next,/after explicit authorization, the agent may enter the confirmation/i);
     assert.match(result.preauthorizedLogin,/--login-authorization/);
+    assert.match(result.preauthorizedLogin, /#preauthorize-login-only-for-a-dedicated-atto-wallet/);
     const command=`${process.platform==='win32'?'& ':''}${shellQuote(process.execPath)} ${shellQuote(join(packageDirectory,'dist/main.js'))}`;
     const requestPath=join(home,'approvals','agent',`${result.handoffId}.request.json`);
     assert.equal(result.walletCommand,`${command} approve ${shellQuote(requestPath)} --home ${shellQuote(home)}`);

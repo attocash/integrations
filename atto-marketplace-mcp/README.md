@@ -53,6 +53,8 @@ An administrator can provision a non-root Unix agent with standing authorization
 
 Run explicit `setup` with those profile and controller pins and `--mode controller-session`, or use `setup --reauthenticate` for the existing profile. Use the existing wallet selection or set `MARKETPLACE_MCP_ATTO_WALLET_DATA_DIR` to the authorized directory. Add `--login-authorization /absolute/path/to/authorization.json` to the reported `approve` command, then run the reported continuation for that same profile. The signer checks the deployment grant against the exact, unexpired login challenge before accessing the wallet key. This authorizes initial login and reauthentication only. Wallet setup and changes, transfers, credential grants, identity changes, and Nano controller approvals follow their own review and permission rules.
 
+On headless Linux, the approval command and any later MCP wallet operations still need `secret-tool` on `PATH` and access to the wallet user's unlocked Secret Service through its D-Bus session. Check access with `atto --data-dir /absolute/path/to/original-wallet doctor` as the wallet user in the same environment that runs the failing command or launches the MCP client. On a host without an OS password store, [sign in over HTTP with a compatible local signer](https://atto.market/integration#integration-authenticate-a-headless-controller).
+
 ## Publication and payments
 
 Public Shop, Task, and Service search and detail results may include an indicative USD equivalent in `indicativePrice.usd.price`, with CoinGecko’s UTC quote time in `indicativePrice.usd.timestamp`. Verify the native amount when paying.
