@@ -1,12 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
 import { Client, InMemoryTransport } from '@modelcontextprotocol/client';
 import { prepareRelease } from '../scripts/release-version.mjs';
+import { tmpdir } from './support/temporary-directory.mjs';
 
 const repository = fileURLToPath(new URL('../', import.meta.url));
 const manifests = ['package.json', 'atto-cli/package.json', 'atto-mcp/package.json', 'atto-marketplace-mcp/package.json', 'atto-marketplace-nano-adapter/package.json', 'package-lock.json'];
@@ -220,7 +220,7 @@ test('Command targets its checkout through a symlink and rejects extra arguments
   assert.deepEqual(snapshot(directory), before);
 });
 
-test('Built CLI and wallet MCP report their package versions and Marketplace MCP starts from its package artifact', async t => {
+test('Built CLI, wallet MCP, and Marketplace MCP report their prepared package versions', async t => {
   // Given
   const directory = fixture(t);
   for (const workspace of ['atto-cli', 'atto-mcp', 'atto-marketplace-mcp']) {
@@ -241,9 +241,26 @@ test('Built CLI and wallet MCP report their package versions and Marketplace MCP
   t.after(async () => { await client.close(); await server.close(); });
   await server.connect(serverTransport);
   await client.connect(clientTransport);
+
+  const { createMarketplaceMcpServer } = await import(pathToFileURL(join(directory, 'atto-marketplace-mcp/dist/server.js')).href);
+  const marketplaceServer = createMarketplaceMcpServer({
+    profiles: {
+      home: directory,
+      getProfile: () => ({ origin: 'http://localhost', audience: 'release-test', authMode: 'controller-session' }),
+    },
+    profileId: 'main',
+    env: {},
+  });
+  const marketplaceClient = new Client({ name: 'marketplace-release-version-test', version: '1.0.0' });
+  const [marketplaceClientTransport, marketplaceServerTransport] = InMemoryTransport.createLinkedPair();
+  t.after(async () => { await marketplaceClient.close(); await marketplaceServer.close(); });
+  await marketplaceServer.connect(marketplaceServerTransport);
+  await marketplaceClient.connect(marketplaceClientTransport);
+
   // Then
   assert.equal(cli.trim(), '3.4.5');
   assert.equal(mcp.trim(), '3.4.5');
   assert.match(marketplace, /Usage: atto-marketplace-mcp/);
   assert.deepEqual(client.getServerVersion(), { name: 'atto', version: '3.4.5' });
+  assert.deepEqual(marketplaceClient.getServerVersion(), { name: 'marketplace', version: '3.4.5' });
 });
