@@ -10,6 +10,13 @@ const addresses = z.array(address).min(1).max(100);
 const hash = z.string().regex(/^[a-fA-F0-9]{64}$/).describe('64-character hexadecimal transaction hash.');
 const integer = z.string().regex(/^\d+$/).max(40);
 const decimal = z.string().regex(/^\d+(?:\.\d+)?$/).max(80).describe('Exact decimal amount; never a JSON number.');
+const quoteCurrency = z.enum(['USD', 'ATTO']);
+const priceQuoteInput = z.strictObject({
+  amount: decimal,
+  from: quoteCurrency.optional().describe('Currency of the input amount.'),
+  to: quoteCurrency.optional().describe('Currency to convert to.'),
+}).refine(({ from, to }) => (from === undefined) === (to === undefined), 'Supply both from and to, or omit both for USD to ATTO.')
+  .refine(({ from, to }) => from === undefined || from !== to, 'Choose two different currencies.');
 const unit = z.enum(['ATTO', 'RAW']);
 const cursor = z.string().min(1).max(16_384);
 const limit = z.number().int().min(1).max(1000).describe('Maximum returned records; defaults to 100.');
@@ -125,7 +132,8 @@ export const operations: readonly RegisteredOperation[] = [
   { name: 'metrics_get', ...read,
     description: 'Read public Atto market metrics and their observation date. Market prices are indicative, not executable exchange quotes.', schema: z.strictObject({}) },
   { name: 'price_quote', ...read,
-    description: 'Convert a USD decimal amount to Atto using the public indicative price. Returns the price observation date and rejects data older than 72 hours. Does not send funds.', schema: z.strictObject({ amount: decimal }) },
+    description: 'Convert an exact decimal amount between USD and ATTO using the public indicative price. Supply both from and to, or omit both for USD to ATTO. ATTO to USD returns the unrounded estimate. Returns the observation date and rejects prices older than 72 hours.',
+    schema: priceQuoteInput },
   { name: 'terms_get', ...read, localOnly: true,
     description: 'Read the current terms and version for USD-priced payments. Present the terms to the user before requesting acknowledgement.', schema: z.strictObject({}) },
   { name: 'terms_accept', ...approvedWrite, localOnly: true,

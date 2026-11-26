@@ -58,7 +58,8 @@ atto send <destination> 1 --request-id order-42 --reason 'Invoice 42' --metadata
 atto pool status
 atto journal list --status unknown --limit 20
 atto journal show order-42
-atto quote --usd 1
+atto quote 1 --from USD --to ATTO
+atto quote 100000 --from ATTO --to USD
 atto metrics
 atto receivables --limit 100
 atto receive <send-hash> --index 0
@@ -136,6 +137,9 @@ ID is rejected.
 `nextCursor` as `--cursor` with the same status filter; `--limit` accepts 1–100
 and defaults to 50. `journal show` reads one request's metadata, source, network,
 and recorded payment progress.
+
+`atto quote --usd 1` is shorthand for `atto quote 1 --from USD --to ATTO`.
+USD-to-ATTO quotes round down to whole RAW. ATTO-to-USD quotes return the full decimal estimate.
 
 USD-priced sends use an indicative market conversion. Read the terms, record
 your explicit acceptance of their current version, then send:

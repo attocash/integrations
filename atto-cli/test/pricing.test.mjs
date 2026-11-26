@@ -9,6 +9,40 @@ const dateOffset = (days) => new Date(Date.now() + days * DAY).toISOString().sli
 const metric = (overrides = {}) => ({ name: 'price.usd', date: today(), value: '0.00003594', ...overrides });
 const client = (metrics) => new MarketData(DEFAULT_METRICS_URL, async () => Response.json({ metrics }));
 
+test('Atto-to-USD quotes preserve exact RAW and price precision', async () => {
+  const market = client([metric({ value: '0.00003851' })]);
+
+  const reward = await market.quoteAtto('100000');
+  assert.deepEqual(reward.amount, { raw: '100000000000000', atto: '100000' });
+  assert.equal(reward.usd, '3.851');
+  assert.equal(reward.priceUsd, '0.00003851');
+  assert.equal(reward.priceDate, today());
+  assert.equal(reward.source, DEFAULT_METRICS_URL);
+  assert.equal(reward.informational, true);
+  assert.ok(Number.isFinite(Date.parse(reward.fetchedAt)));
+  assert.equal((await market.quoteAtto('0.000000001')).usd, '0.00000000000003851');
+  assert.equal((await market.quoteAtto('0')).usd, '0');
+
+  const large = client([metric({ value: '1.000000001' })]);
+  assert.equal((await large.quoteAtto('18000000000')).usd, '18000000018');
+  assert.equal((await large.quoteAtto('17999999999.999999999')).usd, '18000000017.999999998999999999');
+});
+
+test('Atto-to-USD quotes apply the same price freshness and amount rules', async () => {
+  await assert.rejects(client([metric({ date: dateOffset(-4) })]).quoteAtto('1'), { code: 'PRICE_STALE' });
+  await assert.rejects(client([metric({ date: dateOffset(1) })]).quoteAtto('1'), { code: 'PRICE_FUTURE' });
+  await assert.rejects(client([metric(), metric()]).quoteAtto('1'), { code: 'INVALID_PRICE' });
+  let requests = 0;
+  const market = new MarketData(DEFAULT_METRICS_URL, async () => {
+    requests++;
+    return Response.json({ metrics: [metric()] });
+  });
+  for (const amount of ['0.0000000001', '18000000000.000000001', '-1', '1e3']) {
+    await assert.rejects(market.quoteAtto(amount), { code: 'INVALID_AMOUNT' });
+  }
+  assert.equal(requests, 0);
+});
+
 test('USD conversion floors exactly at the published sample price', async () => {
   // Given
   const market = client([metric()]);

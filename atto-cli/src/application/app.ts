@@ -523,7 +523,8 @@ export class AttoApplication {
         return { proposal, approval: approvalInstructions(proposal, current) };
       });
       case 'metrics_get': return this.market.metrics();
-      case 'price_quote': return this.market.quoteUsd(args.amount as string);
+      case 'price_quote': return args.from === 'ATTO'
+        ? this.market.quoteAtto(args.amount as string) : this.market.quoteUsd(args.amount as string);
       case 'terms_get': return { ...marketTerms, accepted: this.store.get<{ version: string }>('market.terms')?.version === marketTerms.version };
       case 'terms_accept': return this.store.withWalletLock(async () => {
         this.requireMcpWrite();

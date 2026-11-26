@@ -54,7 +54,11 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   assert.equal(result.tools.find(tool => tool.name === 'message_verify').annotations.readOnlyHint, true);
   assert.match(result.tools.find(tool => tool.name === 'message_sign').description, /locally approved messageSigningIndexes/);
   assert.equal(result.tools.find(tool => tool.name === 'watch_start').annotations.readOnlyHint, false);
-  assert.equal(result.tools.find(tool => tool.name === 'price_quote').annotations.readOnlyHint, true);
+  const quote = result.tools.find(tool => tool.name === 'price_quote');
+  assert.equal(quote.annotations.readOnlyHint, true);
+  assert.deepEqual(quote.inputSchema.properties.from.enum, ['USD', 'ATTO']);
+  assert.deepEqual(quote.inputSchema.properties.to.enum, ['USD', 'ATTO']);
+  assert.deepEqual(quote.inputSchema.required, ['amount']);
   assert.equal(result.tools.find(tool => tool.name === 'terms_accept').annotations.readOnlyHint, false);
   assert.equal(result.tools.find(tool => tool.name === 'pool_get').annotations.readOnlyHint, true);
   assert.equal(result.tools.find(tool => tool.name === 'address_add').annotations.idempotentHint, false);
@@ -300,6 +304,45 @@ test('real stdio MCP discovers tools, matches CLI results, and closes on disconn
   await client.close();
   assert.throws(() => process.kill(pid, 0), error => error.code === 'ESRCH');
   assert.doesNotMatch(stderr, /kotlin-logging: initializing/);
+});
+
+test('real stdio MCP quotes both currency directions and preserves the USD default', { timeout: 30_000 }, async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'atto-mcp-quote-'));
+  const date = new Date().toISOString().slice(0, 10);
+  const metrics = [{ name: 'price.usd', value: '0.00125', date }];
+  const fixture = `globalThis.fetch = async () => Response.json(${JSON.stringify({ metrics })});`;
+  const transport = new StdioClientTransport({
+    command: process.execPath,
+    args: ['--import', `data:text/javascript,${encodeURIComponent(fixture)}`,
+      join(mcpDirectory, 'dist/main.js'), '--data-dir', directory],
+    stderr: 'pipe',
+  });
+  const client = new Client({ name: 'atto-stdio-quote-test', version: '1.0.0' });
+  t.after(async () => {
+    await client.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  await client.connect(transport);
+  const quote = args => client.callTool({ name: 'price_quote', arguments: args });
+
+  for (const args of [{ amount: '2' }, { amount: '2', from: 'USD', to: 'ATTO' }]) {
+    const response = await quote(args);
+    assert.equal(response.isError, undefined);
+    assert.equal(response.structuredContent.result.usd, '2');
+    assert.deepEqual(response.structuredContent.result.amount, { atto: '1600', raw: '1600000000000' });
+  }
+  const reverse = await quote({ amount: '0.000000001', from: 'ATTO', to: 'USD' });
+  assert.equal(reverse.isError, undefined);
+  assert.equal(reverse.structuredContent.result.usd, '0.00000000000125');
+  assert.deepEqual(reverse.structuredContent.result.amount, { atto: '0.000000001', raw: '1' });
+  assert.equal(reverse.structuredContent.result.priceUsd, '0.00125');
+  assert.equal(reverse.structuredContent.result.priceDate, date);
+  assert.equal(reverse.structuredContent.result.informational, true);
+
+  for (const pair of [{ from: 'USD' }, { to: 'USD' }, { from: 'USD', to: 'USD' }, { from: 'ATTO', to: 'ATTO' }]) {
+    const response = await quote({ amount: '1', ...pair });
+    assert.equal(response.isError, true, `Expected ${JSON.stringify(pair)} to be rejected`);
+  }
 });
 
 test('MCP exposes personal label CRUD without spending approval and enforces destination exclusivity', async t => {

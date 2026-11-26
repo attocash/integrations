@@ -259,6 +259,32 @@ test('Marketplace connection command requires a terminal and accepts only the na
   assert.deepEqual(provisioned.browserOrigins, ['https://site.example', 'https://admin.example']);
 });
 
+test('quote converts either currency with an explicit pair and supports the USD shorthand', async t => {
+  const directory = await mkdtemp(join(tmpdir(), 'atto-cli-quote-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const fixture = `globalThis.fetch = async () => Response.json({ metrics: [
+    { name: 'price.usd', value: '0.00125', date: new Date().toISOString().slice(0, 10) }
+  ] });`;
+  const run = args => execute(process.execPath, ['--import', `data:text/javascript,${encodeURIComponent(fixture)}`,
+    join(cliDirectory, 'dist/cli/main.js'), '--json', '--no-update-notifier', '--data-dir', directory, 'quote', ...args]);
+  const dollars = JSON.parse((await run(['2', '--from', 'USD', '--to', 'ATTO'])).stdout).result;
+  const atto = JSON.parse((await run(['400', '--from', 'ATTO', '--to', 'USD'])).stdout).result;
+  const shorthand = await run(['--usd', '2']);
+  const shorthandQuote = JSON.parse(shorthand.stdout).result;
+  assert.equal(dollars.amount.atto, '1600');
+  assert.equal(atto.usd, '0.5');
+  assert.equal(shorthandQuote.usd, dollars.usd);
+  assert.deepEqual(shorthandQuote.amount, dollars.amount);
+  assert.doesNotMatch(shorthand.stderr, /deprecat/i);
+  for (const args of [
+    [], ['1'], ['1', '--from', 'ATTO'], ['1', '--to', 'USD'], ['--from', 'ATTO', '--to', 'USD'],
+    ['1', '--from', 'ATTO', '--to', 'ATTO'], ['1', '--from', 'ATTO', '--to', 'EUR'],
+    ['1', '--usd', '1'], ['--usd', '1', '--from', 'USD'], ['--usd', '1', '--to', 'ATTO'], ['--atto', '1'],
+  ]) {
+    await assert.rejects(run(args), error => JSON.parse(error.stdout).error.code === 'INVALID_INPUT');
+  }
+});
+
 test('real CLI refuses nonterminal recovery commands and prints only public JSON', async t => {
   const directory = await mkdtemp(join(tmpdir(), 'atto-cli-interface-'));
   t.after(() => rm(directory, { recursive: true, force: true }));

@@ -81,12 +81,7 @@ export class MarketData {
     return { metrics, source: this.source, fetchedAt: new Date().toISOString() };
   }
 
-  async quoteUsd(amount: string, signal?: AbortSignal) {
-    let usd: ReturnType<typeof decimal>;
-    try {
-      usd = decimal(amount);
-      if (usd.coefficient <= 0n) throw new Error();
-    } catch { throw new AttoError('INVALID_USD_AMOUNT', 'USD amount must be a positive decimal string with at most 40 digits on either side of the decimal point.'); }
+  private async usdPrice(signal?: AbortSignal) {
     const snapshot = await this.metrics(signal);
     const prices = snapshot.metrics.filter((metric) => metric.name === 'price.usd');
     const price = prices[0];
@@ -103,6 +98,16 @@ export class MarketData {
     const age = Date.parse(snapshot.fetchedAt) - priceTime;
     if (age < 0) throw new AttoError('PRICE_FUTURE', 'The USD price has a future date.');
     if (age > MAX_PRICE_AGE_MS) throw new AttoError('PRICE_STALE', 'The daily USD price is more than 72 hours old.');
+    return { ratio, priceUsd: price.value, priceDate: price.date, source: snapshot.source, fetchedAt: snapshot.fetchedAt };
+  }
+
+  async quoteUsd(amount: string, signal?: AbortSignal) {
+    let usd: ReturnType<typeof decimal>;
+    try {
+      usd = decimal(amount);
+      if (usd.coefficient <= 0n) throw new Error();
+    } catch { throw new AttoError('INVALID_USD_AMOUNT', 'USD amount must be a positive decimal string with at most 40 digits on either side of the decimal point.'); }
+    const { ratio, ...observation } = await this.usdPrice(signal);
     const raw = usd.coefficient * ratio.scale * RAW_PER_ATTO / (usd.scale * ratio.coefficient);
     if (raw === 0n) throw new AttoError('INVALID_USD_AMOUNT', 'The USD amount converts to less than 1 RAW.');
     let converted: string;
@@ -110,12 +115,20 @@ export class MarketData {
     catch { throw new AttoError('INVALID_USD_AMOUNT', 'The USD amount converts to more than the Atto amount range allows.'); }
     return {
       usd: amount,
-      priceUsd: price.value,
-      priceDate: price.date,
-      source: snapshot.source,
-      fetchedAt: snapshot.fetchedAt,
+      ...observation,
       amount: amountOutput(converted),
       informational: true as const,
     };
+  }
+
+  async quoteAtto(amount: string, signal?: AbortSignal) {
+    const raw = amountRaw(amount, 'ATTO', true);
+    const { ratio, ...observation } = await this.usdPrice(signal);
+    const product = BigInt(raw) * ratio.coefficient;
+    const scale = RAW_PER_ATTO * ratio.scale;
+    const whole = product / scale;
+    const fraction = (product % scale).toString().padStart(scale.toString().length - 1, '0').replace(/0+$/, '');
+    const usd = fraction ? `${whole}.${fraction}` : whole.toString();
+    return { usd, ...observation, amount: amountOutput(raw), informational: true as const };
   }
 }

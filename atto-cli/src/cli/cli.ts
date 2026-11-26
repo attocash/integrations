@@ -296,9 +296,22 @@ export async function runCli(argv = process.argv): Promise<void> {
       output({ approved: true, responseFile, handoffId: preview.handoffId,
         challengeId: preview.challengeId, expiresAt: preview.expiresAt }, 'marketplace_approve');
     });
-  program.command('quote').description('Preview a USD-to-Atto conversion using the indicative market price; does not send funds')
-    .requiredOption('--usd <amount>', 'Exact USD amount')
-    .action(options => call('price_quote', { amount: options.usd }));
+  program.command('quote [amount]').description('Preview a conversion between USD and ATTO at the indicative market price')
+    .option('--from <currency>', 'Source currency (USD or ATTO); required with a positional amount')
+    .option('--to <currency>', 'Target currency (USD or ATTO); required with a positional amount')
+    .option('--usd <amount>', 'Shorthand for converting USD to ATTO')
+    .action((amount, { from, to, usd }) => {
+      if (usd !== undefined) {
+        if (amount !== undefined || from !== undefined || to !== undefined) {
+          throw new AttoError('INVALID_INPUT', 'Use --usd on its own or supply an amount with --from and --to.');
+        }
+        return call('price_quote', { amount: usd });
+      }
+      if (amount === undefined || from === undefined || to === undefined) {
+        throw new AttoError('INVALID_INPUT', 'Supply an amount with --from and --to, or use --usd <amount>.');
+      }
+      return call('price_quote', { amount, from, to });
+    });
   const terms = program.command('terms').description('Terms for USD-priced payments');
   terms.command('show').description('Read current terms and required acceptance version').action(() => call('terms_get'));
   terms.command('accept').description('Record explicit acceptance after reading the current terms')
@@ -469,7 +482,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto marketplace': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/payments --audience marketplace --controller-index 0 --browser-origin https://site.example\n  atto marketplace approve ./marketplace-approval-request.json',
     'atto marketplace connect': 'atto marketplace connect --api-url https://marketplace.example/v1/agent/payments --audience marketplace --controller-index 0 --browser-origin https://site.example',
     'atto marketplace approve': 'atto marketplace approve ./marketplace-approval-request.json',
-    'atto metrics': 'atto metrics', 'atto quote': 'atto quote --usd 1',
+    'atto metrics': 'atto metrics', 'atto quote': 'atto quote 100000 --from ATTO --to USD\n  atto quote 1 --from USD --to ATTO\n  atto quote --usd 1',
     'atto terms': 'atto terms show', 'atto terms show': 'atto terms show',
     'atto terms accept': 'atto terms accept --version <version-shown-by-terms-show> --accepted',
     'atto receive': 'atto receive <send-hash> --index 1', 'atto receive-all': 'atto receive-all --index 1',
