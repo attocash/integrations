@@ -19,7 +19,7 @@ function label(key: string): string {
   const names: Record<string, string> = {
     id: 'ID', requestId: 'Request ID', raw: 'RAW', atto: 'ATTO', usd: 'USD',
     priceUsd: 'Price per ATTO (USD)', nodeUrl: 'Node URL', workerUrl: 'Worker URL',
-    mcpAccess: 'Agent access', perRequest: 'Per payment', minReceiveRaw: 'Minimum receive (RAW)',
+    mcpAccess: 'Agent access', recipientAllowlist: 'Approved ATTO recipients', perRequest: 'Per payment', minReceiveRaw: 'Minimum receive (RAW)',
     weight: 'Weight (RAW)',
     directory: 'Profile', receivingInThisProcess: 'Receiving in this process',
   };
@@ -78,6 +78,7 @@ function fields(value: unknown, indent = '', literalKeys = false): string[] {
     // Core monetary fields use RAW unless they include units or an ATTO/RAW pair.
     const raw = ['amount', 'balance', 'previousBalance'].includes(key) && typeof value !== 'object' && !Object.hasOwn(object, 'unit');
     const name = literalKeys ? text(key) : label(key);
+    if (!literal && key === 'recipientAllowlist' && value === null) return [`${indent}${name}: Any ATTO address`];
     const displayValue = raw && !literal && typeof value === 'string' && /^\d+$/.test(value) ? amountOutput(value) : value;
     const short = value === null && key === 'perRequest' && !literal ? 'Unlimited' : inline(displayValue, literal);
     return short === undefined

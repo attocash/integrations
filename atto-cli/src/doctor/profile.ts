@@ -67,7 +67,8 @@ export function readDoctorProfile(directory: string): DoctorProfile {
     }
     if (identity && addresses.find(address => address.index === 0)?.address !== identity.address) throw new Error('Wallet identity mismatch');
     const access = z.enum(['read-only', 'spend']).parse(get('spending.mcpAccess') ?? 'read-only');
-    const proposed = parseOperation('limits_propose', { policy: get('spending.policy') ?? { perRequest: null, rolling: [] }, access, pool: get('spending.pool') ?? { indexes: [0], consolidate: false } });
+    const proposed = parseOperation('limits_propose', { policy: get('spending.policy') ?? { perRequest: null, rolling: [] }, access, pool: get('spending.pool') ?? { indexes: [0], consolidate: false },
+      recipientAllowlist: get('spending.recipientAllowlist') ?? null });
     const pending = state.prepare("SELECT COUNT(*) AS count FROM settings, json_each(settings.value) WHERE settings.key = 'spending.records' AND json_extract(json_each.value, '$.status') IN ('reserved', 'signed', 'unknown')").get();
     const terms = get('market.terms') as { version?: unknown } | undefined;
     return { settings, settingsSource: 'profile', identity, addresses, access, permissions,

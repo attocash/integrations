@@ -140,6 +140,7 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     const denied = await client.callTool({ name: 'send', arguments: request });
     assert.equal(denied.structuredContent.error.code, 'MCP_READ_ONLY');
     const proposed = await client.callTool({ name: 'limits_propose', arguments: {
+      recipientAllowlist: [address1],
       policy: { perRequest: { amount: '2', unit: 'ATTO' }, rolling: [{ days: 1, amount: '10', unit: 'ATTO' }] },
     } });
     await app.approveLimitsProposal(proposed.structuredContent.result.proposal.id);
@@ -152,6 +153,8 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     assert.equal(send.transaction.block.amount, '1000000001');
     await app.call('labels_set', { index: 1, label: 'Current recipient' });
     await app.call('labels_set', { index: 2, label: 'Integration savings' });
+    const unapproved = await client.callTool({ name: 'send', arguments: { ...request, requestId: 'renamed-new-payment' } });
+    assert.equal(unapproved.structuredContent.error.code, 'RECIPIENT_NOT_APPROVED');
     const repeat = await app.call('send', request);
     assert.equal(repeat.hash, send.hash);
     assert.deepEqual(send.destinationBinding, { network: 'LOCAL', address: address1, label: 'Integration savings' });
@@ -197,7 +200,7 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     assert.equal(history.items[0].subjectRole, 'sender');
     assert.deepEqual(history.items[0].amount, { raw: '1000000001', atto: '1.000000001' });
     // Restore the local test wallet's budget for the remaining network scenarios.
-    const restored = await app.call('limits_propose', { policy: { perRequest: null, rolling: [] }, access: 'read-only' });
+    const restored = await app.call('limits_propose', { policy: { perRequest: null, rolling: [] }, access: 'read-only', recipientAllowlist: null });
     await app.approveLimitsProposal(restored.proposal.id);
   });
 

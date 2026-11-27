@@ -78,6 +78,37 @@ test('existing shared CLI budgets do not implicitly authorize MCP spending', asy
   assert.equal((await f.local.call('address_deactivate', { index: 0 })).active, false);
 });
 
+test('recipient proposals show exact changes, preserve the active list when omitted, and accept legacy proposals', async t => {
+  const f = await fixture(t);
+  const recipient = f.wallet.identity.address;
+  const proposal = (extra = {}) => f.mcp.call('limits_propose', { policy: unlimited, access: 'read-only', ...extra });
+
+  assert.equal((await f.mcp.call('limits_get')).recipientAllowlist, null);
+  const restricted = await proposal({ recipientAllowlist: [recipient] });
+  assert.deepEqual(restricted.approval.changes, { recipientAllowlist: { from: null, to: [recipient] } });
+  assert.equal(f.local.ledger.recipientAllowlist(), null);
+  await f.local.approveLimitsProposal(restricted.proposal.id);
+  for (const invalid of [ [recipient, recipient], ['a personal label'], [recipient.toUpperCase()], Array(101).fill(recipient) ]) {
+    await assert.rejects(proposal({ recipientAllowlist: invalid }));
+  }
+
+  const kept = await proposal();
+  assert.deepEqual(kept.proposal.recipientAllowlist, [recipient]);
+  assert.deepEqual(kept.approval.changes, {});
+  const legacy = { ...kept.proposal };
+  delete legacy.recipientAllowlist;
+  f.local.store.set('spending.proposal', legacy);
+  await f.local.approveLimitsProposal(legacy.id);
+  assert.deepEqual(f.local.ledger.recipientAllowlist(), [recipient]);
+
+  const paused = await proposal({ recipientAllowlist: [] });
+  await f.local.approveLimitsProposal(paused.proposal.id);
+  const cleared = await proposal({ recipientAllowlist: null });
+  assert.deepEqual(cleared.approval.changes, { recipientAllowlist: { from: [], to: null } });
+  await f.local.approveLimitsProposal(cleared.proposal.id);
+  assert.equal(f.local.ledger.recipientAllowlist(), null);
+});
+
 test('approval guidance distinguishes source-pool changes from access and spending limits', async t => {
   // Given shared CLI/MCP sessions already allowed to spend within bounded limits from account zero.
   const f = await fixture(t, 'atto shared approval ');

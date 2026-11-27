@@ -97,6 +97,27 @@ for (const mode of ['login-only', 'limited', 'unlimited']) {
   });
 }
 
+test('Marketplace amount setup preserves recipients and cannot resume a proposal to clear them', async t => {
+  const f = await fixture(t);
+  let before = await f.snapshot();
+  const allowed = [before.address];
+  await f.mutate(store => {
+    const ledger = new SpendLedger(store);
+    const wallet = { directory: f.directory, walletFingerprint: before.fingerprint, network: before.settings.network };
+    const approved = ledger.proposePolicy(before.policy, 'read-only', wallet, before.pool, before.messageSigningIndexes, allowed);
+    ledger.approveProposal(approved.id, wallet);
+    ledger.proposePolicy(before.policy, 'spend', wallet, before.pool, before.messageSigningIndexes, null);
+  });
+  before = await f.snapshot();
+  assert.deepEqual(before.recipientAllowlist, allowed);
+  assert.equal(inspectMarketplacePaymentIntent(before, 'limited').resumeProposalId, undefined);
+  const plan = await prepareMarketplacePayments({ expected: before, mode: 'limited' });
+  assert.ok(plan.review.includes(`Approved ATTO recipients: ${before.address}`));
+  assert.match(plan.review, /Pending ATTO recipients to replace: any ATTO address/);
+  const saved = await plan.commit();
+  assert.deepEqual(saved.recipientAllowlist, allowed);
+});
+
 test('login-only commit preserves native authority and any incompatible pending proposal', async t => {
   // Given an active shared wallet and a separate pending authority request.
   const f = await fixture(t, { access: 'spend' });

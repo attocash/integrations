@@ -62,6 +62,43 @@ for (const mode of ['transient', 'persistent', 'unexpected']) {
   });
 }
 
+test('approved ATTO recipients apply to labels and survive restart while settled receipts remain readable', { timeout: 20_000 }, async t => {
+  const f = await fixture(t, [4, 0], { indexes: [0], consolidate: false });
+  const merchant = f.recipient.address;
+  const configure = async recipientAllowlist => {
+    const { proposal } = await f.app.call('limits_propose', { policy: f.app.ledger.policy(), access: 'spend', recipientAllowlist });
+    await f.app.approveLimitsProposal(proposal.id);
+  };
+  await configure([merchant]);
+  const mcp = f.open('mcp');
+  await mcp.call('labels_set', { address: f.addresses[1].address, label: 'Other payee' });
+  await assert.rejects(mcp.call('send', { destinationLabel: 'Other payee', requestId: 'other-address', amount: '1', unit: 'RAW' }),
+    { code: 'RECIPIENT_NOT_APPROVED' });
+  assert.equal(f.state.publications.length, 0);
+  assert.equal(f.app.ledger.get('other-address'), undefined);
+
+  const request = f.request('merchant-payment');
+  const paid = await mcp.call('send', request);
+  assert.equal(paid.status, 'published');
+  await configure([]);
+  const reopened = await f.reopen();
+  assert.deepEqual((await reopened.call('limits_get')).recipientAllowlist, []);
+  assert.equal((await reopened.call('send', request)).hash, paid.hash);
+  await assert.rejects(reopened.call('send', f.request('new-payment')), { code: 'RECIPIENT_NOT_APPROVED' });
+  assert.equal(f.state.publications.length, 1);
+});
+
+test('pausing outgoing recipients leaves a pending incoming payment receivable', { timeout: 20_000 }, async t => {
+  const f = await fixture(t, [3, 0]);
+  const incoming = await f.app.call('send', f.request('between-wallet-accounts', '1', { index: 0, destination: f.addresses[1].address }));
+  const { proposal } = await f.app.call('limits_propose', { policy: f.app.ledger.policy(), access: 'spend', recipientAllowlist: [] });
+  await f.app.approveLimitsProposal(proposal.id);
+  const received = await f.app.call('receive', { index: 1, hash: incoming.hash });
+  assert.equal(received.status, 'received');
+  assert.equal(received.amount.raw, '1');
+  assert.deepEqual(f.app.ledger.recipientAllowlist(), []);
+});
+
 test('a confirmed payment stays published when speculative persistence fails', async t => {
   // Given a working payment path and a storage failure limited to the work queue.
   const f = await fixture(t, [10], undefined, '100', undefined, { workExecution: 'detached' });
@@ -266,41 +303,49 @@ test('Pool proposals require approval and explicit sources never consolidate', {
   assert.equal((await f.app.call('journal_list')).items.length, 1);
 });
 
-test('Revocation after reservation releases an unsigned payment and its allowance', { timeout: 20_000 }, async t => {
-  // Given an approved MCP session paused after the durable reservation releases the wallet lock.
-  const f = await fixture(t, [3], undefined, '2');
-  const mcp = f.open('mcp');
-  const proceed = gate();
-  f.state.releaseExecution = proceed.release;
-  const withWalletLock = mcp.store.withWalletLock.bind(mcp.store);
-  let paused = false;
-  mcp.store.withWalletLock = async callback => {
-    const value = await withWalletLock(callback);
-    if (!paused && value?.id === 'revoked' && value.status === 'reserved') {
-      paused = true;
-      await proceed.promise;
+for (const revoke of ['MCP access', 'recipient approval']) {
+  test(`Revoking ${revoke} after reservation releases an unsigned payment and its allowance`, { timeout: 20_000 }, async t => {
+    // Given an approved MCP session paused after the durable reservation releases the wallet lock.
+    const f = await fixture(t, [3], undefined, '2');
+    const mcp = f.open('mcp');
+    const proceed = gate();
+    f.state.releaseExecution = proceed.release;
+    const withWalletLock = mcp.store.withWalletLock.bind(mcp.store);
+    let paused = false;
+    mcp.store.withWalletLock = async callback => {
+      const value = await withWalletLock(callback);
+      if (!paused && value?.id === 'revoked' && value.status === 'reserved') {
+        paused = true;
+        await proceed.promise;
+      }
+      return value;
+    };
+
+    // Revoke the selected permission before the payment can execute.
+    const code = revoke === 'MCP access' ? 'MCP_READ_ONLY' : 'RECIPIENT_NOT_APPROVED';
+    const payment = assert.rejects(mcp.call('send', f.request('revoked')), { code });
+    await until(() => paused);
+    if (revoke === 'MCP access') {
+      await f.approve(undefined, 'read-only');
+    } else {
+      const { proposal } = await f.app.call('limits_propose', { policy: f.app.ledger.policy(), access: 'spend', recipientAllowlist: [] });
+      await f.app.approveLimitsProposal(proposal.id);
     }
-    return value;
-  };
+    proceed.release();
+    await payment;
 
-  // When local approval revokes MCP access before the payment can execute.
-  const payment = assert.rejects(mcp.call('send', f.request('revoked')), { code: 'MCP_READ_ONLY' });
-  await until(() => paused);
-  await f.approve(undefined, 'read-only');
-  proceed.release();
-  await payment;
-
-  // Then no signing/work/publication occurs and the failed reservation releases the account and budget.
-  const { record } = await f.app.call('journal_get', { requestId: 'revoked' });
-  assert.equal(record.status, 'failed');
-  assert.equal(record.hash, undefined);
-  assert.equal(f.state.works.length, 0);
-  assert.equal(f.state.publications.length, 0);
-  const usage = await f.app.call('limits_get');
-  assert.equal(usage.pendingRaw, '0');
-  assert.equal(usage.rolling[0].remainingRaw, '2');
-  assert.equal((await f.app.call('pool_get')).accounts[0].busy, false);
-});
+    // Then no signing/work/publication occurs and the failed reservation releases the account and budget.
+    const { record } = await f.app.call('journal_get', { requestId: 'revoked' });
+    assert.equal(record.status, 'failed');
+    assert.equal(record.hash, undefined);
+    assert.equal(f.state.works.length, 0);
+    assert.equal(f.state.publications.length, 0);
+    const usage = await f.app.call('limits_get');
+    assert.equal(usage.pendingRaw, '0');
+    assert.equal(usage.rolling[0].remainingRaw, '2');
+    assert.equal((await f.app.call('pool_get')).accounts[0].busy, false);
+  });
+}
 
 test('Revoking consolidation after an internal transfer pauses and later resumes the plan', { timeout: 20_000 }, async t => {
   // Given an approved consolidation whose donor publication response is held open.

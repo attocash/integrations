@@ -13,6 +13,11 @@ const { formatHumanResult } = await import(pathToFileURL(join(cliDirectory, 'dis
 const { publicModel } = await import(pathToFileURL(join(cliDirectory, 'dist/network/reader.js')));
 const execute = promisify(execFile);
 
+test('human output distinguishes unrestricted ATTO recipients from all outgoing payments paused', () => {
+  assert.match(formatHumanResult({ recipientAllowlist: null }, 'limits_get'), /Approved ATTO recipients: Any ATTO address/);
+  assert.match(formatHumanResult({ recipientAllowlist: [] }, 'limits_get'), /Approved ATTO recipients: None/);
+});
+
 test('Human configuration output explains automatic and overridden batch sizes', () => {
   // Given an official gateway with auto sizing and a custom node with an override.
   const automatic = { nodeUrl: 'https://gatekeeper.live.application.atto.cash', nodeBatchSize: null };

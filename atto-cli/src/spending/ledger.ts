@@ -1,6 +1,6 @@
 import { paymentTransactionMatches, type AttoPaymentNetwork } from './atto-x402.js';
 import { parseDurableRelayRequest, parseRelayOffer, validateRelayOfferRefresh, type RelayRecord } from '../marketplace/relay.js';
-import { validateDestinationBinding, type DestinationBinding } from './destination.js';
+import { recipientAllowlistSchema, validateDestinationBinding, type DestinationBinding } from './destination.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { AttoBlock, AttoSendBlock, AttoTransaction } from '@attocash/commons-core';
@@ -90,6 +90,7 @@ const ACCESS_KEY = 'spending.mcpAccess';
 const PROPOSAL_KEY = 'spending.proposal';
 const POOL_KEY = 'spending.pool';
 const MESSAGE_SIGNING_INDEXES_KEY = 'signing.messageIndexes';
+const RECIPIENT_ALLOWLIST_KEY = 'spending.recipientAllowlist';
 
 export type McpAccess = 'read-only' | 'spend';
 
@@ -110,6 +111,7 @@ export interface LimitsProposal extends ProposalWallet {
   decidedAt?: number;
   pool?: AccountPool;
   messageSigningIndexes?: number[];
+  recipientAllowlist?: string[] | null;
 }
 
 export class SpendLedger {
@@ -144,15 +146,32 @@ export class SpendLedger {
     return indexes;
   }
 
+  recipientAllowlist(): string[] | null {
+    return this.validateRecipients(this.store.get(RECIPIENT_ALLOWLIST_KEY) ?? null);
+  }
+
+  private validateRecipients(value: unknown): string[] | null {
+    const parsed = recipientAllowlistSchema.safeParse(value);
+    if (!parsed.success) throw new AttoError('INVALID_POLICY', 'Use up to 100 unique ATTO recipient addresses, or null for any address.');
+    return parsed.data;
+  }
+
+  assertRecipientAllowed(destination: string): void {
+    const recipients = this.recipientAllowlist();
+    if (recipients !== null && !recipients.includes(destination)) {
+      throw new AttoError('RECIPIENT_NOT_APPROVED', 'The payment destination is outside the approved ATTO recipient list.');
+    }
+  }
+
   proposePolicy(policy: SpendingPolicy, access: McpAccess, wallet: ProposalWallet, pool = this.pool(),
-    messageSigningIndexes = this.messageSigningIndexes()): LimitsProposal {
+    messageSigningIndexes = this.messageSigningIndexes(), recipientAllowlist = this.recipientAllowlist()): LimitsProposal {
     this.validatePolicy(policy);
     this.validatePool(pool);
     this.validateMessageSigningIndexes(messageSigningIndexes);
     if (access !== 'read-only' && access !== 'spend') throw new AttoError('INVALID_POLICY', 'Choose read-only or spend access for MCP.');
     const createdAt = Date.now();
     const proposal: LimitsProposal = {
-      ...wallet, id: randomUUID(), policy, access, pool, messageSigningIndexes: [...messageSigningIndexes], createdAt, expiresAt: createdAt + DAY_MS,
+      ...wallet, id: randomUUID(), policy, access, pool, messageSigningIndexes: [...messageSigningIndexes], recipientAllowlist: this.validateRecipients(recipientAllowlist), createdAt, expiresAt: createdAt + DAY_MS,
       baseRevision: this.revision(), status: 'pending',
     };
     // One immutable proposal is current per profile. A new request gets a new
@@ -177,6 +196,7 @@ export class SpendLedger {
       if (proposal.pool !== undefined) this.validatePool(proposal.pool);
       const messageSigningIndexes = proposal.messageSigningIndexes ?? [];
       this.validateMessageSigningIndexes(messageSigningIndexes);
+      if (proposal.recipientAllowlist !== undefined) this.validateRecipients(proposal.recipientAllowlist);
       return { ...proposal, messageSigningIndexes };
     } catch {
       throw new AttoError('INVALID_STATE', 'The saved limit proposal is invalid.');
@@ -205,6 +225,7 @@ export class SpendLedger {
       this.store.set(ACCESS_KEY, proposal.access);
       if (proposal.pool !== undefined) this.store.set(POOL_KEY, proposal.pool);
       this.store.set(MESSAGE_SIGNING_INDEXES_KEY, proposal.messageSigningIndexes ?? []);
+      if (proposal.recipientAllowlist !== undefined) this.store.set(RECIPIENT_ALLOWLIST_KEY, proposal.recipientAllowlist);
       this.store.set(PROPOSAL_KEY, { ...proposal, status: 'approved', decidedAt: Date.now() });
     });
   }
@@ -251,6 +272,7 @@ export class SpendLedger {
       && !(record.status === 'published' && record.relay?.mode === 'DURABLE_NATIVE')) {
       throw new AttoError('SEND_STATE', 'Only a pending payment can use its spending reservation.');
     }
+    this.assertRecipientAllowed(record.destination);
     this.assertAllowance(record.raw, now, records.filter(value => value.id !== id));
   }
 
@@ -299,6 +321,7 @@ export class SpendLedger {
         }
         return existing;
       }
+      this.assertRecipientAllowed(request.destination);
       this.assertAllowance(raw, request.createdAt, records);
       const record: SendRecord = { ...request, raw, status: 'reserved' };
       records.push(record);
@@ -342,6 +365,7 @@ export class SpendLedger {
       }
       const record = existing ?? { ...request, raw, status: 'reserved' as const };
       if (!existing) {
+        this.assertRecipientAllowed(request.destination);
         this.assertAllowance(raw, request.createdAt, records);
         records.push(record);
         this.store.set(RECORDS_KEY, records);
@@ -661,6 +685,7 @@ export class SpendLedger {
       policy,
       mcpAccess: this.mcpAccess(),
       pool: this.pool(),
+      recipientAllowlist: this.recipientAllowlist(),
       messageSigningIndexes: this.messageSigningIndexes(),
       proposal: this.proposal(),
       pendingRaw: this.pendingTotal(records).toString(),

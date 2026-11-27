@@ -361,12 +361,12 @@ export async function runCli(argv = process.argv): Promise<void> {
     });
   const limits = program.command('limits').description('Shared spending budgets and usage');
   limits.command('status').description('Read active limits, spending usage, and pending proposals').action(() => call('limits_get'));
-  const proposeAndApprove = async (update: (current: { mcpAccess: string; policy: SpendingPolicy; pool: AccountPool; messageSigningIndexes: number[] }) => { policy?: Record<string, unknown>; access?: string; pool?: AccountPool; messageSigningIndexes?: number[] }) => {
+  const proposeAndApprove = async (update: (current: { mcpAccess: string; policy: SpendingPolicy; pool: AccountPool; messageSigningIndexes: number[] }) => { policy?: Record<string, unknown>; access?: string; pool?: AccountPool; messageSigningIndexes?: number[]; recipientAllowlist?: string[] | null }) => {
     requireTerminal();
     const current = await app().call('limits_get') as { mcpAccess: string; policy: SpendingPolicy; pool: AccountPool; messageSigningIndexes: number[] };
     const changes = update(current);
     const { proposal } = await app().call('limits_propose', compact({ policy: changes.policy ?? current.policy, access: changes.access ?? current.mcpAccess,
-      pool: changes.pool, messageSigningIndexes: changes.messageSigningIndexes })) as { proposal: { id: string } };
+      pool: changes.pool, messageSigningIndexes: changes.messageSigningIndexes, recipientAllowlist: changes.recipientAllowlist })) as { proposal: { id: string } };
     output(await approveLimitsProposal({ id: proposal.id, directory: app().store.directory }));
   };
   limits.command('set').description('Review and confirm limit changes; omitted rules are preserved')
@@ -375,6 +375,12 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option('--unit <unit>', 'ATTO (default) or RAW for the supplied amount flags')
     .option('--input <json>', 'Replace the entire policy using JSON: {"perRequest":null,"rolling":[]}')
     .option('--access <mode>', 'MCP access: read-only or spend; defaults to current access')
+    .option('--recipients <addresses>', 'Allow comma-separated ATTO addresses, none to pause, or any to remove the recipient restriction', value => {
+      const input = value.trim();
+      if (input === 'any') return null;
+      if (input === 'none') return [];
+      return input.split(',').map(address => address.trim());
+    })
     .option('--message-signing-indexes <indexes>', 'Grant message signing for comma-separated indexes, or use none to clear', value => {
       const trimmed = value.trim();
       if (trimmed.toLowerCase() === 'none') return [];
@@ -383,16 +389,16 @@ export async function runCli(argv = process.argv): Promise<void> {
     })
     .action(async options => {
       if (options.input !== undefined && [options.perPayment, options.daily, options.unit].some(value => value !== undefined)) throw new AttoError('INVALID_INPUT', 'Choose policy JSON or amount flags, not both.');
-      if ([options.input, options.perPayment, options.daily, options.access, options.messageSigningIndexes].every(value => value === undefined)) throw new AttoError('INVALID_INPUT', 'Supply --per-payment, --daily, --input, --access, or --message-signing-indexes.');
+      if ([options.input, options.perPayment, options.daily, options.access, options.messageSigningIndexes, options.recipients].every(value => value === undefined)) throw new AttoError('INVALID_INPUT', 'Supply --per-payment, --daily, --input, --access, --recipients, or --message-signing-indexes.');
       if (options.unit !== undefined && options.perPayment === undefined && options.daily === undefined) throw new AttoError('INVALID_INPUT', '--unit requires --per-payment or --daily.');
       return proposeAndApprove(current => ({
         policy: options.input !== undefined ? json(options.input) : {
           perRequest: options.perPayment === undefined ? current.policy.perRequest : { amount: options.perPayment, unit: options.unit ?? 'ATTO' },
           rolling: options.daily === undefined ? current.policy.rolling : [...current.policy.rolling.filter(rule => rule.days !== 1), { days: 1, amount: options.daily, unit: options.unit ?? 'ATTO' }],
-        }, access: options.access, messageSigningIndexes: options.messageSigningIndexes,
+        }, access: options.access, messageSigningIndexes: options.messageSigningIndexes, recipientAllowlist: options.recipients,
       }));
     });
-  limits.command('clear').description('Remove all spending limits, preserving historical usage')
+  limits.command('clear').description('Remove amount limits, preserving approved recipients and historical usage')
     .action(() => proposeAndApprove(() => ({ policy: { perRequest: null, rolling: [] } })));
   limits.command('approve <id>').description('Review and approve an immutable proposal in this terminal')
     .action(async id => output(await approveLimitsProposal({ id, directory: program.opts().dataDir })));

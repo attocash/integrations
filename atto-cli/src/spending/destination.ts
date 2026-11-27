@@ -1,9 +1,24 @@
+import { z } from 'zod';
 import { AttoError } from '../domain/errors.js';
 import { PersonalLabels, nameKey, personalNameSchema } from '../labels/personal.js';
 import { parseAddress } from '../network/reader.js';
 import type { StateStore } from '../storage/state.js';
 import type { NetworkName } from '../wallet/types.js';
 import type { SpendLedger } from './ledger.js';
+
+const recipientAddress = z.string().max(128).refine(value => {
+  try { return parseAddress(value).value === value; }
+  catch { return false; }
+}, 'Use a canonical, checksummed ATTO address.');
+
+export const recipientAllowlistSchema = z.array(recipientAddress).max(100)
+  .refine(addresses => new Set(addresses).size === addresses.length, 'Recipient addresses must be unique.')
+  .nullable();
+
+export function formatRecipientAllowlist(recipients: string[] | null): string {
+  if (recipients === null) return 'any ATTO address';
+  return recipients.length ? recipients.join(', ') : 'none';
+}
 
 export interface DestinationBinding { address: string; network: NetworkName; label?: string }
 export function validateDestinationBinding(binding: DestinationBinding): void {

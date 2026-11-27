@@ -113,6 +113,7 @@ export class Payments {
           if (quote && this.store.get<{ version: string }>('market.terms')?.version !== marketTerms.version) {
             throw new AttoError('TERMS_REQUIRED', 'Acknowledge the current market-data terms before sending a USD-denominated amount.');
           }
+          this.ledger.assertRecipientAllowed(destination);
           this.ledger.assertCanReserve(raw);
           const pool = this.ledger.pool();
           const indexes = request.index === undefined ? pool.indexes : [request.index];

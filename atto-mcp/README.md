@@ -201,9 +201,15 @@ one. `limits_get` shows the active settings and proposal status.
 | MCP access | `read-only` or `spend`; spend also permits wallet mutations |
 | Per-request cap | Maximum amount for each payment |
 | Rolling allowance | Total amount over each configured rolling window, including reservations for uncertain payments |
+| Recipient allowlist | Allowed final ATTO addresses. An owner can approve an empty list to pause outgoing payments. The default allows any recipient. |
 | Source pool | Which saved account indexes MCP may spend from; default `[0]` |
 | Consolidation | Whether automatic source selection may combine funds from pool accounts; disabled by default |
 | Message-signing indexes | Separate grants for exact-byte message signatures; empty by default |
+
+To restrict payments to a merchant, ask for `limits_propose` with the existing
+`policy` and a `recipientAllowlist` of full ATTO addresses. Review the addresses
+in your local terminal. Omitting this field preserves it. An approved `null`
+allows any recipient again. You can still receive payments with an empty list.
 
 Omitting `send.index` selects from the approved pool. An explicit index must
 belong to that pool and hold the whole payment; it never consolidates. Allowance

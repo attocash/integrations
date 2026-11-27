@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { AttoApplication } from '../application/app.js';
 import { amountRaw } from '../domain/amount.js';
 import { formatSpendingPolicy as formatPolicy } from '../marketplace/wallet-setup.js';
+import { formatRecipientAllowlist } from '../spending/destination.js';
 import { AttoError } from '../domain/errors.js';
 import { defaultCliDirectory, dedicatedMcpDirectory, resolveWalletProfile } from '../storage/profiles.js';
 import type { AccountPool, SpendingPolicy, WalletIdentity, WalletSettings } from '../wallet/types.js';
@@ -42,6 +43,8 @@ function showProposal(review: Awaited<ReturnType<AttoApplication['reviewLimitsPr
     `Requested limits: ${formatPolicy(proposal.policy)}`,
     `Current pool: indexes ${review.pool.indexes.join(', ')}; consolidation ${review.pool.consolidate ? 'enabled' : 'disabled'}`,
     `Requested pool: indexes ${(proposal.pool ?? review.pool).indexes.join(', ')}; consolidation ${(proposal.pool ?? review.pool).consolidate ? 'enabled' : 'disabled'}`,
+    `Current ATTO recipients: ${formatRecipientAllowlist(review.recipientAllowlist)}`,
+    `Requested ATTO recipients: ${formatRecipientAllowlist(proposal.recipientAllowlist === undefined ? review.recipientAllowlist : proposal.recipientAllowlist)}`,
     `Current message-signing indexes: ${review.messageSigningIndexes.join(', ') || 'none'}`,
     `Requested message-signing indexes: ${(proposal.messageSigningIndexes ?? []).join(', ') || 'none'}`,
     '',

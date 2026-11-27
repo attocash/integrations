@@ -7,6 +7,7 @@ import { requireTerminal } from '../cli/terminal.js';
 import { AttoApplication } from '../application/app.js';
 import { amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
+import { formatRecipientAllowlist } from '../spending/destination.js';
 import { SpendLedger, type LimitsProposal, type McpAccess } from '../spending/ledger.js';
 import { inspectWalletProfile, type WalletProfile } from '../storage/profiles.js';
 import { StateStore } from '../storage/state.js';
@@ -28,6 +29,7 @@ export interface MarketplaceWalletSetupSnapshot {
   policy: SpendingPolicy;
   pool: AccountPool;
   messageSigningIndexes: number[];
+  recipientAllowlist: string[] | null;
   authorityRevision: number;
   proposal: LimitsProposal | null;
   formattedLimits: string;
@@ -74,7 +76,7 @@ function snapshot(store: StateStore, index: number): MarketplaceWalletSetupSnaps
     directory: store.directory, profile: inspectWalletProfile(store.directory), address: address.address, index,
     fingerprint: identity.fingerprint, network: `atto:${settings.network.toLowerCase() as Lowercase<NetworkName>}`,
     identity, settings, addresses, policy, access: ledger.mcpAccess(), pool: ledger.pool(),
-    messageSigningIndexes: ledger.messageSigningIndexes(), authorityRevision, proposal: ledger.proposal(),
+    messageSigningIndexes: ledger.messageSigningIndexes(), recipientAllowlist: ledger.recipientAllowlist(), authorityRevision, proposal: ledger.proposal(),
     formattedLimits: formatSpendingPolicy(policy),
   };
 }
@@ -306,7 +308,8 @@ function proposalMatchesPaymentMode(before: MarketplaceWalletSetupSnapshot, prop
     && proposal.baseRevision === before.authorityRevision && Date.now() < proposal.expiresAt
     && (mode === 'limited' ? marketplaceSpendingPolicyBounded(proposal.policy) : mode === 'unlimited' && !marketplaceSpendingPolicyBounded(proposal.policy))
     && (proposal.pool ?? before.pool).indexes.includes(before.index)
-    && isDeepStrictEqual(proposal.messageSigningIndexes ?? [], before.messageSigningIndexes);
+    && isDeepStrictEqual(proposal.messageSigningIndexes ?? [], before.messageSigningIndexes)
+    && (proposal.recipientAllowlist === undefined || isDeepStrictEqual(proposal.recipientAllowlist, before.recipientAllowlist));
 }
 
 function marketplacePaymentReview(before: MarketplaceWalletSetupSnapshot, requested: {
@@ -318,6 +321,7 @@ function marketplacePaymentReview(before: MarketplaceWalletSetupSnapshot, reques
     + (previousChanged ? 'Previous pending native settings changed or expired; the current terms require fresh approval.\n' : '')
     + (mode === 'login-only' ? `Login only: native payment settings stay unchanged.\nCurrent limits: ${before.formattedLimits}\n`
       : `Native payment access: ${before.access} → ${requested.access}\nCurrent limits: ${before.formattedLimits}\nRequested limits: ${formatSpendingPolicy(requested.policy)}\n`)
+    + (before.recipientAllowlist !== null ? `Approved ATTO recipients: ${formatRecipientAllowlist(before.recipientAllowlist)}\n` : '')
     + (mode === 'unlimited' ? 'Unlimited spending permits the available balance, including future deposits, to be spent.\n' : '')
     + (enablesSpend ? `Native payments become enabled for pool indexes ${requested.pool.indexes.join(', ')}; consolidation ${requested.pool.consolidate ? 'enabled' : 'disabled'}.\n`
       : !isDeepStrictEqual(before.policy,requested.policy) ? `Shared native spending limits apply to pool indexes ${requested.pool.indexes.join(', ')}; consolidation ${requested.pool.consolidate ? 'enabled' : 'disabled'}.\n` : '')
@@ -326,8 +330,12 @@ function marketplacePaymentReview(before: MarketplaceWalletSetupSnapshot, reques
     + (resume ? `${previousChanged ? 'Approve the current pending native settings' : 'Resume the exact existing pending native settings'}, expiring ${new Date(resume.expiresAt).toISOString()}.\n` : '')
     + (pending && !resume && changesAuthority ? `This replaces the existing pending native settings only after approval.\n`
       + `Pending native settings to replace: access ${pending.access}; ${formatSpendingPolicy(pending.policy)}; payment pool indexes ${(pending.pool ?? before.pool).indexes.join(', ')}; consolidation ${(pending.pool ?? before.pool).consolidate ? 'enabled' : 'disabled'}; expires ${new Date(pending.expiresAt).toISOString()}.\n`
+      + (pending.recipientAllowlist !== undefined && !isDeepStrictEqual(pending.recipientAllowlist, before.recipientAllowlist)
+        ? `Pending ATTO recipients to replace: ${formatRecipientAllowlist(pending.recipientAllowlist)}\n` : '')
       + ((pending.messageSigningIndexes ?? []).length ? `Pending generic message signing indexes to replace: ${pending.messageSigningIndexes!.join(', ')}.\n` : '') : '')
     + (previousChanged && pending && !resume && !changesAuthority ? `Current pending native settings remain unchanged: access ${pending.access}; ${formatSpendingPolicy(pending.policy)}; payment pool indexes ${(pending.pool ?? before.pool).indexes.join(', ')}; consolidation ${(pending.pool ?? before.pool).consolidate ? 'enabled' : 'disabled'}; expires ${new Date(pending.expiresAt).toISOString()}.\n`
+      + (pending.recipientAllowlist !== undefined && !isDeepStrictEqual(pending.recipientAllowlist, before.recipientAllowlist)
+        ? `Current pending ATTO recipients: ${formatRecipientAllowlist(pending.recipientAllowlist)}\n` : '')
       + ((pending.messageSigningIndexes ?? []).length ? `Current pending generic message signing indexes: ${pending.messageSigningIndexes!.join(', ')}.\n` : '') : '')
     + (mode !== 'login-only' ? 'These limits and payment history are shared with CLI payments.\n' : '');
 }

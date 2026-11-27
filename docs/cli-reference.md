@@ -366,6 +366,33 @@ atto limits status
 atto limits clear
 ```
 
+Restrict the destinations for outgoing ATTO payments with `--recipients`.
+Supply up to 100 full addresses separated by commas. The terminal shows the
+current and requested addresses before you approve. The same restriction
+applies to the CLI, wallet MCP, and ATTO payments prepared for Marketplace.
+
+```sh
+atto limits set --recipients "FULL_MERCHANT_ADDRESS"
+atto limits set --recipients none
+atto limits set --recipients any
+```
+
+Replace the placeholder with the merchant's public `atto://` address.
+`none` pauses new outgoing authorizations in this wallet. Receiving stays
+available. Before a durable Marketplace payment is handed over for publication,
+the wallet checks the recipient again. A pause preserves the signed payment
+and its reservation. Approving the recipient again lets the same payment
+proceed. A payment already handed to Marketplace can still settle after a pause.
+
+`any` removes the destination restriction. Payments by label use the resolved address.
+A consolidation checks the final recipient and can move funds between its
+approved source accounts. You can still look up a payment that already settled.
+
+MCP can propose the same change using `limits_propose.recipientAllowlist`.
+A list names the allowed addresses, `[]` pauses outgoing payments, and `null`
+allows any recipient. Omitting the field preserves the current setting.
+New and existing profiles start with any recipient allowed.
+
 ATTO message signing is a separate profile-specific capability. It starts with no
 approved indexes. Grant only the wallet indexes that need unattended signatures
 from a local terminal; MCP signing also requires the usual `spend` access:
@@ -399,7 +426,7 @@ disable consolidation explicitly.
 
 `limits set` preserves the existing MCP access mode unless you supply
 `--access read-only` or `--access spend`. `limits clear` also preserves that mode;
-if MCP already has spending access, clearing its limits permits unlimited sends.
+if MCP already has spending access, clearing its amount limits permits uncapped sends to its approved recipients.
 It also preserves message-signing grants; revoke those with
 `atto limits set --message-signing-indexes none`.
 To enable MCP with a bounded policy explicitly:

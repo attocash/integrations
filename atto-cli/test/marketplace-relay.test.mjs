@@ -66,6 +66,32 @@ test('strict JSON handles bounded adversarial quoted keys and values at the exac
   assert.throws(()=>parseJsonObject(JSON.stringify({value:multibyteValue+'a'})),/JSON input exceeds its byte limit/);
 });
 
+async function setRecipientAllowlist(app, recipientAllowlist) {
+  const { proposal } = await app.call('limits_propose', {
+    policy: app.ledger.policy(), access: 'spend', recipientAllowlist,
+  });
+  await app.approveLimitsProposal(proposal.id);
+}
+
+test('Marketplace checks the ATTO recipient list before preparing a relay payment', { timeout: 20_000 }, async t => {
+  const f = await fixture(t, ['100']);
+  const app = f.open('mcp', { internalMarketplaceAuthorizeWrite: () => {} });
+  const termsForPayment = { ...terms('ATTO', f.addresses[0].address, f.recipient.address), baselineFrontier: '01'.repeat(32) };
+  const request = { requestId: paymentId, origin: 'https://marketplace.example', audience: 'marketplace',
+    terms: termsForPayment, paymentRequired: offer(termsForPayment), index: 0 };
+  await setRecipientAllowlist(f.app, []);
+  const reads = f.secretReads;
+  await assert.rejects(app.marketplaceRelay('payment_prepare', request), { code: 'RECIPIENT_NOT_APPROVED' });
+  assert.equal(f.secretReads, reads);
+  assert.equal(app.ledger.get(paymentId), undefined);
+
+  await setRecipientAllowlist(f.app, [f.recipient.address]);
+  const prepared = await app.marketplaceRelay('payment_prepare', request);
+  assert.ok(prepared.hash);
+  assert.equal(app.ledger.get(paymentId).destination, f.recipient.address);
+  assert.equal(f.state.publicationAttempts.length, 0);
+});
+
 test('Marketplace relay signs locally, retains exact authorization through restart, and never publishes from wallet commands', {timeout:20000},async t=>{
   // Given a selected wallet with its existing spend grant and immutable seller requirement.
   const f=await fixture(t,['100']), app=f.open('mcp',{internalMarketplaceAuthorizeWrite:()=>{}});
@@ -124,6 +150,22 @@ test('ATTO durable relay retains its grant and exact wire payload across restart
   assert.deepEqual(recovered,prepared);
   const checkArgs={requestId:paymentId,index:0,transactionHash:prepared.hash};
   assert.deepEqual(await reopened.marketplaceRelay('payment_relay_check',checkArgs),prepared);
+
+  // The owner pauses a signed payment before Marketplace takes it for publication.
+  const readsBeforePause = f.secretReads;
+  await setRecipientAllowlist(f.app, []);
+  await assert.rejects(reopened.marketplaceRelay('payment_relay_check', checkArgs), {
+    code: 'RECIPIENT_NOT_APPROVED',
+  });
+  assert.deepEqual(await reopened.marketplaceRelay('payment_status', { requestId: paymentId, index: 0 }), prepared);
+  assert.equal(reopened.ledger.get(paymentId).transactionJson, transactionJson);
+  assert.equal(reopened.ledger.usage().pendingRaw, '40');
+  assert.equal(f.state.publicationAttempts.length, 0);
+
+  await setRecipientAllowlist(f.app, [f.recipient.address]);
+  assert.deepEqual(await reopened.marketplaceRelay('payment_relay_check', checkArgs), prepared);
+  assert.equal(f.secretReads, readsBeforePause);
+
   allow=false;
   await assert.rejects(reopened.marketplaceRelay('payment_relay_check',checkArgs),{code:'PERMISSION_DENIED'});
   allow=true;

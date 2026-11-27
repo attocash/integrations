@@ -165,7 +165,7 @@ export class AttoApplication {
       proposal: this.ledger.reviewProposal(id, this.proposalWallet()), directory: this.store.directory,
       identity: this.identity() ?? null, network: this.settings().network,
       policy: this.ledger.policy(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(),
-      messageSigningIndexes: this.ledger.messageSigningIndexes(),
+      messageSigningIndexes: this.ledger.messageSigningIndexes(), recipientAllowlist: this.ledger.recipientAllowlist(),
     }));
   }
 
@@ -517,9 +517,9 @@ export class AttoApplication {
       }
       case 'limits_propose': return this.store.withWalletLock(async () => {
         const current = { access: this.ledger.mcpAccess(), policy: this.ledger.policy(), pool: this.ledger.pool(),
-          messageSigningIndexes: this.ledger.messageSigningIndexes() };
+          messageSigningIndexes: this.ledger.messageSigningIndexes(), recipientAllowlist: this.ledger.recipientAllowlist() };
         const proposal = this.ledger.proposePolicy(args.policy as SpendingPolicy, args.access as McpAccess, this.proposalWallet(), args.pool as AccountPool | undefined,
-          args.messageSigningIndexes as number[] | undefined);
+          args.messageSigningIndexes as number[] | undefined, args.recipientAllowlist as string[] | null | undefined);
         return { proposal, approval: approvalInstructions(proposal, current) };
       });
       case 'metrics_get': return this.market.metrics();
