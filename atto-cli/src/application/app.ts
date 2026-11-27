@@ -1,39 +1,39 @@
-import { PersonalLabels } from '../labels/personal.js';
-import { GlobalDirectory } from '../labels/directory.js';
-import { AddressLabels } from '../labels/presentation.js';
-import type { DestinationBinding } from '../spending/destination.js';
-import { createHash } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
-  AttoMnemonic, AttoPublicKey, AttoSignature, AttoTransaction, toAttoIndex,
+  AttoPublicKey, AttoSignature, AttoTransaction, toAttoIndex,
 } from '@attocash/commons-core';
-import { amountOutput, amountRaw } from '../domain/amount.js';
+import { runDoctor } from '../doctor/doctor.js';
+import { parseAddress } from '../domain/address.js';
+import { amountOutput } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
-import { NodeReader, parseAddress, publicModel } from '../network/reader.js';
+import { GlobalDirectory } from '../labels/directory.js';
+import { PersonalLabels } from '../labels/personal.js';
+import { AddressLabels } from '../labels/presentation.js';
+import { MarketplaceConnectionClient } from '../marketplace/connection.js';
+import { requireMarketplaceLoginAuthorization } from '../marketplace/login-authorization.js';
+import { createMarketplaceProofApprovalResponse, validateMarketplaceUserProofApproval } from '../marketplace/proof-approval.js';
 import { resolveNodeBatchSize } from '../network/batching.js';
+import { NodeReader, publicModel } from '../network/reader.js';
 import type { SendRetry } from '../network/retry.js';
-import { OsSecretStore, type SecretStore } from '../storage/secrets.js';
-import { StateStore } from '../storage/state.js';
-import { resolveWalletProfile } from '../storage/profiles.js';
-import { SpendLedger, type McpAccess } from '../spending/ledger.js';
-import { approvalInstructions } from '../spending/approval.js';
-import { Payments } from '../spending/payments.js';
-import { WalletWork, type WorkExecution } from '../wallet/work.js';
-import { BackgroundReceiver } from '../wallet/background-receive.js';
-import { WatchManager } from '../watches/manager.js';
-import { AutoReceiver, type ReceiveProgress } from '../wallet/auto-receive.js';
-import { WalletReceiver } from '../wallet/receive.js';
-import { defaultSettings } from '../wallet/defaults.js';
-import { derivedSigner, mnemonicSeed, signingWallet } from '../wallet/signing.js';
-import type { AccountPool, ListRequest, ReceiveRequest, SendRequest, SpendingPolicy, StreamFilter, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
-import { operationFor, parseOperation } from './operations.js';
 import { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
-import { runDoctor } from '../doctor/doctor.js';
-import { validateMarketplaceUserProofApproval, createMarketplaceProofApprovalResponse } from '../marketplace/proof-approval.js';
-import { requireMarketplaceLoginAuthorization } from '../marketplace/login-authorization.js';
-import { MarketplaceConnectionClient } from '../marketplace/connection.js';
-
-const RESET_KEY = 'wallet.reset';
+import { approvalInstructions } from '../spending/approval.js';
+import type { DestinationBinding } from '../spending/destination.js';
+import { SpendLedger, type McpAccess } from '../spending/ledger.js';
+import { Payments } from '../spending/payments.js';
+import { resolveWalletProfile } from '../storage/profiles.js';
+import { OsSecretStore, type SecretStore } from '../storage/secrets.js';
+import { StateStore } from '../storage/state.js';
+import { AutoReceiver, type ReceiveProgress } from '../wallet/auto-receive.js';
+import { BackgroundReceiver } from '../wallet/background-receive.js';
+import { defaultSettings } from '../wallet/defaults.js';
+import { WalletLifecycle } from '../wallet/lifecycle.js';
+import { WalletReceiver } from '../wallet/receive.js';
+import { derivedSigner, signingWallet } from '../wallet/signing.js';
+import type { AccountPool, ListRequest, ReceiveRequest, SendRequest, SpendingPolicy, StreamFilter, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
+import { WalletWork, type WorkExecution } from '../wallet/work.js';
+import { WatchManager } from '../watches/manager.js';
+import { findOperation, parseOperation } from './operations.js';
 
 function signedMessageBytes(args: Record<string, unknown>): Int8Array {
   const bytes = args.messageHex !== undefined
@@ -46,6 +46,7 @@ export class AttoApplication {
   readonly store: StateStore;
   readonly ledger: SpendLedger;
   private readonly secrets: SecretStore;
+  private readonly lifecycle: WalletLifecycle;
   private readonly market: MarketData;
   private readonly personal: PersonalLabels;
   private readonly labels: AddressLabels;
@@ -64,12 +65,13 @@ export class AttoApplication {
   private closed = false;
   private started = false;
   private resetting = false;
-  private recoveryReads = 0;
   private readonly calls = new Set<Promise<unknown>>();
   private readonly mcp: boolean;
   private readonly internalMarketplaceAuthorizeWrite?: (status: unknown) => void;
   private readonly internalMarketplaceReceiveSafety: boolean;
   private readonly doctorAbort = new AbortController();
+
+  get directory(): string { return this.store.directory; }
 
   constructor(options: { directory?: string; secrets?: SecretStore; market?: MarketData; access?: 'mcp'; internalMarketplaceReceiveSafety?: boolean; internalMarketplaceAuthorizeWrite?: (status: unknown) => void; onReceiveProgress?: (event: ReceiveProgress) => void; sendRetry?: SendRetry; globalDirectory?: GlobalDirectory; onDestination?: (binding: DestinationBinding) => void; workExecution?: WorkExecution; receivingAllowed?: () => boolean } = {}) {
     const profile = resolveWalletProfile(options.directory);
@@ -89,6 +91,20 @@ export class AttoApplication {
       this.work = new WalletWork(this.store, () => this.settings(), options.workExecution);
       this.background = new BackgroundReceiver(this.store);
       this.receivingAllowed = options.receivingAllowed ?? (() => true);
+      this.lifecycle = new WalletLifecycle(this.store, this.secrets, this.ledger, {
+        requireSession: () => this.requireSession(),
+        requireReady: () => this.requireReady(),
+        requireMcpWrite: () => this.requireMcpWrite(),
+        requireResetAvailable: () => this.requireResetAvailable(),
+        // A previous completed send may still have speculative public work queued.
+        // Stop it before clearing state; normal calls cannot start during reset.
+        beforeReset: () => this.work.cancel(),
+        onNetworkChanged: () => this.serializeWatches(async () => {
+          await this.watchManager?.close();
+          this.watchManager = undefined;
+        }),
+        loadSeed: () => this.seed(),
+      });
       this.marketplaceConnection = new MarketplaceConnectionClient(this.store, {
         settings: () => this.settings(), addresses: () => this.addresses(), seed: () => this.seed(), mcp: this.mcp,
       });
@@ -115,15 +131,14 @@ export class AttoApplication {
     }
   }
 
-  private settings() { return this.store.get<WalletSettings>('settings')!; }
-  private addresses() { return this.store.get<WalletAddress[]>('addresses') ?? []; }
-  private selectedAddresses(input: { index?: number; addresses?: string[]; all?: boolean }): string[] {
-    const selected = input.addresses ?? (input.index !== undefined ? [this.address(input.index).address]
-      : this.addresses().filter(address => input.all || address.active).map(address => address.address));
-    return [...new Set(selected.map(address => parseAddress(address).value))];
-  }
-  private identity() { return this.store.get<WalletIdentity>('identity'); }
+  private settings(): WalletSettings { return this.lifecycle.settings(); }
+  private addresses(): WalletAddress[] { return this.lifecycle.addresses(); }
+  private identity(): WalletIdentity | undefined { return this.lifecycle.identity(); }
+  private address(index = 0, requireActive = false): WalletAddress { return this.lifecycle.address(index, requireActive); }
+  private selectedAddresses(input: { index?: number; addresses?: string[]; all?: boolean }): string[] { return this.lifecycle.selectedAddresses(input); }
   private reader() { return new NodeReader(this.settings()); }
+  private seed() { return this.lifecycle.loadSeed(); }
+  private configure(input: Partial<WalletSettings>) { return this.lifecycle.configure(input); }
 
   private requireSession(): void {
     if (this.closed) throw new AttoError('SESSION_CLOSED', 'This wallet session has closed.');
@@ -132,15 +147,11 @@ export class AttoApplication {
 
   private requireReady(): void {
     this.requireSession();
-    this.requireResetFinished();
-  }
-
-  private requireResetFinished(): void {
-    if (this.store.get(RESET_KEY)) throw new AttoError('WALLET_RESET_REQUIRED', 'Wallet reset was interrupted. Run atto wallet reset again to finish cleanup.');
+    this.lifecycle.requireResetFinished();
   }
 
   private requireMcpWrite(): void {
-    this.requireResetFinished();
+    this.lifecycle.requireResetFinished();
     if (this.mcp && this.ledger.mcpAccess() !== 'spend') {
       throw new AttoError('MCP_READ_ONLY', 'MCP has read-only access to this wallet. Propose limits and obtain local terminal approval to enable transactions.');
     }
@@ -159,6 +170,41 @@ export class AttoApplication {
     if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Limit changes require approval in a local terminal.');
   }
 
+  authoritySnapshot(): { policy: SpendingPolicy; pool: AccountPool; access: McpAccess; messageSigningIndexes: number[] } {
+    this.requireReady();
+    return {
+      policy: this.ledger.policy(),
+      pool: this.ledger.pool(),
+      access: this.ledger.mcpAccess(),
+      messageSigningIndexes: this.ledger.messageSigningIndexes(),
+    };
+  }
+
+  async proposeLimitsIfUnchanged(options: {
+    expectedUsage: { policy: SpendingPolicy; pool: AccountPool; access: McpAccess; messageSigningIndexes: number[] };
+    expectedSettings: WalletSettings;
+    expectedIdentity: WalletIdentity | null;
+    requested: { policy: SpendingPolicy; access: McpAccess; pool: AccountPool; messageSigningIndexes: number[] };
+  }) {
+    this.requireSession();
+    if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Limit changes require approval in a local terminal.');
+    return this.store.withWalletLock(async () => {
+      if (this.lifecycle.isResetPending()) {
+        throw new AttoError('WALLET_RESET_REQUIRED', 'Finish wallet reset before configuring Marketplace.');
+      }
+      if (!isDeepStrictEqual(options.expectedUsage, this.authoritySnapshot())
+        || !isDeepStrictEqual(options.expectedSettings, this.settings())
+        || !isDeepStrictEqual(options.expectedIdentity, this.identity() ?? null)) {
+        throw new AttoError('PROPOSAL_STALE', 'The shared wallet settings or authority changed during setup. Review the current wallet and run setup again.');
+      }
+      if (isDeepStrictEqual(options.expectedUsage, options.requested)) return null;
+      return this.ledger.proposePolicy(
+        options.requested.policy, options.requested.access, this.proposalWallet(),
+        options.requested.pool, options.requested.messageSigningIndexes,
+      );
+    });
+  }
+
   async reviewLimitsProposal(id: string) {
     this.requireLocalApproval();
     return this.store.withWalletLock(async () => ({
@@ -175,7 +221,7 @@ export class AttoApplication {
       validateReviewedState?.();
       const proposal = this.ledger.reviewProposal(id, this.proposalWallet());
       if (proposal.status === 'pending' && proposal.pool) {
-        for (const index of proposal.pool.indexes) await this.deriveAddress(index);
+        for (const index of proposal.pool.indexes) await this.lifecycle.deriveAddress(index);
       }
       this.ledger.approveProposal(id, this.proposalWallet());
       inspectApprovedState?.();
@@ -191,174 +237,30 @@ export class AttoApplication {
     });
   }
 
-  async createWallet(mnemonic?: string): Promise<unknown> {
-    this.requireReady();
-    return this.store.withWalletLock(async () => {
-      this.requireReady();
-      if (this.identity()) throw new AttoError('WALLET_EXISTS', 'This wallet is already initialized.');
-      const existing = await this.secrets.get();
-      if (existing && !mnemonic) throw new AttoError('WALLET_EXISTS', 'A credential already exists. Import its phrase to recover the public wallet state.');
-      const phrase = (mnemonic ?? (await AttoMnemonic.generate()).phrase).normalize('NFKD').trim().replace(/\s+/g, ' ');
-      const seed = await mnemonicSeed(phrase);
-      try {
-        if (existing && existing !== phrase) throw new AttoError('WALLET_EXISTS', 'The password-store entry belongs to a different mnemonic.');
-        const signer = await derivedSigner(seed, 0);
-        const address: WalletAddress = { index: 0, address: signer.address.value, publicKey: signer.publicKey.toString(), active: true };
-        const identity = { address: address.address, fingerprint: createHash('sha256').update(address.publicKey).digest('hex') };
-        if (!existing) await this.secrets.set(phrase);
-        this.store.transaction(() => { this.store.set('identity', identity); this.store.set('addresses', [address]); });
-        return { identity, addresses: [address] };
-      } finally { seed.value.fill(0); }
-    });
-  }
-
-  async backupMnemonic(): Promise<string> {
-    this.requireSession();
-    this.recoveryReads++;
-    try {
-      const phrase = await this.secrets.get();
-      if (!phrase) {
-        this.requireResetFinished();
-        if (this.identity()) throw new AttoError('WALLET_CREDENTIAL_MISSING', 'The wallet is initialized, but the OS password store returned no recovery phrase for this profile. Run doctor in this session to check credential access. Do not reset or replace the wallet.');
-        throw new AttoError('WALLET_NOT_INITIALIZED', 'Create or import a wallet through the CLI first.');
-      }
-      return phrase;
-    } finally { this.recoveryReads--; }
-  }
+  createWallet(mnemonic?: string): Promise<unknown> { return this.lifecycle.createWallet(mnemonic); }
+  backupMnemonic(): Promise<string> { return this.lifecycle.backupMnemonic(); }
+  reviewWalletReset() { return this.lifecycle.reviewReset(); }
 
   private requireResetAvailable(): void {
     this.requireSession();
     if (this.mcp) throw new AttoError('LOCAL_APPROVAL_REQUIRED', 'Wallet reset requires approval in a local terminal.');
     if (this.background.status().state !== 'stopped') throw new AttoError('WALLET_BUSY', 'Stop the background receiver before resetting this wallet.');
-    if (this.started || this.calls.size || this.recoveryReads || this.store.busy
+    if (this.started || this.calls.size || this.lifecycle.readingRecovery || this.store.busy
       || this.watchManager?.list().some(watch => ['running', 'reconnecting'].includes(watch.status))) {
       throw new AttoError('WALLET_BUSY', 'Stop active wallet operations and reset from a new terminal command.');
     }
     if (!this.secrets.remove) throw new AttoError('SECRET_STORE_UNSUPPORTED', 'This password store does not support wallet reset.');
   }
 
-  private requireNoPendingPayments(): void {
-    if (this.ledger.pending().length) throw new AttoError('PUBLICATION_UNCERTAIN', 'Resolve unfinished payments before resetting this wallet. Check the journal and resume their original request IDs.');
-  }
-
-  async reviewWalletReset() {
-    this.requireResetAvailable();
-    return this.store.withWalletLock(async () => {
-      this.requireNoPendingPayments();
-      return { directory: this.store.directory, identity: this.identity() ?? null, network: this.settings().network };
-    });
-  }
-
   async resetWallet(expectedFingerprint: string | null): Promise<{ reset: true }> {
     this.requireResetAvailable();
     this.resetting = true;
     try {
-      // A previous completed send may still have speculative public work queued.
-      // Stop it before clearing state; normal calls cannot start during reset.
-      await this.work.cancel();
-      await this.store.withExclusiveReset(() => this.store.withWalletLock(async () => {
-        if ((this.identity()?.fingerprint ?? null) !== expectedFingerprint) {
-          throw new AttoError('WALLET_CHANGED', 'The wallet changed after confirmation. Review it before resetting again.');
-        }
-        this.requireNoPendingPayments();
-        const releases: Array<() => void> = [];
-        try {
-          for (const address of this.addresses()) {
-            const release = this.store.tryAccountLocks([address.index]);
-            if (!release) throw new AttoError('WALLET_BUSY', 'Wait for account operations before resetting this wallet.');
-            releases.push(release);
-          }
-          // Keyring and SQLite cannot share a transaction. Preserve the old
-          // public state behind a durable marker until credential deletion is
-          // verified, so interruption always resumes through this same path.
-          if (!this.store.get(RESET_KEY)) this.store.transaction(() => this.store.set(RESET_KEY, { startedAt: new Date().toISOString() }));
-          if (await this.secrets.get() !== null) await this.secrets.remove!();
-          if (await this.secrets.get() !== null) throw new AttoError('SECRET_STORE_UNAVAILABLE', 'The password store did not remove the wallet credential. Unlock it and run wallet reset again.');
-          this.store.transaction(() => {
-            this.store.clearForReset();
-            this.store.set('settings', defaultSettings());
-          });
-        } finally { for (const release of releases) release(); }
-      }));
-      return { reset: true };
+      return await this.lifecycle.resetWallet(expectedFingerprint);
     } finally {
       this.resetting = false;
       await this.close();
     }
-  }
-
-  private async seed() {
-    this.requireResetFinished();
-    const identity = this.identity();
-    if (!identity) throw new AttoError('WALLET_NOT_INITIALIZED', 'Create or import a wallet through the CLI first.');
-    const seed = await mnemonicSeed(await this.backupMnemonic());
-    const signer = await derivedSigner(seed, 0);
-    if (signer.address.value !== identity.address) {
-      seed.value.fill(0);
-      throw new AttoError('WALLET_MISMATCH', 'The credential does not match this wallet’s public state.');
-    }
-    return seed;
-  }
-
-  private address(index = 0, requireActive = false): WalletAddress {
-    const address = this.addresses().find(address => address.index === index);
-    if (!address) throw new AttoError('ADDRESS_NOT_DERIVED', 'Derive or activate the key index first.');
-    if (requireActive && !address.active) throw new AttoError('ADDRESS_INACTIVE', 'Activate this address before automatic receiving.');
-    return address;
-  }
-
-  private async derive(index: number, active?: boolean) {
-    return this.store.withWalletLock(async () => {
-      this.requireMcpWrite();
-      return this.deriveAddress(index, active);
-    });
-  }
-
-  /** The caller owns the wallet lock, including terminal pool approval. */
-  private async deriveAddress(index: number, active?: boolean) {
-    const addresses = this.addresses();
-    let address = addresses.find(address => address.index === index);
-    if (active === true && !address?.active && addresses.filter(address => address.active).length >= 100) {
-      throw new AttoError('ACTIVE_ADDRESS_LIMIT', 'At most 100 addresses can be active. Deactivate an address before activating another.');
-    }
-    if (!address) {
-      const seed = await this.seed();
-      try {
-        const signer = await derivedSigner(seed, index);
-        address = { index, address: signer.address.value, publicKey: signer.publicKey.toString(), active: active ?? false };
-        addresses.push(address);
-      } finally { seed.value.fill(0); }
-    }
-    if (active !== undefined) address.active = active;
-    this.store.set('addresses', addresses.sort((a, b) => a.index - b.index));
-    return address;
-  }
-
-  private async configure(input: Partial<WalletSettings>) {
-    return this.store.withWalletLock(async () => {
-      this.requireMcpWrite();
-      const settings = { ...this.settings(), ...input };
-      settings.representative = parseAddress(settings.representative).value;
-      settings.minReceiveRaw = amountRaw(settings.minReceiveRaw, 'RAW');
-      const changesNetwork = settings.nodeUrl !== this.settings().nodeUrl || settings.network !== this.settings().network;
-      if (this.ledger.pending().length && changesNetwork) {
-        throw new AttoError('PUBLICATION_UNCERTAIN', 'Resolve pending sends before changing the node or network.');
-      }
-      const releases: Array<() => void> = [];
-      try {
-        if (changesNetwork) for (const address of this.addresses()) {
-          const release = this.store.tryAccountLocks([address.index]);
-          if (!release) throw new AttoError('WALLET_BUSY', 'Wait for account operations before changing the node or network.');
-          releases.push(release);
-        }
-        this.store.set('settings', settings);
-      } finally { for (const release of releases) release(); }
-      await this.serializeWatches(async () => {
-        await this.watchManager?.close();
-        this.watchManager = undefined;
-      });
-      return settings;
-    });
   }
 
   private result(transaction: AttoTransaction, status = 'published') {
@@ -408,10 +310,9 @@ export class AttoApplication {
   }
 
   private async invoke(name: string, args: Record<string, unknown>): Promise<unknown> {
-    const reader = this.reader();
     switch (name) {
       case 'doctor': return runDoctor({ directory: this.store.directory, access: this.mcp ? 'mcp' : undefined, signal: this.doctorAbort.signal, globalDirectory: args.globalDirectory as boolean | undefined });
-      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), effectiveNodeBatchSize: resolveNodeBatchSize(this.settings()), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.background.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), messageSigningIndexes: this.ledger.messageSigningIndexes(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: Boolean(this.store.get(RESET_KEY)) };
+      case 'wallet_status': return { directory: this.store.directory, initialized: Boolean(this.identity()), identity: this.identity() ?? null, settings: this.settings(), effectiveNodeBatchSize: resolveNodeBatchSize(this.settings()), addresses: this.addresses(), autoReceive: this.auto.status(), backgroundReceive: this.background.status(), mcpAccess: this.ledger.mcpAccess(), pool: this.ledger.pool(), messageSigningIndexes: this.ledger.messageSigningIndexes(), pendingSends: this.ledger.pending().map(({ id, hash, status }) => ({ requestId: id, hash, status })), resetPending: this.lifecycle.isResetPending() };
       case 'message_sign': return this.store.withWalletLock(async () => {
         this.requireMcpWrite();
         const index = args.index as number;
@@ -436,23 +337,12 @@ export class AttoApplication {
         const signature = AttoSignature.Companion.parse(args.signature as string);
         return { valid: await signature.isValidMessage(publicKey, signedMessageBytes(args)) };
       }
-      case 'wallet_configure': return this.configure(args as Partial<WalletSettings>);
+      case 'wallet_configure': return this.lifecycle.configure(args as Partial<WalletSettings>);
       case 'address_list': return { addresses: this.addresses() };
-      case 'address_add': return this.store.withWalletLock(async () => {
-        this.requireMcpWrite();
-        const next = this.addresses().reduce((highest, address) => Math.max(highest, address.index), -1) + 1;
-        if (next > 2_147_483_647) throw new AttoError('INDEX_LIMIT', 'The wallet has reached its last account index.');
-        return this.deriveAddress(next, true);
-      });
-      case 'address_derive': return this.derive(args.index as number);
-      case 'address_activate': return this.derive(args.index as number, true);
-      case 'address_deactivate': return this.store.withWalletLock(async () => {
-        this.requireMcpWrite();
-        const index = args.index as number;
-        this.address(index);
-        this.store.set('addresses', this.addresses().map(address => address.index === index ? { ...address, active: false } : address));
-        return this.address(index);
-      });
+      case 'address_add': return this.lifecycle.addAddress();
+      case 'address_derive': return this.lifecycle.derive(args.index as number);
+      case 'address_activate': return this.lifecycle.derive(args.index as number, true);
+      case 'address_deactivate': return this.lifecycle.deactivateAddress(args.index as number);
       case 'labels_set': {
         const address = args.address !== undefined ? parseAddress(args.address as string).value : this.address(args.index as number).address;
         return { network: this.settings().network, ...this.personal.set(this.settings().network, address, args.label as string) };
@@ -472,6 +362,7 @@ export class AttoApplication {
         return this.labels.list(this.settings().network, args.all as boolean | undefined, args.search as string | undefined);
       }
       case 'account_get': {
+        const reader = this.reader();
         if (args.addresses !== undefined) {
           const addresses = this.selectedAddresses(args);
           const accounts = await reader.accounts(addresses);
@@ -481,25 +372,25 @@ export class AttoApplication {
       }
       case 'balances_get': {
         const addresses = this.selectedAddresses(args);
-        const accounts = await reader.accounts(addresses);
+        const accounts = await this.reader().accounts(addresses);
         const raw = accounts.reduce((sum, account) => sum + BigInt(account?.balance.toString() ?? '0'), 0n).toString();
         return { balances: addresses.map((address, i) => {
           const saved = this.addresses().find(value => value.address === address);
           return { address, ...(saved ? { index: saved.index, active: saved.active } : {}), found: Boolean(accounts[i]), balance: amountOutput(accounts[i]?.balance.toString() ?? '0') };
         }), total: amountOutput(raw) };
       }
-      case 'transaction_get': return { transaction: publicModel(await reader.transaction(args.hash as string)) };
-      case 'entry_get': return { entry: publicModel(await reader.entry(args.hash as string)) };
-      case 'representative_weight': return reader.voterWeight(args.address as string);
+      case 'transaction_get': return { transaction: publicModel(await this.reader().transaction(args.hash as string)) };
+      case 'entry_get': return { entry: publicModel(await this.reader().entry(args.hash as string)) };
+      case 'representative_weight': return this.reader().voterWeight(args.address as string);
       case 'history_list': {
         const addresses = this.selectedAddresses(args);
         if (!addresses.length) return { items: [], timedOut: false };
-        return reader.list({ ...args, addresses } as unknown as ListRequest);
+        return this.reader().list({ ...args, addresses } as unknown as ListRequest);
       }
       case 'receivables_list': {
         const addresses = this.selectedAddresses(args);
         if (!addresses.length) return { items: [], timedOut: false };
-        return reader.list({ ...args, event: 'receivable', addresses } as ListRequest);
+        return this.reader().list({ ...args, event: 'receivable', addresses } as ListRequest);
       }
       case 'send': return this.payments.send({ ...args,
         destination: args.destinationIndex !== undefined ? this.address(args.destinationIndex as number).address : args.destination,
@@ -549,16 +440,17 @@ export class AttoApplication {
   }
 
   async call(name: string, input: Record<string, unknown> = {}): Promise<unknown> {
-    if (name === 'wallet_status' || name === 'doctor') this.requireSession();
+    const operation = findOperation(name);
+    if (operation?.allowDuringReset) this.requireSession();
     else this.requireReady();
-    const operation = operationFor(name);
+    if (!operation) throw new AttoError('UNKNOWN_OPERATION', 'Unknown Atto operation.');
     const args = parseOperation(operation, input);
     if (operation.requiresWriteApproval) this.requireMcpWrite();
     const call = (async () => {
       const result = await this.invoke(name, args);
       if (this.internalMarketplaceReceiveSafety && name === 'receive' && (result as { status?: unknown } | null)?.status === 'unknown') return result;
-      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify'].includes(name)) return result;
-      if (this.settings().network === 'LIVE' && ['address_list', 'account_get', 'balances_get', 'transaction_get', 'entry_get', 'representative_weight', 'history_list', 'receivables_list'].includes(name)) await this.labels.global.refresh();
+      if (operation.skipLabelDecoration) return result;
+      if (this.settings().network === 'LIVE' && operation.refreshGlobalDirectory) await this.labels.global.refresh();
       return this.labels.decorate(result, this.settings().network);
     })();
     this.calls.add(call);
@@ -629,7 +521,7 @@ export class AttoApplication {
       if (signer.address.value !== request.controller.address) throw new AttoError('WALLET_MISMATCH', 'The selected controller key changed.');
       validateMarketplaceUserProofApproval(request, { network: 'ATTO', nativeNetwork: 'live' });
       const signature = (await signer.signMessage(new Int8Array(Buffer.from(request.challenge.message, 'utf8')))).toString();
-      return createMarketplaceProofApprovalResponse(request as import('../marketplace/proof-approval.js').MarketplaceProofApprovalRequest, signature);
+      return createMarketplaceProofApprovalResponse(request, signature);
     } finally { seed.value.fill(0); }
   }
 

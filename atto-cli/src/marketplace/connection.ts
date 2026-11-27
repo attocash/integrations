@@ -1,13 +1,15 @@
 import { createHash } from 'node:crypto';
-import { derivedSigner } from '../wallet/signing.js';
-import type { WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
-import type { StateStore } from '../storage/state.js';
 import type { AttoSeed } from '@attocash/commons-core';
 import { AttoError } from '../domain/errors.js';
+import { readBoundedText } from '../network/http.js';
+import type { StateStore } from '../storage/state.js';
+import { derivedSigner } from '../wallet/signing.js';
+import type { WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
 import {
   createMarketplaceProofApprovalResponse, inspectMarketplaceProofApproval,
   type MarketplaceProofApprovalResponse,
 } from './proof-approval.js';
+import { isProofWindowValid, parseControllerProofFrame } from './proof-frame.js';
 
 const CONNECTION_KEY = 'marketplace.connection';
 const RESPONSE_BYTES = 65_536;
@@ -179,6 +181,7 @@ export class MarketplaceConnectionClient {
     try {
       const signer = await derivedSigner(seed, request.controller.index);
       if (signer.address.value !== request.controller.address) throw new AttoError('WALLET_MISMATCH', 'The Marketplace approval controller does not match this wallet key.');
+      this.inspectProofApproval(request);
       const signature = (await signer.signMessage(new Int8Array(Buffer.from(request.challenge.message, 'utf8')))).toString();
       return createMarketplaceProofApprovalResponse(request, signature);
     } finally { seed.value.fill(0); }
@@ -227,8 +230,13 @@ export class MarketplaceConnectionClient {
       throw new AttoError('MARKETPLACE_RESOURCE_MISMATCH', 'Marketplace redirected away from the configured origin.');
     }
     let raw: string;
-    try { raw = await readBounded(response, RESPONSE_BYTES); }
-    catch {
+    try {
+      raw = await readBoundedText(response, {
+        maxBytes: RESPONSE_BYTES,
+        fatalUtf8: true,
+        onTooLarge: () => { throw new Error('response too large'); },
+      });
+    } catch {
       throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid or oversized response.');
     }
     let json: unknown;
@@ -251,28 +259,6 @@ export class MarketplaceConnectionClient {
   private httpFailure(status: number): AttoError {
     return new AttoError('MARKETPLACE_HTTP', `Marketplace returned HTTP ${status}. Review the connection and retry from the local terminal.`, { httpStatus: status });
   }
-
-
-}
-
-async function readBounded(response: Response, maxBytes: number): Promise<string> {
-  if (!response.body) return '';
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > maxBytes) throw new Error('response too large');
-      chunks.push(value);
-    }
-    return new TextDecoder('utf-8', { fatal: true }).decode(Buffer.concat(chunks));
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
 }
 
 function parseProofChallenge(input: unknown, connection: Pick<MarketplaceConnection, 'audience' | 'controllerAddress'> & Partial<Pick<MarketplaceConnection, 'accountId' | 'identityId'>>): ProofChallenge {
@@ -281,18 +267,19 @@ function parseProofChallenge(input: unknown, connection: Pick<MarketplaceConnect
     || typeof value.issuedAt !== 'string' || typeof value.expiresAt !== 'string') {
     throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an invalid controller proof challenge.');
   }
-  const match = /^Marketplace Agent Controller Proof v1\nAudience: ([^\n]+)\nNetwork: live\nAddress: (atto:\/\/[a-z2-7]{61})\nPurpose: login\nRequest ID: ([0-9a-f-]{36})\nBinding Hash: ([0-9a-f]{64})\nNonce: ([0-9a-f]{64})\nIssued At: ([^\n]+)\nExpiration Time: ([^\n]+)$/.exec(value.message);
-  if (!match || match[1] !== connection.audience || match[2] !== connection.controllerAddress
-    || match[3] !== value.challengeId || match[4] !== createHash('sha256').update(['marketplace-login-v1', value.accountId, value.controllerId].join('\n'), 'utf8').digest('hex')
-    || match[6] !== value.issuedAt || match[7] !== value.expiresAt
+  const frame = parseControllerProofFrame(value.message, 'Marketplace Agent Controller Proof v1', { requireBindingHash: true });
+  const expectedHash = createHash('sha256').update(['marketplace-login-v1', value.accountId, value.controllerId].join('\n'), 'utf8').digest('hex');
+  if (!frame || frame.audience !== connection.audience || frame.network !== 'live'
+    || !/^atto:\/\/[a-z2-7]{61}$/.test(frame.address) || frame.address !== connection.controllerAddress
+    || frame.purpose !== 'login' || frame.challengeId !== value.challengeId || frame.bindingHash !== expectedHash
+    || frame.issuedAt !== value.issuedAt || frame.expiresAt !== value.expiresAt
     || (connection.accountId !== undefined && value.accountId !== connection.accountId)
     || (connection.identityId !== undefined && value.controllerId !== connection.identityId)) {
     throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned a controller proof outside the configured audience or identity.');
   }
   const issuedAt = instant(value.issuedAt);
   const expiresAt = instant(value.expiresAt);
-  const now = Date.now();
-  if (issuedAt > now + 30_000 || expiresAt <= now || expiresAt <= issuedAt || expiresAt - issuedAt > 300_000) {
+  if (!isProofWindowValid(issuedAt, expiresAt)) {
     throw new AttoError('MARKETPLACE_PROTOCOL', 'Marketplace returned an expired or out-of-window controller proof.');
   }
   return value as unknown as ProofChallenge;

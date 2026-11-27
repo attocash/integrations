@@ -357,7 +357,6 @@ test('ordinary payment mutations preserve historical records without upgrading t
   for (const record of historical) {
     assert.throws(() => ledger.reserve({ ...record, id: `${record.id}-replacement` }), { code: 'INVALID_REQUEST' });
     assert.throws(() => ledger.signed(record.id, 'replacement-hash', '{}'));
-    assert.throws(() => ledger.externalStatus(record.id, { marketplaceState: 'ACCEPTED' }), { code: 'SEND_STATE' });
   }
   assert.equal(JSON.stringify(store.get('spending.records').slice(0, 2)), before);
 });
@@ -369,8 +368,10 @@ test('historical journal compatibility still rejects malformed and hybrid paymen
   const variants = [
     { ...valid, raw: '-1' },
     ...[{ kind: 'market-unknown' }, { marketState: undefined }, { marketState: 'INVALID' },
+      { marketState: ['PENDING'] },
       { marketplaceState: 'PENDING' }, { version: 2 }, { requirementHash: 'invalid' },
       { nativeState: 'unknown' }].map(change => ({ ...valid, external: { ...valid.external, ...change } })),
+    { ...valid, external: { ...valid.external, kind: 'marketplace-topup', marketState: undefined, marketplaceState: ['PENDING'] } },
   ];
 
   // When each malformed record is loaded from durable state.
@@ -381,5 +382,78 @@ test('historical journal compatibility still rejects malformed and hybrid paymen
     // Then it remains rejected without a cleanup or migration write.
     assert.throws(() => ledger.journalList(), { code: 'INVALID_STATE' });
     assert.equal(JSON.stringify(store.get('spending.records')), before);
+  }
+});
+
+test('journal validation rejects corrupted durable relay invariants and invalid external payment identifiers', t => {
+  // Given a valid durable native relay record and a historical external record.
+  const { store, ledger } = fixture(t);
+  const requestId = '11111111-1111-4111-8111-111111111111';
+  const sender = `atto://${'a'.repeat(61)}`;
+  const recipient = `atto://${'b'.repeat(61)}`;
+  const baseRelay = {
+    version: 1,
+    mode: 'DURABLE_NATIVE',
+    requestId,
+    origin: 'https://marketplace.example',
+    audience: 'marketplace',
+    index: 0,
+    terms: {
+      paymentId: requestId,
+      purpose: 'SHOP_ORDER',
+      sourceReference: 'order-1',
+      versionHash: '1'.repeat(64),
+      termsHash: '2'.repeat(64),
+      ownerAccountId: '22222222-2222-4222-8222-222222222222',
+      asset: 'ATTO',
+      network: 'atto:local',
+      senderAddress: sender,
+      recipientAddress: recipient,
+      amountAtomic: '20',
+      baselineHeight: '1',
+      baselineFrontier: '3'.repeat(64),
+    },
+  };
+  const baseRecord = {
+    id: requestId,
+    index: 0,
+    sourceAddress: sender,
+    destination: recipient,
+    network: 'LOCAL',
+    raw: '20',
+    createdAt: 1_700_000_000_000,
+    status: 'reserved',
+    relay: baseRelay,
+  };
+  const validSignedRecord = {
+    ...baseRecord,
+    status: 'signed',
+    hash: '4'.repeat(64),
+    blockJson: '{}',
+    transactionJson: '{}',
+    candidateBinding: '5'.repeat(64),
+    relay: { ...baseRelay, nativePayloadJson: '{"transaction":{}}' },
+  };
+  const validExternal = historicalPayment('market-topup', 'historical-topup', '20');
+  for (const validRecord of [baseRecord, validSignedRecord, validExternal]) {
+    store.set('spending.records', [validRecord]);
+    assert.equal(ledger.journalList().items.length, 1);
+  }
+  const corrupted = [
+    { ...baseRecord, external: validExternal.external },
+    { ...baseRecord, relay: { ...baseRelay, index: 1 } },
+    { ...baseRecord, sourceAddress: undefined },
+    { ...baseRecord, network: undefined },
+    { ...baseRecord, relay: { ...baseRelay, nativePayloadJson: '{"transaction":{}}' } },
+    { ...validSignedRecord, relay: baseRelay },
+    { ...validExternal, external: { ...validExternal.external, paymentIdentifier: 'bad identifier with spaces!!' } },
+  ];
+
+  // When each corrupted record is persisted and read back through the ledger.
+  for (const record of corrupted) {
+    store.set('spending.records', [record]);
+
+    // Then the ledger fails closed with INVALID_STATE.
+    assert.throws(() => ledger.journalList(), { code: 'INVALID_STATE' });
   }
 });

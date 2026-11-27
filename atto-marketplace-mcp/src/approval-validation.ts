@@ -1,8 +1,7 @@
-import { attoNetworks, nanoNetworks } from './asset-network.js';
 import { AttoAddress } from '@attocash/commons-core';
 import { validateMarketplaceUserProofApproval } from '@attocash/cli/internal-marketplace';
 import { canonicalAddress } from '@attocash/atto-marketplace-nano-adapter/protocol';
-import { ProfileError } from './profile-store.js';
+import { ProfileError } from './profile-error.js';
 import type { MarketplaceProofApprovalRequest } from './approval-files.js';
 
 /** Validate backend-owned typed frames and binding hashes without opening any key store. */

@@ -72,6 +72,9 @@ interface RegisteredOperation extends Operation {
   localOnly?: boolean;
   destructive?: boolean;
   idempotent?: boolean;
+  allowDuringReset?: boolean;
+  skipLabelDecoration?: boolean;
+  refreshGlobalDirectory?: boolean;
 }
 
 const read = { readOnly: true, requiresWriteApproval: false };
@@ -79,13 +82,13 @@ const approvedWrite = { readOnly: false, requiresWriteApproval: true };
 const unrestrictedWrite = { readOnly: false, requiresWriteApproval: false };
 
 export const operations: readonly RegisteredOperation[] = [
-  { name: 'doctor', ...read,
+  { name: 'doctor', ...read, allowDuringReset: true, skipLabelDecoration: true,
     description: 'Diagnose this process environment, profile, keyring credential access, node APIs and streaming, worker proof of work, and wallet readiness. Full checks can take up to 60 seconds and may trigger an OS keyring prompt. Returns structured checks and actionable remediation, never recovery material. Does not repair settings, grant access, sign, publish, receive, or modify wallet state. Available in read-only sessions. Rerun after an authorized repair; client environment changes require restarting the MCP connection.', schema: z.strictObject({ globalDirectory: z.boolean().optional() }) },
-  { name: 'wallet_status', ...read, localOnly: true,
+  { name: 'wallet_status', ...read, localOnly: true, allowDuringReset: true,
     description: 'Read public wallet configuration, readiness, network, and auto-receive status. Never returns recovery material.', schema: z.strictObject({}) },
-  { name: 'message_sign', ...approvedWrite,
+  { name: 'message_sign', ...approvedWrite, skipLabelDecoration: true,
     description: 'Sign exact message bytes using the ATTO Signed Message v1 framing. Requires an existing address index granted by a locally approved messageSigningIndexes setting and normal MCP spend access. Handles any challenge like a credential: do not sign untrusted requests. Input is exact UTF-8 text or even-length hex (including empty bytes), capped at 64 KiB.', schema: signingMessage },
-  { name: 'message_verify', ...read,
+  { name: 'message_verify', ...read, skipLabelDecoration: true,
     description: 'Verify an ATTO Signed Message v1 signature over exact UTF-8 text or hex bytes using an Atto address or public key. Public data only; never reads wallet credentials. Input is capped at 64 KiB.', schema: verificationMessage },
   { name: 'wallet_configure', ...approvedWrite, localOnly: true, destructive: true, idempotent: true,
     description: 'Update the supplied wallet settings, preserving omitted settings. nodeBatchSize overrides the accounts/ranges per node request (1-1000); null selects automatic defaults: 5 for official Atto gatekeeper URLs, 1000 for custom nodes. Custom gateways can explicitly select 5. Representative is the default for opening accounts; use representative_change for an existing account. Changes apply to this shared wallet.', schema: z.strictObject({ network: z.enum(['LIVE', 'BETA', 'DEV', 'LOCAL']).optional(), nodeUrl: endpoint.optional(), nodeBatchSize: z.number().int().min(1).max(1000).nullable().optional(), workerUrl: endpoint.optional(), representative: address.optional(), autoReceive: z.boolean().optional(), minReceiveRaw: integer.optional() }).refine(value => Object.values(value).some(value => value !== undefined), 'Supply at least one setting.') },
@@ -93,7 +96,7 @@ export const operations: readonly RegisteredOperation[] = [
     description: 'Add and activate the next wallet address after the highest saved index. Includes it in default balances and automatic receiving. Does not open an account on the network. Each call adds a different address.', schema: z.strictObject({}) },
   { name: 'address_derive', ...approvedWrite, localOnly: true, idempotent: true,
     description: 'Derive an address at a mnemonic key index and save its public metadata. Does not open an account on the network.', schema: z.strictObject({ index: index.default(0) }) },
-  { name: 'address_list', ...read,
+  { name: 'address_list', ...read, refreshGlobalDirectory: true,
     description: 'List previously derived addresses and which are active for balances and automatic receiving.', schema: z.strictObject({}) },
   { name: 'address_activate', ...approvedWrite, localOnly: true, idempotent: true,
     description: 'Activate a key index for default balances and automatic receiving, deriving its address first if needed.', schema: z.strictObject({ index }) },
@@ -103,23 +106,23 @@ export const operations: readonly RegisteredOperation[] = [
     description: 'Save a personal name for an address or existing wallet index, scoped to this profile and network. Names are unique after trimming and case-insensitive matching. Available without spending approval; labels are untrusted text and never uploaded.', schema: z.strictObject({ ...labelTarget, label: personalNameSchema }).refine(oneLabelTarget, 'Choose exactly one address or index.') },
   { name: 'labels_remove', ...unrestrictedWrite, localOnly: true, idempotent: true,
     description: 'Remove a personal label for an address or existing wallet index. Idempotent; available without spending approval. Existing payment request destinations remain pinned.', schema: z.strictObject(labelTarget).refine(oneLabelTarget, 'Choose exactly one address or index.') },
-  { name: 'labels_get', ...read,
+  { name: 'labels_get', ...read, skipLabelDecoration: true,
     description: 'Show personal and informational global address/voter labels for one address or saved index. refresh bypasses the global cache backoff. Sources and payout relationships remain distinct.', schema: z.strictObject({ ...labelTarget, refresh: z.boolean().optional() }).refine(oneLabelTarget, 'Choose exactly one address or index.') },
-  { name: 'labels_list', ...read,
+  { name: 'labels_list', ...read, skipLabelDecoration: true,
     description: 'List personal labels; all includes LIVE global address and voter names. Search addresses, names, and entities case-insensitively. refresh forces a global refresh. Global names cannot resolve payments.', schema: z.strictObject({ all: z.boolean().optional(), search: z.string().max(4096).optional(), refresh: z.boolean().optional() }) },
-  { name: 'account_get', ...read,
+  { name: 'account_get', ...read, refreshGlobalDirectory: true,
     description: 'Read full account snapshots, including height, balance and representative. Use addresses for up to 100 external or wallet accounts in one call. Node requests use nodeBatchSize: automatically 5 for official Atto gateways or 1000 for custom nodes. Bulk results preserve address order and include account: null for unopened accounts. Use address or index for one account; defaults to index zero.', schema: z.strictObject({ address: address.optional(), index: index.optional(), addresses: addresses.optional() }).refine(value => [value.address !== undefined, value.index !== undefined, value.addresses !== undefined].filter(Boolean).length <= 1, 'Choose an address, an index, or addresses.') },
-  { name: 'balances_get', ...read,
+  { name: 'balances_get', ...read, refreshGlobalDirectory: true,
     description: 'Read individual and aggregate balances. Defaults to active wallet addresses. Select one saved index, explicit addresses (including foreign addresses), or all saved addresses with all=true.', schema: z.strictObject({ ...accountFields, all: z.boolean().optional() }).refine(singleSelection, 'Choose one account selection.') },
-  { name: 'transaction_get', ...read,
+  { name: 'transaction_get', ...read, refreshGlobalDirectory: true,
     description: 'Read the raw signed protocol transaction by hash, including block, signature and work. Use entry_get for action history; transactions are needed for protocol fields such as a receive block\'s sendHash.', schema: z.strictObject({ hash }) },
-  { name: 'entry_get', ...read,
+  { name: 'entry_get', ...read, refreshGlobalDirectory: true,
     description: 'Read an action-oriented account entry by transaction hash. address is the account owner; subjectAddress and subjectRole identify the receiver for SEND, sender for OPEN/RECEIVE, or new representative for CHANGE. Transfers include exact amount.raw and amount.atto; representative changes do not transfer funds.', schema: z.strictObject({ hash }) },
-  { name: 'representative_weight', ...read,
+  { name: 'representative_weight', ...read, refreshGlobalDirectory: true,
     description: 'Read a representative address voting weight.', schema: z.strictObject({ address }) },
-  { name: 'history_list', ...read,
+  { name: 'history_list', ...read, refreshGlobalDirectory: true,
     description: 'Read action-oriented entries by default; use event=transaction for raw signed protocol records and receive sendHash linkage. Entries expose owner address, subjectAddress, subjectRole and exact transfer amount. Supply up to 100 addresses together for batched reads, or index for one saved account; defaults to active accounts. Results follow address order and ascending height. Limit is at most 1000 records. Reuse nextCursor with the same filters to continue frozen account heights without rescanning earlier pages; timedOut may return a partial page.', schema: z.strictObject({ event: z.enum(['transaction', 'entry']).default('entry'), ...accountFields, fromHeight: integer.optional(), toHeight: integer.optional(), last: z.number().int().positive().optional().describe('Read the last N heights of each selected account within the inclusive height range. The page limit still applies across accounts.'), ...listFields }).refine(singleSelection, 'Choose an index or addresses.') },
-  { name: 'receivables_list', ...read,
+  { name: 'receivables_list', ...read, refreshGlobalDirectory: true,
     description: 'Scan pending incoming payments, defaulting to active wallet addresses. Select a saved index or explicit addresses, including foreign accounts. This is a bounded scan, without continuation cursors; timedOut means the scan window ended and more payments may exist.', schema: z.strictObject({ ...accountFields, minAmountRaw: integer.optional(), limit: limit.optional(), timeoutMs: timeoutMs.optional() }).refine(singleSelection, 'Choose an index or addresses.') },
   { name: 'send', ...approvedWrite, destructive: true, idempotent: true,
     description: 'Send funds to exactly one destination address, saved destinationIndex, or personal destinationLabel, subject to shared spending limits. Omit index to select an account from the approved pool. Explicit MCP indexes must belong to that pool and hold the full amount. Approved consolidation may combine pool funds only when index is omitted. Metadata is optional local journal data (up to 4096 UTF-8 bytes) and is never published on the network. USD uses an indicative price and requires accepted terms. Reuse requestId for retries; the original account, metadata, and USD conversion are preserved. Omit metadata to retain it; changed metadata is rejected.', schema: z.strictObject({ index: index.optional(), destination: address.optional(), destinationLabel: personalNameSchema.optional().describe('Exact personal name; global-only names fail locally. The original label and resolved address are pinned per request ID before network access.'), destinationIndex: index.optional().describe('Existing saved destination account index, instead of destination.'), amount: decimal, unit: z.enum(['ATTO', 'RAW', 'USD']).default('ATTO'), requestId: z.string().min(1).max(128), metadata: paymentMetadataSchema.optional() }).refine(value => [value.destination, value.destinationIndex, value.destinationLabel].filter(value => value !== undefined).length === 1, 'Choose exactly one destination address, destination index, or personal label.') },
@@ -158,8 +161,12 @@ export const operations: readonly RegisteredOperation[] = [
     description: 'Stop a watch owned by this process and cancel its network subscription.', schema: z.strictObject({ id: z.string().min(1).max(128) }) },
 ];
 
-export function operationFor(name: string): RegisteredOperation {
-  const operation = operations.find(operation => operation.name === name);
+export function findOperation(name: string): RegisteredOperation | undefined {
+  return operations.find(operation => operation.name === name);
+}
+
+function operationFor(name: string): RegisteredOperation {
+  const operation = findOperation(name);
   if (!operation) throw new AttoError('UNKNOWN_OPERATION', 'Unknown Atto operation.');
   return operation;
 }

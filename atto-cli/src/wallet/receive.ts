@@ -1,7 +1,8 @@
-import { AttoOpenBlock, AttoReceivable, AttoReceiveBlock, AttoSeed, AttoSendBlock, AttoTransaction, toAttoIndex } from '@attocash/commons-core';
+import { AttoOpenBlock, AttoReceiveBlock, AttoSeed, AttoSendBlock, AttoTransaction, toAttoIndex } from '@attocash/commons-core';
+import { parseAddress } from '../domain/address.js';
 import { amountOutput, amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
-import { NodeReader, parseAddress, publicModel } from '../network/reader.js';
+import { NodeReader, publicModel } from '../network/reader.js';
 import type { StateStore } from '../storage/state.js';
 import { signingWallet } from './signing.js';
 import type { ReceiveRequest, WalletAddress, WalletSettings } from './types.js';
@@ -26,23 +27,6 @@ export class WalletReceiver {
 
   private result(transaction: AttoTransaction, status = 'published') {
     return { status, hash: transaction.hash.toString(), transaction: publicModel(transaction) };
-  }
-
-  private async pendingReceivable(address: string, hash: string): Promise<AttoReceivable | undefined> {
-    let found: AttoReceivable | undefined;
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 2000);
-    try {
-      await this.context.reader().stream({ event: 'receivable', addresses: [address], minAmountRaw: '1' }, model => {
-        const receivable = model as AttoReceivable;
-        if (receivable.hash.toString().toUpperCase() === hash.toUpperCase()) { found = receivable; controller.abort(); }
-      }, controller.signal);
-    } catch (error) { if (!controller.signal.aborted) throw error; }
-    finally { clearTimeout(timer); }
-    if (!found && controller.signal.aborted) {
-      throw new AttoError('RECEIVABLE_LOOKUP_TIMEOUT', 'Checking the pending payment timed out. Retry receiving it; its absence has not been confirmed.');
-    }
-    return found;
   }
 
   requireReceivesResolved(indexes: number[], allowedHash?: string): void {
@@ -180,7 +164,7 @@ export class WalletReceiver {
         // Refresh pending state below: an unconsumed send permits retrying receive
         // against the current frontier without risking a second debit.
       }
-      const receivable = await this.pendingReceivable(address.address, hash);
+      const receivable = await this.context.reader().findPendingReceivable(address.address, hash, { throwOnTimeout: true });
       if (!receivable) throw new AttoError('RECEIVABLE_NOT_PENDING', 'The payment is not pending for this address; it may already have been received.');
       if (receivable.receiverAddress.value !== address.address) throw new AttoError('WRONG_RECEIVER', 'The payment belongs to a different address.');
       if (automatic && BigInt(receivable.amount.toString()) < BigInt(this.context.settings().minReceiveRaw)) {

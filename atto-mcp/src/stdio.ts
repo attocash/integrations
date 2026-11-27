@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
-import { Command, CommanderError, Option } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { createApplication, errorResult, runDoctor } from '@attocash/cli/core';
 import { dedicatedMcpDirectory } from '@attocash/cli/profiles';
 import { approveLimitsProposal, rejectLimitsProposal, setupMcp, formatHumanResult, configureHelp, commandErrorMessage } from '@attocash/cli/terminal';
@@ -43,9 +43,9 @@ export async function runMcp(argv = process.argv): Promise<void> {
   program.command('setup').description('Choose a wallet and approve MCP access in this terminal')
     .action(async () => { process.stdout.write(`${JSON.stringify(await setupMcp({ directory: directory() }), null, 2)}\n`); });
   const limits = program.command('limits').description('Approve or reject proposed limits in this terminal');
-  limits.command('approve <id>').description('Review and approve an immutable proposal')
+  limits.command('approve').argument('<id>', 'Proposal ID').description('Review and approve an immutable proposal')
     .action(async id => output(await approveLimitsProposal({ id, directory: directory() ?? dedicatedMcpDirectory() })));
-  limits.command('reject <id>').description('Review and reject an immutable proposal')
+  limits.command('reject').argument('<id>', 'Proposal ID').description('Review and reject an immutable proposal')
     .action(async id => output(await rejectLimitsProposal({ id, directory: directory() ?? dedicatedMcpDirectory() })));
   const parserCommand = configureHelp(program, {
     'atto-mcp': 'atto-mcp setup\n  atto-mcp --data-dir <wallet-directory>',

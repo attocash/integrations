@@ -1,7 +1,8 @@
+import type { AmountUnit } from '../domain/amount.js';
 import type { PaymentMetadata } from '../spending/journal.js';
 
+export type { AmountUnit } from '../domain/amount.js';
 export type NetworkName = 'LIVE' | 'BETA' | 'DEV' | 'LOCAL';
-export type AmountUnit = 'ATTO' | 'RAW';
 export interface SpendingRule { days: number; amount: string; unit: AmountUnit }
 export interface SpendingPolicy {
   perRequest: { amount: string; unit: AmountUnit } | null;

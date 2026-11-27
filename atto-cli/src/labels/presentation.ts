@@ -1,5 +1,5 @@
 import { AttoAlgorithm, AttoPublicKey } from '@attocash/commons-core';
-import { parseAddress } from '../network/reader.js';
+import { parseAddress } from '../domain/address.js';
 import type { NetworkName } from '../wallet/types.js';
 import { GlobalDirectory, DIRECTORY_URL } from './directory.js';
 import { PersonalLabels } from './personal.js';

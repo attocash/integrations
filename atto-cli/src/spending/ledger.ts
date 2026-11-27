@@ -1,16 +1,16 @@
-import { paymentTransactionMatches, type AttoPaymentNetwork } from './atto-x402.js';
-import { parseDurableRelayRequest, parseRelayOffer, validateRelayOfferRefresh, type RelayRecord } from '../marketplace/relay.js';
-import { validateDestinationBinding, type DestinationBinding } from './destination.js';
-import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
-import { AttoBlock, AttoSendBlock, AttoTransaction } from '@attocash/commons-core';
 import { amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
+import { parseDurableRelayRequest, parseRelayOffer, validateRelayOfferRefresh, type RelayRecord } from '../marketplace/relay.js';
 import type { StateStore } from '../storage/state.js';
 import type { AccountPool, SpendingPolicy, SpendingRule } from '../wallet/types.js';
-import { paymentMetadataSchema, validatePaymentPlan, validateNativeCandidate, type ConsolidationStep, type PaymentMetadata, type PaymentPlan } from './journal.js';
+import type { AttoPaymentNetwork } from './atto-x402.js';
+import { DAY_MS, SpendingAuthority, type LimitsProposal, type McpAccess, type ProposalWallet } from './authority.js';
+import { validateDestinationBinding, type DestinationBinding } from './destination.js';
+import { paymentMetadataSchema, validateNativeCandidate, validatePaymentPlan, type ConsolidationStep, type PaymentMetadata, type PaymentPlan } from './journal.js';
 
 export type { ConsolidationStep, PaymentMetadata, PaymentPlan } from './journal.js';
+export type { LimitsProposal, McpAccess, ProposalWallet } from './authority.js';
 
 export interface SendRecord {
   id: string;
@@ -36,6 +36,7 @@ export interface SendRecord {
   relay?: RelayRecord;
 }
 
+/** Historical wallet accounting only; these records cannot authorize current Marketplace payments. */
 export interface ExternalPaymentRecord {
   kind: 'marketplace-topup' | 'marketplace-intent';
   version: 1;
@@ -53,190 +54,40 @@ export interface ExternalPaymentRecord {
   receiveStatus?: 'PENDING' | 'ACCEPTED' | 'SETTLED' | 'REJECTED' | null;
 }
 
-/** Historical wallet accounting only; these records cannot authorize current Marketplace payments. */
 interface LegacyExternalPaymentRecord extends Omit<ExternalPaymentRecord, 'kind' | 'marketplaceState'> {
   kind: 'market-topup' | 'market-intent';
   marketState: ExternalPaymentRecord['marketplaceState'];
   marketplaceState?: never;
 }
 
-export interface ExternalPaymentSecrets {
-  version: 1;
-  paymentKind?: 'marketplace-topup' | 'marketplace-intent';
-  apiUrl: string;
-  audience: string;
-  accountId?: string;
-  agentId?: string;
-  identityId?: string;
-  walletFingerprint: string;
-  controllerIndex?: number;
-  controllerAddress?: string;
-  requirementJson: string;
-  transactionJson?: string;
-  paymentJson?: string;
-  paymentSignature?: string;
-}
-
 export type SendReservation = Pick<SendRecord, 'id' | 'index' | 'destination' | 'raw' | 'createdAt'>
-  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding' | 'relay'>>
-  & { external?: ExternalPaymentRecord };
+  & Partial<Pick<SendRecord, 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection' | 'plan' | 'destinationBinding' | 'relay'>>;
 
-const DAY_MS = 86_400_000;
-const POLICY_KEY = 'spending.policy';
 const RECORDS_KEY = 'spending.records';
-const EXTERNAL_SECRETS_KEY = 'spending.externalSecrets';
-const REVISION_KEY = 'spending.policyRevision';
-const ACCESS_KEY = 'spending.mcpAccess';
-const PROPOSAL_KEY = 'spending.proposal';
-const POOL_KEY = 'spending.pool';
-const MESSAGE_SIGNING_INDEXES_KEY = 'signing.messageIndexes';
-
-export type McpAccess = 'read-only' | 'spend';
-
-export interface ProposalWallet {
-  directory: string;
-  walletFingerprint: string | null;
-  network: string;
-}
-
-export interface LimitsProposal extends ProposalWallet {
-  id: string;
-  policy: SpendingPolicy;
-  access: McpAccess;
-  createdAt: number;
-  expiresAt: number;
-  baseRevision: number;
-  status: 'pending' | 'approved' | 'rejected';
-  decidedAt?: number;
-  pool?: AccountPool;
-  messageSigningIndexes?: number[];
-}
 
 export class SpendLedger {
-  constructor(private readonly store: StateStore) {}
+  private readonly authority: SpendingAuthority;
 
-  policy(): SpendingPolicy {
-    const policy = this.store.get<SpendingPolicy>(POLICY_KEY) ?? { perRequest: null, rolling: [] };
-    this.validatePolicy(policy);
-    return policy;
+  constructor(private readonly store: StateStore) {
+    this.authority = new SpendingAuthority(store);
   }
 
-  setPolicy(policy: SpendingPolicy): void {
-    this.validatePolicy(policy);
-    this.store.transaction(() => this.replacePolicy(policy));
-  }
-
-  mcpAccess(): McpAccess {
-    const access = this.store.get<McpAccess>(ACCESS_KEY) ?? 'read-only';
-    if (access !== 'read-only' && access !== 'spend') throw new AttoError('INVALID_STATE', 'The saved MCP access setting is invalid.');
-    return access;
-  }
-
-  pool(): AccountPool {
-    const pool = this.store.get<AccountPool>(POOL_KEY) ?? { indexes: [0], consolidate: false };
-    this.validatePool(pool);
-    return pool;
-  }
-
-  messageSigningIndexes(): number[] {
-    const indexes = this.store.get<number[]>(MESSAGE_SIGNING_INDEXES_KEY) ?? [];
-    this.validateMessageSigningIndexes(indexes);
-    return indexes;
-  }
+  policy(): SpendingPolicy { return this.authority.policy(); }
+  setPolicy(policy: SpendingPolicy): void { this.authority.setPolicy(policy); }
+  mcpAccess(): McpAccess { return this.authority.mcpAccess(); }
+  pool(): AccountPool { return this.authority.pool(); }
+  messageSigningIndexes(): number[] { return this.authority.messageSigningIndexes(); }
+  authorityRevision(): number { return this.authority.revision(); }
 
   proposePolicy(policy: SpendingPolicy, access: McpAccess, wallet: ProposalWallet, pool = this.pool(),
     messageSigningIndexes = this.messageSigningIndexes()): LimitsProposal {
-    this.validatePolicy(policy);
-    this.validatePool(pool);
-    this.validateMessageSigningIndexes(messageSigningIndexes);
-    if (access !== 'read-only' && access !== 'spend') throw new AttoError('INVALID_POLICY', 'Choose read-only or spend access for MCP.');
-    const createdAt = Date.now();
-    const proposal: LimitsProposal = {
-      ...wallet, id: randomUUID(), policy, access, pool, messageSigningIndexes: [...messageSigningIndexes], createdAt, expiresAt: createdAt + DAY_MS,
-      baseRevision: this.revision(), status: 'pending',
-    };
-    // One immutable proposal is current per profile. A new request gets a new
-    // ID, so an approval already displayed in another terminal cannot change it.
-    this.store.set(PROPOSAL_KEY, proposal);
-    return proposal;
+    return this.authority.proposePolicy(policy, access, wallet, pool, messageSigningIndexes);
   }
 
-  proposal(): LimitsProposal | null {
-    const proposal = this.store.get<LimitsProposal>(PROPOSAL_KEY);
-    if (proposal === undefined) return null;
-    try {
-      if (!proposal || typeof proposal.id !== 'string' || !proposal.id || proposal.id.length > 128
-        || !['pending', 'approved', 'rejected'].includes(proposal.status)
-        || !['read-only', 'spend'].includes(proposal.access)
-        || !Number.isSafeInteger(proposal.createdAt) || proposal.createdAt < 0
-        || !Number.isSafeInteger(proposal.expiresAt) || proposal.expiresAt <= proposal.createdAt
-        || !Number.isSafeInteger(proposal.baseRevision) || proposal.baseRevision < 0
-        || typeof proposal.directory !== 'string' || typeof proposal.network !== 'string'
-        || (proposal.walletFingerprint !== null && typeof proposal.walletFingerprint !== 'string')) throw new Error();
-      this.validatePolicy(proposal.policy);
-      if (proposal.pool !== undefined) this.validatePool(proposal.pool);
-      const messageSigningIndexes = proposal.messageSigningIndexes ?? [];
-      this.validateMessageSigningIndexes(messageSigningIndexes);
-      return { ...proposal, messageSigningIndexes };
-    } catch {
-      throw new AttoError('INVALID_STATE', 'The saved limit proposal is invalid.');
-    }
-  }
-
-  reviewProposal(id: string, wallet: ProposalWallet): LimitsProposal {
-    const proposal = this.proposal();
-    if (!proposal || proposal.id !== id) throw new AttoError('PROPOSAL_NOT_FOUND', 'This proposal is unavailable or was replaced. Request the current limits before trying again.');
-    if (proposal.directory !== wallet.directory || proposal.walletFingerprint !== wallet.walletFingerprint || proposal.network !== wallet.network) {
-      throw new AttoError('PROPOSAL_STALE', 'The proposal belongs to a different wallet, profile, or network. Request a new proposal.');
-    }
-    if (proposal.status === 'pending') {
-      if (Date.now() >= proposal.expiresAt) throw new AttoError('PROPOSAL_EXPIRED', 'This proposal expired. Request a new proposal.');
-      if (proposal.baseRevision !== this.revision()) throw new AttoError('PROPOSAL_STALE', 'The policy changed after this proposal was created. Request a new proposal.');
-    }
-    return proposal;
-  }
-
-  approveProposal(id: string, wallet: ProposalWallet): void {
-    this.store.transaction(() => {
-      const proposal = this.reviewProposal(id, wallet);
-      if (proposal.status === 'approved') return;
-      if (proposal.status === 'rejected') throw new AttoError('PROPOSAL_REJECTED', 'This proposal was rejected. Request a new proposal.');
-      this.replacePolicy(proposal.policy);
-      this.store.set(ACCESS_KEY, proposal.access);
-      if (proposal.pool !== undefined) this.store.set(POOL_KEY, proposal.pool);
-      this.store.set(MESSAGE_SIGNING_INDEXES_KEY, proposal.messageSigningIndexes ?? []);
-      this.store.set(PROPOSAL_KEY, { ...proposal, status: 'approved', decidedAt: Date.now() });
-    });
-  }
-
-  rejectProposal(id: string, wallet: ProposalWallet): void {
-    this.store.transaction(() => {
-      const proposal = this.reviewProposal(id, wallet);
-      if (proposal.status === 'approved') throw new AttoError('PROPOSAL_APPROVED', 'This proposal was already approved. Propose a new policy to change it.');
-      if (proposal.status === 'rejected') return;
-      this.store.set(PROPOSAL_KEY, { ...proposal, status: 'rejected', decidedAt: Date.now() });
-    });
-  }
-
-  private revision(): number {
-    const revision = this.store.get<number>(REVISION_KEY) ?? 0;
-    if (!Number.isSafeInteger(revision) || revision < 0 || revision === Number.MAX_SAFE_INTEGER) throw new AttoError('INVALID_STATE', 'The saved spending-policy revision is invalid.');
-    return revision;
-  }
-
-  private replacePolicy(policy: SpendingPolicy): void {
-    const revision = this.revision();
-    this.store.set(POLICY_KEY, policy);
-    this.store.set(REVISION_KEY, revision + 1);
-  }
-
-  private validateMessageSigningIndexes(indexes: number[]): void {
-    if (!Array.isArray(indexes) || indexes.length > 100
-      || indexes.some(index => !Number.isSafeInteger(index) || index < 0 || index > 0x7fff_ffff)
-      || new Set(indexes).size !== indexes.length) {
-      throw new AttoError('INVALID_POLICY', 'Message-signing indexes must be unique account indexes, up to 100.');
-    }
-  }
+  proposal(): LimitsProposal | null { return this.authority.proposal(); }
+  reviewProposal(id: string, wallet: ProposalWallet): LimitsProposal { return this.authority.reviewProposal(id, wallet); }
+  approveProposal(id: string, wallet: ProposalWallet): void { this.authority.approveProposal(id, wallet); }
+  rejectProposal(id: string, wallet: ProposalWallet): void { this.authority.rejectProposal(id, wallet); }
 
   assertCanReserve(raw: string, now = Date.now()): void {
     this.assertAllowance(amountRaw(raw, 'RAW'), now, this.records());
@@ -268,7 +119,7 @@ export class SpendLedger {
     }
   }
 
-  reserve(request: SendReservation): SendRecord {
+  private validateReservationInput(request: SendReservation): string {
     if (typeof request.id !== 'string' || request.id.length === 0 || request.id.length > 200
       || !Number.isSafeInteger(request.index) || request.index < 0 || request.index > 0x7fff_ffff
       || typeof request.destination !== 'string' || !request.destination
@@ -282,19 +133,28 @@ export class SpendLedger {
     } catch {
       throw new AttoError('INVALID_REQUEST', 'The payment metadata, source, or consolidation plan is invalid.');
     }
+    return raw;
+  }
+
+  private matchesReservation(existing: SendRecord, request: SendReservation, raw: string): boolean {
+    return existing.index === request.index && existing.destination === request.destination && existing.raw === raw
+      && !['sourceAddress', 'network', 'metadata', 'quote', 'selection'].some(key => {
+        const field = key as 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection';
+        return request[field] !== undefined && !isDeepStrictEqual(request[field], existing[field]);
+      })
+      && (request.relay === undefined || isDeepStrictEqual(
+        { ...existing.relay, paymentSignature: undefined, nativePayloadJson: undefined },
+        { ...request.relay, paymentSignature: undefined, nativePayloadJson: undefined }))
+      && (request.plan === undefined || isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)));
+  }
+
+  reserve(request: SendReservation): SendRecord {
+    const raw = this.validateReservationInput(request);
     return this.store.transaction(() => {
       const records = this.records();
-      const existing = records.find((record) => record.id === request.id);
+      const existing = records.find(record => record.id === request.id);
       if (existing) {
-        if (existing.index !== request.index || existing.destination !== request.destination || existing.raw !== raw
-          || ['sourceAddress', 'network', 'metadata', 'quote', 'selection'].some(key => {
-            const field = key as 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection';
-            return request[field] !== undefined && !isDeepStrictEqual(request[field], existing[field]);
-          }) || (request.relay !== undefined && !isDeepStrictEqual(
-            { ...existing.relay, paymentSignature: undefined, nativePayloadJson: undefined },
-            { ...request.relay, paymentSignature: undefined, nativePayloadJson: undefined }))
-          || (request.plan !== undefined && !isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)))
-          || (request.external !== undefined && !isDeepStrictEqual(this.externalDefinition(request.external), this.externalDefinition(existing.external)))) {
+        if (!this.matchesReservation(existing, request, raw)) {
           throw new AttoError('REQUEST_CONFLICT', 'This request ID already belongs to a different payment.');
         }
         return existing;
@@ -307,58 +167,46 @@ export class SpendLedger {
     });
   }
 
-  /** Commit a Marketplace intent reservation and its exact owner/challenge binding together. */
-  reserveExternalChallenge(request: SendReservation, requirementJson: string,
-    owner: Omit<ExternalPaymentSecrets, 'requirementJson' | 'transactionJson' | 'paymentJson' | 'paymentSignature' | 'paymentKind'>): SendRecord {
-    if (!request.external || request.external.kind !== 'marketplace-intent'
-      || typeof requirementJson !== 'string' || Buffer.byteLength(requirementJson, 'utf8') < 1
-      || Buffer.byteLength(requirementJson, 'utf8') > 65_536
-      || createHashHex(requirementJson) !== request.external.requirementHash) {
-      throw new AttoError('SEND_STATE', 'The existing Marketplace intent challenge is invalid.');
-    }
-    if (typeof request.id !== 'string' || request.id.length === 0 || request.id.length > 200
-      || !Number.isSafeInteger(request.index) || request.index < 0 || request.index > 0x7fff_ffff
-      || typeof request.destination !== 'string' || !request.destination
-      || !Number.isSafeInteger(request.createdAt) || request.createdAt < 0) {
-      throw new AttoError('INVALID_REQUEST', 'Send requests require an ID, address index, destination, and timestamp.');
-    }
-    const raw = amountRaw(request.raw, 'RAW');
-    try {
-      this.validateDetails(request);
-      if (request.plan?.steps.some(step => step.status !== 'planned' || step.hash !== undefined)) throw new Error();
-    } catch {
-      throw new AttoError('INVALID_REQUEST', 'The payment metadata, source, or consolidation plan is invalid.');
-    }
+  /** Atomically reserve a new relay payment or refresh an unused x402 offer on its original reservation. */
+  reserveRelay(request: SendReservation & { relay: RelayRecord }): SendRecord {
+    const raw = this.validateReservationInput(request);
     return this.store.transaction(() => {
       const records = this.records();
-      const existing = records.find(record => record.id === request.id);
-      if (existing && (existing.index !== request.index || existing.destination !== request.destination || existing.raw !== raw
-        || ['sourceAddress', 'network', 'metadata', 'quote', 'selection'].some(key => {
-          const field = key as 'sourceAddress' | 'network' | 'metadata' | 'quote' | 'selection';
-          return request[field] !== undefined && !isDeepStrictEqual(request[field], existing[field]);
-        }) || (request.plan !== undefined && !isDeepStrictEqual(this.planDefinition(request.plan), this.planDefinition(existing.plan)))
-        || !isDeepStrictEqual(this.externalDefinition(request.external), this.externalDefinition(existing.external)))) {
-        throw new AttoError('REQUEST_CONFLICT', 'This request ID already belongs to a different payment.');
+      const position = records.findIndex(record => record.id === request.id);
+      const existing = records[position];
+      if (existing) {
+        if (!existing.relay || existing.relay.mode !== request.relay.mode) {
+          throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another wallet operation or relay mode.');
+        }
+        let current = existing;
+        if (request.relay.mode === undefined && current.relay!.mode === undefined
+          && current.relay!.paymentRequired !== request.relay.paymentRequired) {
+          if (current.status !== 'reserved' || current.hash !== undefined || current.blockJson !== undefined
+            || current.transactionJson !== undefined || current.candidateBinding !== undefined
+            || current.relay!.paymentSignature !== undefined
+            || current.plan?.steps.some(step => step.hash !== undefined)) {
+            throw new AttoError('REQUEST_CONFLICT', 'A retained native candidate can never accept another offer window.');
+          }
+          validateRelayOfferRefresh(current.relay!, request.relay);
+          current = { ...current, relay: request.relay };
+          this.validateDetails(current);
+          records[position] = current;
+          this.store.set(RECORDS_KEY, records);
+        }
+        if (!this.matchesReservation(current, request, raw)) {
+          throw new AttoError('REQUEST_CONFLICT', 'This request ID already belongs to a different payment.');
+        }
+        return current;
       }
-      const record = existing ?? { ...request, raw, status: 'reserved' as const };
-      if (!existing) {
-        this.assertAllowance(raw, request.createdAt, records);
-        records.push(record);
-        this.store.set(RECORDS_KEY, records);
-      }
-      const secrets = this.externalSecrets();
-      const current = secrets[request.id];
-      const boundOwner = { ...owner, paymentKind: 'marketplace-intent' as const };
-      if (current && (current.requirementJson !== requirementJson || !isDeepStrictEqual(this.ownerDefinition(current), boundOwner))) {
-        throw new AttoError('REQUEST_CONFLICT', 'This payment ID received a different x402 requirement or Marketplace binding.');
-      }
-      if (!current) secrets[request.id] = { ...boundOwner, requirementJson };
-      this.store.set(EXTERNAL_SECRETS_KEY, secrets);
+      this.assertAllowance(raw, request.createdAt, records);
+      const record: SendRecord = { ...request, raw, status: 'reserved' };
+      records.push(record);
+      this.store.set(RECORDS_KEY, records);
       return record;
     });
   }
 
-  get(id: string): SendRecord | undefined { return this.records().find((record) => record.id === id); }
+  get(id: string): SendRecord | undefined { return this.records().find(record => record.id === id); }
 
   journalGet(requestId: string): SendRecord | undefined { return this.get(requestId); }
 
@@ -388,7 +236,7 @@ export class SpendLedger {
 
   signed(id: string, hash: string, blockJson: string, transactionJson?: string, candidateBinding?: string,
     authorization?: { paymentSignature: string } | { nativePayloadJson: string }): void {
-    this.update(id, (record) => {
+    this.update(id, record => {
       if (record.status === 'published' || record.status === 'failed' || (record.hash && (record.hash !== hash || record.blockJson !== blockJson))
         || (record.transactionJson !== undefined && (record.transactionJson !== transactionJson || record.candidateBinding !== candidateBinding))) {
         throw new AttoError('SEND_STATE', 'This payment cannot be assigned a new block.');
@@ -421,150 +269,8 @@ export class SpendLedger {
     });
   }
 
-  /** Caller holds the same account/wallet locks used by signing and candidate persistence. */
-  refreshUnusedRelay(id: string, relay: Extract<RelayRecord, { paymentRequired: string }>): void {
-    this.update(id, record => {
-      if (!record.relay || record.relay.mode !== undefined || record.status !== 'reserved' || record.hash !== undefined || record.blockJson !== undefined
-        || record.transactionJson !== undefined || record.candidateBinding !== undefined || record.relay.paymentSignature !== undefined
-        || record.plan?.steps.some(step => step.hash !== undefined)) throw new AttoError('REQUEST_CONFLICT', 'A retained native candidate can never accept another offer window.');
-      validateRelayOfferRefresh(record.relay, relay);
-      return { ...record, relay };
-    });
-  }
-
-  /** Persist the exact offered requirement before any external SEND is signed. */
-  externalChallenge(id: string, requirementJson: string,
-    owner: Omit<ExternalPaymentSecrets, 'requirementJson' | 'transactionJson' | 'paymentJson' | 'paymentSignature' | 'paymentKind'>): void {
-    if (typeof requirementJson !== 'string' || Buffer.byteLength(requirementJson, 'utf8') < 1
-      || Buffer.byteLength(requirementJson, 'utf8') > 65_536) throw new AttoError('SEND_STATE', 'The x402 requirement is invalid.');
-    this.store.transaction(() => {
-      const records = this.records();
-      const record = records.find(value => value.id === id);
-      if (!record?.external || (record.external.kind !== 'marketplace-topup' && record.external.kind !== 'marketplace-intent')
-        || record.hash || record.status !== 'reserved') throw new AttoError('SEND_STATE', 'This Marketplace payment no longer accepts a challenge.');
-      if (createHashHex(requirementJson) !== record.external.requirementHash) throw new AttoError('SEND_STATE', 'The x402 requirement fingerprint does not match.');
-      const secrets = this.externalSecrets();
-      const current = secrets[id];
-      const boundOwner = { ...owner, paymentKind: record.external.kind };
-      if (current && (current.requirementJson !== requirementJson || !isDeepStrictEqual(this.ownerDefinition(current), boundOwner))) {
-        throw new AttoError('REQUEST_CONFLICT', 'This payment ID received a different x402 requirement or controller binding.');
-      }
-      if (!current) {
-        secrets[id] = { ...boundOwner, requirementJson };
-        this.store.set(EXTERNAL_SECRETS_KEY, secrets);
-      }
-    });
-  }
-
-  /** Exact signed bytes and the attempt fence commit atomically before HTTP submission. */
-  externalAttempt(id: string, input: { hash: string; blockJson: string; transactionJson: string; paymentJson: string; paymentSignature: string; attemptedAt: number }): void {
-    if (!/^[A-F0-9]{64}$/.test(input.hash) || !input.blockJson || !input.transactionJson || !input.paymentJson
-      || !input.paymentSignature || !Number.isSafeInteger(input.attemptedAt) || input.attemptedAt < 0
-      || Buffer.byteLength(input.transactionJson, 'utf8') > 65_536 || Buffer.byteLength(input.paymentJson, 'utf8') > 65_536
-      || input.paymentSignature.length > 90_000) throw new AttoError('SEND_STATE', 'The signed x402 payment is invalid.');
-    this.store.transaction(() => {
-      const records = this.records();
-      const position = records.findIndex(value => value.id === id);
-      const record = records[position];
-      if (!record?.external || (record.external.kind !== 'marketplace-topup' && record.external.kind !== 'marketplace-intent')
-        || record.status !== 'reserved' || record.hash) throw new AttoError('SEND_STATE', 'This Marketplace payment cannot be assigned another SEND.');
-      const secrets = this.externalSecrets();
-      const current = secrets[id];
-      if (!current || createHashHex(current.requirementJson) !== record.external.requirementHash) {
-        throw new AttoError('SEND_STATE', 'The original x402 requirement is unavailable.');
-      }
-      let transaction: AttoTransaction;
-      let block: AttoBlock;
-      try {
-        transaction = AttoTransaction.fromJson(input.transactionJson);
-        block = AttoBlock.fromJson(input.blockJson);
-      } catch { throw new AttoError('SEND_STATE', 'The signed x402 transaction is invalid.'); }
-      if (!(transaction.block instanceof AttoSendBlock) || !(block instanceof AttoSendBlock)
-        || transaction.hash.toString() !== input.hash || block.hash.toString() !== input.hash
-        || transaction.block.hash.toString() !== block.hash.toString()
-        || block.amount.toString() !== record.raw || block.receiverAddress.value !== record.destination
-        || (record.sourceAddress && block.address.value !== record.sourceAddress)
-        || block.network.name !== record.network
-        || !paymentTransactionMatches(input.paymentJson, transaction)) {
-        throw new AttoError('SEND_STATE', 'The signed x402 transaction does not match its request or payment envelope.');
-      }
-      const payloadBytes = Buffer.from(input.paymentSignature, 'base64');
-      if (payloadBytes.toString('base64') !== input.paymentSignature
-        || payloadBytes.toString('utf8') !== input.paymentJson) {
-        throw new AttoError('SEND_STATE', 'The saved x402 header does not match its payment envelope.');
-      }
-      const nextSecrets = { ...current, transactionJson: input.transactionJson,
-        paymentJson: input.paymentJson, paymentSignature: input.paymentSignature };
-      secrets[id] = nextSecrets;
-      records[position] = { ...record, hash: input.hash, blockJson: input.blockJson, status: 'signed',
-        external: { ...record.external, nativeState: 'unknown',
-          ...(record.external.kind === 'marketplace-intent' ? { paymentState: 'PREPARED' as const } : {}), attemptedAt: input.attemptedAt } };
-      this.validateDetails(records[position]!);
-      this.store.set(EXTERNAL_SECRETS_KEY, secrets);
-      this.store.set(RECORDS_KEY, records);
-    });
-  }
-
-  externalSecretsFor(id: string): ExternalPaymentSecrets | undefined {
-    return this.externalSecrets()[id];
-  }
-
-  externalStatus(id: string, update: Partial<Pick<ExternalPaymentRecord, 'marketplaceState' | 'paymentState' | 'receivePending' | 'receiveStatus'>>): void {
-    this.update(id, record => {
-      if (!record.external || (record.external.kind !== 'marketplace-topup' && record.external.kind !== 'marketplace-intent')) {
-        throw new AttoError('SEND_STATE', 'This request is not a current Marketplace payment.');
-      }
-      const external = { ...record.external, ...update };
-      this.validateExternal(external);
-      return { ...record, external };
-    });
-  }
-
-  completeExternal(id: string, result: unknown, publishedAt: number): void {
-    this.update(id, record => {
-      if (!record.external || !record.hash || record.status === 'failed' || !Number.isSafeInteger(publishedAt) || publishedAt < 0) {
-        throw new AttoError('SEND_STATE', 'Only a recorded Marketplace SEND can be confirmed.');
-      }
-      return { ...record, status: 'published', result, publishedAt,
-        external: { ...record.external, nativeState: 'confirmed' } };
-    });
-  }
-
-  /** Call only after the canonical account height proves a competing block. */
-  rejectExternal(id: string, result: unknown): void {
-    this.update(id, record => {
-      if (!record.external || !record.hash || record.status === 'published') throw new AttoError('SEND_STATE', 'Only an unresolved Marketplace SEND can be rejected.');
-      return { ...record, status: 'failed', result,
-        external: { ...record.external, nativeState: 'rejected',
-          ...(record.external.kind === 'marketplace-intent' ? { paymentState: 'FAILED' as const } : {}) } };
-    });
-  }
-
-  /** Account and wallet locks must be held: only a never-signed expired challenge can release its reservation. */
-  expireExternalChallenge(id: string, now: number): boolean {
-    return this.store.transaction(() => {
-      const records = this.records();
-      const index = records.findIndex(record => record.id === id);
-      const record = records[index];
-      const external = record?.external;
-      if (!record || !external || external.kind !== 'marketplace-intent' || record.status !== 'reserved'
-        || record.hash !== undefined || record.blockJson !== undefined || record.plan?.steps.some(step => step.hash !== undefined || step.blockJson !== undefined)
-        || external.nativeState !== 'challenged' || external.paymentState !== null || external.attemptedAt !== undefined
-        || !Number.isSafeInteger(now) || Date.parse(external.intentExpiresAt) > now) return false;
-      const secrets = this.externalSecretsFor(id);
-      if (!secrets || secrets.paymentKind !== 'marketplace-intent' || secrets.transactionJson !== undefined
-        || secrets.paymentJson !== undefined || secrets.paymentSignature !== undefined) return false;
-      records[index] = { ...record, status: 'failed',
-        result: { status: 'failed', reason: 'MARKETPLACE_CHALLENGE_EXPIRED' },
-        external: { ...external, marketplaceState: 'EXPIRED', paymentState: 'FAILED' } };
-      this.validateDetails(records[index]!);
-      this.store.set(RECORDS_KEY, records);
-      return true;
-    });
-  }
-
   complete(id: string, result: unknown, publishedAt: number): void {
-    this.update(id, (record) => {
+    this.update(id, record => {
       if (record.status === 'published') return record;
       if (!record.hash || record.status === 'failed' || !Number.isSafeInteger(publishedAt) || publishedAt < 0) {
         throw new AttoError('SEND_STATE', 'Only a recorded block can complete a payment.');
@@ -574,11 +280,11 @@ export class SpendLedger {
   }
 
   uncertain(id: string): void {
-    this.update(id, (record) => record.status === 'published' || record.status === 'failed' ? record : { ...record, status: 'unknown' });
+    this.update(id, record => record.status === 'published' || record.status === 'failed' ? record : { ...record, status: 'unknown' });
   }
 
   fail(id: string): void {
-    this.update(id, (record) => {
+    this.update(id, record => {
       if (record.hash || record.status === 'published' || record.plan?.steps.some(step => step.hash)) throw new AttoError('SEND_STATE', 'A payment with a recorded block must be reconciled before releasing its reservation.');
       return { ...record, status: 'failed' };
     });
@@ -586,7 +292,7 @@ export class SpendLedger {
 
   /** Caller must first prove a different canonical block at this block's height. */
   reject(id: string): void {
-    this.update(id, (record) => {
+    this.update(id, record => {
       if (!record.hash || record.status === 'published') throw new AttoError('SEND_STATE', 'Only an unpublished recorded block can be rejected after reconciliation.');
       return { ...record, status: 'failed' };
     });
@@ -651,7 +357,7 @@ export class SpendLedger {
   }
 
   pending(): SendRecord[] {
-    return this.records().filter((record) => ['reserved', 'signed', 'unknown'].includes(record.status));
+    return this.records().filter(record => ['reserved', 'signed', 'unknown'].includes(record.status));
   }
 
   usage(now = Date.now()) {
@@ -665,7 +371,7 @@ export class SpendLedger {
       proposal: this.proposal(),
       pendingRaw: this.pendingTotal(records).toString(),
       perRequest: policy.perRequest ? { ...policy.perRequest, limitRaw: amountRaw(policy.perRequest.amount, policy.perRequest.unit, true) } : null,
-      rolling: policy.rolling.map((rule) => this.ruleUsage(rule, records, now)),
+      rolling: policy.rolling.map(rule => this.ruleUsage(rule, records, now)),
     };
   }
 
@@ -695,7 +401,7 @@ export class SpendLedger {
   private update(id: string, change: (record: SendRecord) => SendRecord): void {
     this.store.transaction(() => {
       const records = this.records();
-      const index = records.findIndex((record) => record.id === id);
+      const index = records.findIndex(record => record.id === id);
       const record = records[index];
       if (!record) throw new AttoError('SEND_NOT_FOUND', 'The payment request was not found.');
       records[index] = change(record);
@@ -727,33 +433,6 @@ export class SpendLedger {
     };
   }
 
-  private validatePolicy(policy: SpendingPolicy): void {
-    if (!policy || typeof policy !== 'object' || !Array.isArray(policy.rolling) || policy.perRequest === undefined) {
-      throw new AttoError('INVALID_POLICY', 'Provide a per-request limit or null and an array of rolling limits.');
-    }
-    try {
-      if (policy.perRequest !== null) {
-        if (!['ATTO', 'RAW'].includes(policy.perRequest.unit)) throw new Error();
-        amountRaw(policy.perRequest.amount, policy.perRequest.unit, true);
-      }
-      for (const rule of policy.rolling) {
-        if (!rule || !Number.isSafeInteger(rule.days) || rule.days <= 0 || !Number.isSafeInteger(rule.days * DAY_MS)) throw new Error();
-        if (!['ATTO', 'RAW'].includes(rule.unit)) throw new Error();
-        amountRaw(rule.amount, rule.unit, true);
-      }
-    } catch {
-      throw new AttoError('INVALID_POLICY', 'Limits require valid decimal amounts, explicit ATTO or RAW units, and positive whole days.');
-    }
-  }
-
-  private validatePool(pool: AccountPool): void {
-    if (!pool || !Array.isArray(pool.indexes) || pool.indexes.length < 1 || pool.indexes.length > 100
-      || pool.indexes.some(index => !Number.isSafeInteger(index) || index < 0 || index > 0x7fff_ffff)
-      || new Set(pool.indexes).size !== pool.indexes.length || typeof pool.consolidate !== 'boolean') {
-      throw new AttoError('INVALID_POOL', 'Choose 1 to 100 distinct wallet indexes and an explicit consolidation setting.');
-    }
-  }
-
   private validateDetails(record: Omit<SendRecord, 'status'>, historical = false): void {
     validateNativeCandidate(record);
     if (record.destinationBinding !== undefined) {
@@ -763,46 +442,53 @@ export class SpendLedger {
     if (record.sourceAddress !== undefined && (typeof record.sourceAddress !== 'string' || !record.sourceAddress || record.sourceAddress.length > 128)) throw new Error();
     if (record.network !== undefined && !['LIVE', 'BETA', 'DEV', 'LOCAL'].includes(record.network)) throw new Error();
     if (record.selection !== undefined && record.selection !== 'automatic' && record.selection !== 'explicit') throw new Error();
-    if (record.metadata !== undefined) paymentMetadataSchema.parse(record.metadata);
+    if (record.metadata !== undefined && !paymentMetadataSchema.safeParse(record.metadata).success) throw new Error();
     if (record.plan !== undefined) validatePaymentPlan(record.plan, record);
-    if (record.external !== undefined) this.validateExternal(record.external, historical);
+    if (record.external !== undefined) {
+      if (!historical) throw new Error('Legacy external payment records are read-only.');
+      this.validateExternal(record.external);
+    }
     if (record.relay !== undefined) {
       if (record.external || record.relay.version !== 1 || record.id !== record.relay.requestId || record.relay.index !== record.index || record.plan?.steps.length
         || record.sourceAddress !== record.relay.terms.senderAddress || record.destination !== record.relay.terms.recipientAddress
         || record.raw !== record.relay.terms.amountAtomic || record.relay.terms.asset !== 'ATTO'
-        || `atto:${record.network?.toLowerCase()}` !== record.relay.terms.network) throw new Error('Invalid relay payment.');
+        || `atto:${record.network?.toLowerCase()}` !== record.relay.terms.network) {
+        throw new Error('Invalid relay payment.');
+      }
       if (record.relay.mode === 'DURABLE_NATIVE') {
         const payload = record.relay.nativePayloadJson;
         if (record.relay.paymentSignature !== undefined || (record.hash === undefined ? payload !== undefined
-          : !record.transactionJson || typeof payload !== 'string' || Buffer.byteLength(payload) > 65_536)) throw new Error('Invalid native relay authorization.');
+          : !record.transactionJson || typeof payload !== 'string' || Buffer.byteLength(payload, 'utf8') > 65_536)) {
+          throw new Error('Invalid native relay authorization.');
+        }
         parseDurableRelayRequest(record.relay);
       } else {
         if (record.relay.nativePayloadJson !== undefined || (record.relay.paymentSignature !== undefined
-          && (typeof record.relay.paymentSignature !== 'string' || record.relay.paymentSignature.length > 90_000))) throw new Error('Invalid x402 relay authorization.');
+          && (typeof record.relay.paymentSignature !== 'string' || record.relay.paymentSignature.length > 90_000))) {
+          throw new Error('Invalid x402 relay authorization.');
+        }
         parseRelayOffer(record.relay, true);
       }
     }
   }
 
-  private validateExternal(external: ExternalPaymentRecord | LegacyExternalPaymentRecord, historical = false): void {
-    if (historical && external && (external.kind === 'market-topup' || external.kind === 'market-intent')) {
-      if (Object.hasOwn(external, 'marketplaceState')) throw new Error('Invalid historical external payment record.');
-      // Validate the old shape without replacing its stored tags or resuming its authorization.
-      return this.validateExternal({ ...external,
-        kind: external.kind === 'market-topup' ? 'marketplace-topup' : 'marketplace-intent',
-        marketplaceState: external.marketState });
-    }
-
-    if (!external || !['marketplace-topup', 'marketplace-intent'].includes(external.kind) || external.version !== 1
-      || !/^[A-Za-z0-9_-]{16,128}$/.test(external.paymentIdentifier)
-      || !['atto:live', 'atto:beta', 'atto:dev', 'atto:local'].includes(external.network)
-      || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(external.intentId)
+  private validateExternal(value: NonNullable<SendRecord['external']>): void {
+    if (!value || typeof value !== 'object') throw new Error('Invalid external payment record.');
+    const external = value as unknown as Omit<Partial<ExternalPaymentRecord>, 'kind'> & { kind?: unknown; marketState?: unknown };
+    const legacy = external.kind === 'market-topup' || external.kind === 'market-intent';
+    const current = external.kind === 'marketplace-topup' || external.kind === 'marketplace-intent';
+    const remoteState = legacy ? external.marketState : external.marketplaceState;
+    if ((!current && !legacy) || (legacy && external.marketplaceState !== undefined) || (!legacy && external.marketState !== undefined)
+      || external.version !== 1
+      || typeof external.paymentIdentifier !== 'string' || !/^[A-Za-z0-9_-]{16,128}$/.test(external.paymentIdentifier)
+      || !['atto:live', 'atto:beta', 'atto:dev', 'atto:local'].includes(external.network ?? '')
+      || typeof external.intentId !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(external.intentId)
       || typeof external.resourceUrl !== 'string' || external.resourceUrl.length > 2048
-      || !/^[a-f0-9]{64}$/.test(external.requirementHash)
+      || typeof external.requirementHash !== 'string' || !/^[a-f0-9]{64}$/.test(external.requirementHash)
       || typeof external.intentExpiresAt !== 'string' || !Number.isFinite(Date.parse(external.intentExpiresAt))
-      || !['ISSUED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CREDITED', 'EXPIRED'].includes(external.marketplaceState ?? '')
-      || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CONFIRMED', 'FAILED'].includes(external.paymentState))
-      || !['challenged', 'unknown', 'confirmed', 'rejected'].includes(external.nativeState)
+      || typeof remoteState !== 'string' || !['ISSUED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CREDITED', 'EXPIRED'].includes(remoteState)
+      || (external.paymentState !== null && !['PREPARED', 'ATTEMPTED', 'PENDING', 'ACCEPTED', 'PUBLISHING', 'UNKNOWN', 'PROCESSED', 'SETTLED', 'REJECTED', 'CONFIRMED', 'FAILED'].includes(external.paymentState ?? ''))
+      || !['challenged', 'unknown', 'confirmed', 'rejected'].includes(external.nativeState ?? '')
       || (external.attemptedAt !== undefined && (!Number.isSafeInteger(external.attemptedAt) || external.attemptedAt < 0))
       || (external.receivePending !== undefined && external.receivePending !== null && typeof external.receivePending !== 'boolean')
       || (external.receiveStatus !== undefined && external.receiveStatus !== null
@@ -810,48 +496,7 @@ export class SpendLedger {
       throw new Error('Invalid external payment record.');
     }
     if (external.nativeState === 'challenged' && external.attemptedAt !== undefined) throw new Error('Invalid external attempt state.');
-    if (['unknown', 'confirmed', 'rejected'].includes(external.nativeState) && external.attemptedAt === undefined) throw new Error('Missing external attempt marker.');
-  }
-
-  private externalSecrets(): Record<string, ExternalPaymentSecrets> {
-    const value = this.store.get<Record<string, ExternalPaymentSecrets>>(EXTERNAL_SECRETS_KEY) ?? {};
-    try {
-      if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error();
-      for (const [id, secret] of Object.entries(value)) {
-        const paymentKind = secret?.paymentKind ?? 'marketplace-topup';
-        const topUpOwnerInvalid = paymentKind === 'marketplace-topup' &&
-          (typeof secret?.accountId !== 'string' || typeof secret?.agentId !== 'string'
-            || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(secret.agentId)
-            || typeof secret?.identityId !== 'string' || !Number.isSafeInteger(secret?.controllerIndex)
-            || typeof secret?.controllerAddress !== 'string');
-        if (!id || !secret || secret.version !== 1 || !['marketplace-topup', 'marketplace-intent'].includes(paymentKind)
-          || (secret.paymentKind !== undefined && secret.paymentKind !== paymentKind)
-          || typeof secret.apiUrl !== 'string' || secret.apiUrl.length > 2048
-          || typeof secret.audience !== 'string' || secret.audience.length < 1 || secret.audience.length > 255
-          || topUpOwnerInvalid
-          || typeof secret.walletFingerprint !== 'string'
-          || (secret.controllerIndex !== undefined && (!Number.isSafeInteger(secret.controllerIndex) || secret.controllerIndex < 0 || secret.controllerIndex > 0x7fff_ffff))
-          || (secret.controllerAddress !== undefined && typeof secret.controllerAddress !== 'string') || typeof secret.requirementJson !== 'string'
-          || Buffer.byteLength(secret.requirementJson, 'utf8') > 65_536
-          || (secret.transactionJson !== undefined && Buffer.byteLength(secret.transactionJson, 'utf8') > 65_536)
-          || (secret.paymentJson !== undefined && Buffer.byteLength(secret.paymentJson, 'utf8') > 65_536)
-          || (secret.paymentSignature !== undefined && secret.paymentSignature.length > 90_000)) throw new Error();
-      }
-      return value;
-    } catch {
-      throw new AttoError('INVALID_STATE', 'The private x402 payment journal is invalid. Restore verified wallet state before recovery.');
-    }
-  }
-
-  private externalDefinition(external: SendRecord['external']): unknown {
-    if (!external) return undefined;
-    const { kind, version, paymentIdentifier, network, intentId, resourceUrl, requirementHash, intentExpiresAt } = external;
-    return { kind, version, paymentIdentifier, network, intentId, resourceUrl, requirementHash, intentExpiresAt };
-  }
-
-  private ownerDefinition(owner: ExternalPaymentSecrets): unknown {
-    const { version, paymentKind = 'marketplace-topup', apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress } = owner;
-    return { version, paymentKind, apiUrl, audience, accountId, agentId, identityId, walletFingerprint, controllerIndex, controllerAddress };
+    if (['unknown', 'confirmed', 'rejected'].includes(external.nativeState!) && external.attemptedAt === undefined) throw new Error('Missing external attempt marker.');
   }
 
   private planDefinition(plan: PaymentPlan | undefined): unknown {
@@ -860,8 +505,4 @@ export class SpendLedger {
       id, kind, index, sourceAddress, destination, raw, ...(sourceStepId === undefined ? {} : { sourceStepId }),
     })) };
   }
-}
-
-function createHashHex(value: string): string {
-  return createHash('sha256').update(value, 'utf8').digest('hex');
 }

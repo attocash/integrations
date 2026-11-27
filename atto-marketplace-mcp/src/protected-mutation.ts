@@ -7,9 +7,13 @@ import { existsSync } from 'node:fs';
 import { z } from 'zod';
 import { MarketplaceApiClient, MarketplaceApiError, type ApiResponse } from './marketplace-api.js';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
-import { approvalRequestPath, readApprovalResponse, validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest, type MarketplaceProofApprovalRequest } from './approval-files.js';
+import {
+  approvalRequestPath, createApprovalRequest, parseApprovalRequest, readApprovalResponse,
+  validateApprovalResponse, verifyApprovalSignature, writeApprovalRequest, type MarketplaceProofApprovalRequest,
+} from './approval-files.js';
+import { isOpaqueHandle, UUID_PATTERN } from './marketplace-validation.js';
 
-const uuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+const uuid = z.string().regex(UUID_PATTERN);
 const approvalChallenge = z.strictObject({
   challengeId: uuid, message: z.string().min(1).max(4096),
   issuedAt: z.string().datetime({offset:true}), expiresAt: z.string().datetime({offset:true}),
@@ -42,7 +46,7 @@ export async function freshProofMutation(input: FreshProofMutationInput): Promis
   const previous=input.store.beginMutation({profileId:input.profile.id,requestId:input.requestId,operation:input.operation,
     target:input.target,requestHash},reservedHandle);
   const handle=previous.resultIdentity;
-  if (!handle || !/^[a-f0-9]{32}$/.test(handle)) throw new ProfileError('RECOVERY_REQUIRED','The protected Marketplace operation needs local recovery before retrying.');
+  if (!isOpaqueHandle(handle)) throw new ProfileError('RECOVERY_REQUIRED','The protected Marketplace operation needs local recovery before retrying.');
   let handoff;
   try { handoff=input.store.getHandoff(input.profile.id,handle); }
   catch (error) {
@@ -75,11 +79,13 @@ export async function freshProofMutation(input: FreshProofMutationInput): Promis
       || Date.parse(parsed.data.expiresAt)-Date.parse(parsed.data.issuedAt)>300_000) {
       throw new MarketplaceApiError('APPROVAL_CHALLENGE','Marketplace returned an invalid or expired controller approval challenge.');
     }
-    const request:MarketplaceProofApprovalRequest={version:1,type:'marketplace-controller-approval-request',
-      profileId:input.profile.id,handoffId:handle,marketplaceOrigin:input.profile.origin,transport:'AGENT_API',proofOrigin:null,
-      audience:input.profile.audience,accountId:input.profile.accountId,identityId:input.profile.identityId,
-      controller:{network:input.profile.controllerNetwork,address:input.profile.controllerAddress,index:input.profile.controllerIndex},
-      purpose:input.purpose,action:input.makeAction(parsed.data,context),challenge:parsed.data};
+    const request = createApprovalRequest({
+      profileId: input.profile.id, handoffId: handle, origin: input.profile.origin,
+      audience: input.profile.audience, accountId: input.profile.accountId, identityId: input.profile.identityId,
+      controllerNetwork: input.profile.controllerNetwork, controllerAddress: input.profile.controllerAddress,
+      controllerIndex: input.profile.controllerIndex, purpose: input.purpose,
+      action: input.makeAction(parsed.data, context), challenge: parsed.data,
+    });
     saved={command:input.payload,request,requestHash,context};
     input.store.setHandoffState(input.profile.id,handle,'WAITING_APPROVAL',JSON.stringify(saved));
     handoff=input.store.getHandoff(input.profile.id,handle);
@@ -144,20 +150,6 @@ function approvalRequired(requestId:string,handle:string,request:MarketplaceProo
   return {status:'approval_required',requestId,handoffId:handle,purpose:request.purpose,expiresAt:request.challenge.expiresAt,
     walletCommand:`${marketplaceCommand} approve ${shellQuote(path)}`,
     next:'Run this exact command in a local wallet terminal, then call the same Marketplace tool again with the identical request ID and action. The signed response remains in the private profile directory.'};
-}
-
-function parseApprovalRequest(value:unknown):MarketplaceProofApprovalRequest {
-  const request=asRecord(value);
-  const controller=asRecord(request.controller);
-  if (request.version!==1 || request.type!=='marketplace-controller-approval-request'
-    || typeof request.profileId!=='string' || typeof request.handoffId!=='string'
-    || typeof request.marketplaceOrigin!=='string' || request.transport!=='AGENT_API' || request.proofOrigin!==null
-    || typeof request.audience!=='string' || typeof request.purpose!=='string'
-    || (controller.network!=='ATTO' && controller.network!=='NANO')
-    || !request.challenge || typeof request.action!=='object') {
-    throw new ProfileError('APPROVAL_FILE','The saved typed wallet approval request is invalid.');
-  }
-  return request as unknown as MarketplaceProofApprovalRequest;
 }
 
 function safeMutationResult(value:unknown):Record<string,unknown> {

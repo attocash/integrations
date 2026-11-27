@@ -1,12 +1,12 @@
 import { accessSync, constants, existsSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { DatabaseSync } from 'node:sqlite';
 import { z } from 'zod';
 import { parseOperation } from '../application/operations.js';
+import { parseAddress } from '../domain/address.js';
 import { amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
-import { parseAddress } from '../network/reader.js';
 import { marketTerms } from '../pricing/terms.js';
+import { openReadOnlyState, STATE_SCHEMA_VERSION } from '../storage/state.js';
 import { defaultSettings } from '../wallet/defaults.js';
 import type { WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
 
@@ -42,17 +42,10 @@ export function readDoctorProfile(directory: string): DoctorProfile {
   } : undefined;
   if (!databaseInfo) return { settings: defaultSettings(), settingsSource: 'defaults', addresses: [], access: 'read-only', poolIndexes: [0], pendingPayments: 0, resetPending: false, termsAccepted: false, permissions };
   accessSync(file, constants.R_OK | constants.W_OK);
-  const state = new DatabaseSync(file, { readOnly: true });
+  const state = openReadOnlyState(directory, { busyTimeoutMs: 1000, beginTransaction: true });
   try {
-    state.exec('PRAGMA busy_timeout = 1000; BEGIN;');
-    const version = state.prepare('PRAGMA user_version').get()?.user_version;
-    if (version !== 1 && version !== 2) throw new AttoError('STATE_VERSION', 'This wallet state requires a supported Atto CLI version.');
-    const get = (key: string): unknown => {
-      const row = state.prepare('SELECT value FROM settings WHERE key = ?').get(key);
-      if (!row) return undefined;
-      if (typeof row.value !== 'string' || row.value.length > 1_048_576) throw new Error('Invalid state value');
-      return JSON.parse(row.value);
-    };
+    if (state.userVersion !== 1 && state.userVersion !== STATE_SCHEMA_VERSION) throw new AttoError('STATE_VERSION', 'This wallet state requires a supported Atto CLI version.');
+    const get = (key: string): unknown => state.get(key, 1_048_576);
     const settings = parseOperation('wallet_configure', get('settings')) as unknown as WalletSettings;
     if (['network', 'nodeUrl', 'workerUrl', 'representative', 'autoReceive', 'minReceiveRaw'].some(key => !Object.hasOwn(settings, key))) throw new Error('Incomplete settings');
     parseAddress(settings.representative);
@@ -68,10 +61,9 @@ export function readDoctorProfile(directory: string): DoctorProfile {
     if (identity && addresses.find(address => address.index === 0)?.address !== identity.address) throw new Error('Wallet identity mismatch');
     const access = z.enum(['read-only', 'spend']).parse(get('spending.mcpAccess') ?? 'read-only');
     const proposed = parseOperation('limits_propose', { policy: get('spending.policy') ?? { perRequest: null, rolling: [] }, access, pool: get('spending.pool') ?? { indexes: [0], consolidate: false } });
-    const pending = state.prepare("SELECT COUNT(*) AS count FROM settings, json_each(settings.value) WHERE settings.key = 'spending.records' AND json_extract(json_each.value, '$.status') IN ('reserved', 'signed', 'unknown')").get();
     const terms = get('market.terms') as { version?: unknown } | undefined;
     return { settings, settingsSource: 'profile', identity, addresses, access, permissions,
-      poolIndexes: (proposed.pool as { indexes: number[] }).indexes, pendingPayments: Number(pending?.count ?? 0),
+      poolIndexes: (proposed.pool as { indexes: number[] }).indexes, pendingPayments: state.pendingSendCount(),
       resetPending: Boolean(get('wallet.reset')), termsAccepted: terms?.version === marketTerms.version };
   } finally { state.close(); }
 }

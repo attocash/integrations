@@ -1,6 +1,7 @@
 import { AttoAmount, AttoUnit } from '@attocash/commons-core';
 import { AttoError } from './errors.js';
-import type { AmountUnit } from '../wallet/types.js';
+
+export type AmountUnit = 'ATTO' | 'RAW';
 
 export function amountRaw(value: string, unit: AmountUnit = 'ATTO', allowZero = false): string {
   if (typeof value !== 'string' || !/^\d+(?:\.\d+)?$/.test(value) || !['ATTO', 'RAW'].includes(unit)) {

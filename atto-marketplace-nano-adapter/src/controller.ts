@@ -15,7 +15,7 @@ export interface ControllerProofRequest {
 }
 /** Headless native proofs retain their explicit per-purpose grants. */
 export function validateControllerProof(request: ControllerProofRequest, config: NanoWalletConfiguration, now: number): void {
-    if (!rawPurposes.has(request.purpose) || !config.grants.controllerPurposes.includes(request.purpose as any)) fail('CONTROLLER_PROOF_INVALID');
+    if (!rawPurposes.has(request.purpose) || !(config.grants.controllerPurposes as readonly string[]).includes(request.purpose)) fail('CONTROLLER_PROOF_INVALID');
     validateControllerFrame(request, config, now);
 }
 function validateTerminalControllerProof(request: ControllerProofRequest, config: NanoWalletConfiguration, now: number): void {

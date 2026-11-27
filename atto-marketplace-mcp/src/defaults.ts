@@ -1,6 +1,7 @@
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { ProfileError } from './profile-store.js';
+import { isLoopbackHostname } from './marketplace-validation.js';
+import { ProfileError } from './profile-error.js';
 
 export const productionMarketplaceOrigin = 'https://api.atto.market';
 export const productionMarketplaceAudience = 'urn:marketplace:agent-api:live';
@@ -28,7 +29,7 @@ export function marketplaceConnection(options: {origin?: string; audience?: stri
   try { url = new URL(origin); } catch { throw usage('Use an exact HTTPS Marketplace origin or HTTP loopback development origin.'); }
   if (origin.length > 2048 || /[\x00-\x20\x7f]/.test(origin) || url.origin !== origin || url.username || url.password
     || !['https:', 'http:'].includes(url.protocol)
-    || (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname))) {
+    || (url.protocol === 'http:' && !isLoopbackHostname(url.hostname))) {
     throw usage('Use an exact HTTPS Marketplace origin without credentials, path, query or trailing slash; HTTP is allowed only for loopback development.');
   }
   if (origin !== productionMarketplaceOrigin && !options.audience) throw usage('A custom Marketplace --origin requires its exact matching --audience.');

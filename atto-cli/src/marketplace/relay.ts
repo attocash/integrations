@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import { AttoError } from '../domain/errors.js';
+import { isProofWindowValid, parseControllerProofFrame } from './proof-frame.js';
 import { parseJsonObject } from './strict-json.js';
 
 const hash = z.string().regex(/^[a-fA-F0-9]{64}$/);
@@ -29,7 +30,9 @@ export function decodePaymentHeader(header: string): Record<string, unknown> {
   try { return parseJsonObject(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); } catch { return invalid('Invalid x402 JSON.'); }
 }
 function parseRelayBinding(request: RelayBinding): RelayTerms {
-  const terms = termsSchema.parse(request.terms);
+  const parsed = termsSchema.safeParse(request.terms);
+  if (!parsed.success) invalid();
+  const terms = parsed.data;
   let origin: URL;
   try { origin = new URL(request.origin); } catch { return invalid(); }
   if (origin.origin !== request.origin || origin.username || origin.password || origin.pathname !== '/' || origin.search || origin.hash
@@ -102,16 +105,17 @@ const signedProof = z.strictObject({
 
 // Only existing journals can contain this retired authorization frame.
 function validateLegacyProof(terms: RelayTerms, transactionHash: string, audience: string, challenge: RelayProof): void {
-  const lines = challenge.message.split('\n');
-  if (lines.length !== 10 || /[\r\0]/.test(challenge.message) || lines[0] !== `${terms.asset === 'ATTO' ? '' : 'Nano '}Marketplace Agent Controller Proof v1`
-    || lines[1] !== `Audience: ${audience}` || lines[2] !== `Network: ${terms.asset === 'ATTO' ? 'live' : terms.network}`
-    || lines[3] !== `Address: ${terms.senderAddress}` || lines[4] !== 'Purpose: payment evidence' || lines[5] !== `Request ID: ${challenge.challengeId}`
-    || lines[6] !== `Binding Hash: ${relayEvidenceBinding(terms, transactionHash)}` || !/^Nonce: [a-f0-9]{64}$/.test(lines[7]!)
-    || !lines[8]!.startsWith('Issued At: ') || !lines[9]!.startsWith('Expiration Time: ')) invalid('Payment proof differs from the original candidate or audience.');
-  const issuedAt = lines[8]!.slice('Issued At: '.length);
-  const expiresAt = lines[9]!.slice('Expiration Time: '.length);
-  const issued = Date.parse(issuedAt), expires = Date.parse(expiresAt);
-  if (!Number.isSafeInteger(issued) || !Number.isSafeInteger(expires) || expires <= issued || expires - issued > 300_000) invalid('Invalid saved proof timing.');
+  const header = `${terms.asset === 'ATTO' ? '' : 'Nano '}Marketplace Agent Controller Proof v1`;
+  const frame = parseControllerProofFrame(challenge.message, header, { requireBindingHash: true });
+  if (!frame || frame.audience !== audience || frame.network !== (terms.asset === 'ATTO' ? 'live' : terms.network)
+    || frame.address !== terms.senderAddress || frame.purpose !== 'payment evidence'
+    || frame.challengeId !== challenge.challengeId
+    || frame.bindingHash !== relayEvidenceBinding(terms, transactionHash)) {
+    invalid('Payment proof differs from the original candidate or audience.');
+  }
+  if (!isProofWindowValid(Date.parse(frame.issuedAt), Date.parse(frame.expiresAt), { allowExpired: true, allowFuture: true })) {
+    invalid('Invalid saved proof timing.');
+  }
 }
 
 function encodePayload(offer: RelayOffer, payload: Record<string, unknown>, extensions: Record<string, unknown>): string {
@@ -134,7 +138,9 @@ export function validateRetainedRelayPayload(offer: RelayOffer, requestId: strin
   let expected: string, proof: RelayProof | undefined;
   if (Object.hasOwn(extensions, MARKETPLACE_BINDING)) {
     const original = object(offer.raw.extensions), binding = object(original[MARKETPLACE_BINDING]);
-    proof = signedProof.parse(object(extensions[MARKETPLACE_BINDING]).proof);
+    const parsedProof = signedProof.safeParse(object(extensions[MARKETPLACE_BINDING]).proof);
+    if (!parsedProof.success) invalid('Payment proof differs from the original candidate or audience.');
+    proof = parsedProof.data;
     validateLegacyProof(offer.terms, transactionHash, offer.audience, proof);
     expected = encodePayload(offer, payload, { ...original, 'payment-identifier': identifierExtension(offer, requestId),
       [MARKETPLACE_BINDING]: { ...binding, proof: object(extensions[MARKETPLACE_BINDING]).proof } });

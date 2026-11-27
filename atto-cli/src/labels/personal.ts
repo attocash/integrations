@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { AttoError } from '../domain/errors.js';
-import { parseAddress } from '../network/reader.js';
+import { parseAddress } from '../domain/address.js';
 import type { StateStore } from '../storage/state.js';
 import type { NetworkName } from '../wallet/types.js';
 

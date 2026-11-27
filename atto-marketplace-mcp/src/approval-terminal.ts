@@ -2,14 +2,14 @@ import { takeJsonFlag, terminalFields, writeTerminalResult } from './terminal-ou
 import { defaultMarketplaceHome, loginAuthorizationHelp } from './defaults.js';
 import { existsSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
-import { createInterface } from 'node:readline/promises';
 import { createApplication } from '@attocash/cli/core';
 import { signMarketplaceAttoController, signPreauthorizedMarketplaceAttoLogin } from '@attocash/cli/internal-marketplace';
 import { loadConfiguration, signMarketplaceNanoController } from '@attocash/atto-marketplace-nano-adapter';
 import { MarketplaceProfileStore, ProfileError } from './profile-store.js';
 import { managedWalletEnvironment } from './wallet-home.js';
 import { canonicalJson } from './canonical-json.js';
-import {expiredUnsignedLoginApproval,expiredLoginRetry,walletConsentRequired} from './setup.js';
+import { expiredUnsignedLoginApproval, expiredLoginRetry, walletConsentRequired } from './setup-recovery.js';
+import { confirmWithApprove, requireInteractiveTerminal } from './terminal-input.js';
 import { validateTypedApproval } from './approval-validation.js';
 import { approvalRequestDigest, approvalRequestPath, approvalResponsePath, approvalResponseIsAbsent, readApprovalRequest, readApprovalResponse,
   validateApprovalResponse, verifyApprovalSignature, writeApprovalResponse, type MarketplaceProofApprovalRequest } from './approval-files.js';
@@ -325,14 +325,11 @@ async function nativeIdentity(env: NodeJS.ProcessEnv, request: MarketplaceProofA
   return { directory, network: configuration.network, configuration };
 }
 
-async function confirm(preview: string): Promise<boolean> {
-  process.stderr.write(`${preview}\n`);
-  const terminal = createInterface({ input: process.stdin, output: process.stderr });
-  try { return (await terminal.question('Type APPROVE to confirm: ')).trim() === 'APPROVE'; }
-  finally { terminal.close(); }
+function confirm(preview: string): Promise<boolean> {
+  return confirmWithApprove(preview);
 }
 function requireTerminal(): void {
-  if (!process.stdin.isTTY || !process.stderr.isTTY) throw new ProfileError('TERMINAL_REQUIRED', 'Marketplace controller approvals require an interactive local terminal.');
+  requireInteractiveTerminal('Marketplace controller approvals require an interactive local terminal.');
 }
 function invalid(): ProfileError {
   return new ProfileError('APPROVAL_BINDING', 'Use the exact private typed request prepared by this pinned Marketplace profile or pending setup.');

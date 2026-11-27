@@ -20,6 +20,61 @@ export function defaultDataDirectory(): string {
   return join(process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share'), 'atto-mcp');
 }
 
+export const STATE_SCHEMA_VERSION = 2;
+
+export interface ReadOnlyState {
+  readonly userVersion: number;
+  hasSettingsTable(): boolean;
+  get<T>(key: string, maxChars?: number): T | undefined;
+  pendingSendCount(): number;
+  close(): void;
+}
+
+/** Read-only snapshot access owned by StateStore without initialization, migration, or chmod. */
+export function openReadOnlyState(directory: string, options: {
+  busyTimeoutMs?: number;
+  beginTransaction?: boolean;
+  holdLifecycleLease?: boolean;
+} = {}): ReadOnlyState {
+  const root = resolve(directory);
+  const lifecycle = options.holdLifecycleLease
+    ? new DatabaseSync(join(root, 'lifecycle.sqlite'), { readOnly: true })
+    : undefined;
+  let state: DatabaseSync | undefined;
+  try {
+    if (lifecycle) lifecycle.exec('PRAGMA busy_timeout = 0; BEGIN; SELECT COUNT(*) FROM lease;');
+    state = new DatabaseSync(join(root, 'state.sqlite'), { readOnly: true });
+    if (options.busyTimeoutMs !== undefined) state.exec(`PRAGMA busy_timeout = ${options.busyTimeoutMs};`);
+    if (options.beginTransaction) state.exec('BEGIN;');
+    const userVersion = Number(state.prepare('PRAGMA user_version').get()?.user_version ?? 0);
+    const db = state;
+    return {
+      userVersion,
+      hasSettingsTable(): boolean {
+        return Boolean(db.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'settings'").get());
+      },
+      get<T>(key: string, maxChars?: number): T | undefined {
+        const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+        if (!row) return undefined;
+        if (typeof row.value !== 'string' || (maxChars !== undefined && row.value.length > maxChars)) {
+          throw new Error('Invalid state value');
+        }
+        return JSON.parse(row.value) as T;
+      },
+      pendingSendCount(): number {
+        const row = db.prepare("SELECT COUNT(*) AS count FROM settings, json_each(settings.value) WHERE settings.key = 'spending.records' AND json_extract(json_each.value, '$.status') IN ('reserved', 'signed', 'unknown')").get();
+        return Number(row?.count ?? 0);
+      },
+      close(): void {
+        try { db.close(); } finally { lifecycle?.close(); }
+      },
+    };
+  } catch (error) {
+    try { state?.close(); } finally { lifecycle?.close(); }
+    throw error;
+  }
+}
+
 /** Public wallet state only. Recovery material belongs exclusively in SecretStore. */
 export class StateStore {
   readonly directory: string;
@@ -219,6 +274,40 @@ export class StateStore {
       if (!held) return;
       held = false;
       try { closeConnections(); } finally { this.lockRequests--; }
+    };
+  }
+
+  /** Acquire locks for an arbitrary number of wallet accounts in sorted order. */
+  tryAllAccountLocks(indexes: readonly number[]): (() => void) | undefined {
+    if (this.closed) throw new AttoError('STATE_CLOSED', 'The wallet state is closed.');
+    const unique = [...new Set(indexes)].sort((left, right) => left - right);
+    const releases: Array<() => void> = [];
+    const releaseAll = () => {
+      let failure: unknown;
+      for (const release of releases.reverse()) {
+        try { release(); } catch (error) { failure ??= error; }
+      }
+      releases.length = 0;
+      if (failure) throw failure;
+    };
+    try {
+      for (let offset = 0; offset < unique.length; offset += 100) {
+        const release = this.tryAccountLocks(unique.slice(offset, offset + 100));
+        if (!release) {
+          releaseAll();
+          return undefined;
+        }
+        releases.push(release);
+      }
+    } catch (error) {
+      releaseAll();
+      throw error;
+    }
+    let held = true;
+    return () => {
+      if (!held) return;
+      held = false;
+      releaseAll();
     };
   }
 

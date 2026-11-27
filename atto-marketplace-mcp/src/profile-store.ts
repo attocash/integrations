@@ -1,8 +1,18 @@
 import { assertPrivatePermissions, securePrivatePermissions } from '@attocash/cli/internal-marketplace';
-import { chmodSync, closeSync, constants, lstatSync, mkdirSync, openSync } from 'node:fs';
-import { isAbsolute, join, parse, resolve, sep } from 'node:path';
+import { chmodSync, closeSync, constants, lstatSync, openSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
+import {
+  isControllerAddress, isOpaqueHandle, isProfileId, isUuid, parseMarketplaceOrigin,
+} from './marketplace-validation.js';
+import {
+  assertPrivateProfileFile, assertProfileFiles, assertWalletDirectory, ensureProfileHome, walletPathError,
+} from './private-directory.js';
+import { ProfileError } from './profile-error.js';
+
+export { assertWalletDirectory } from './private-directory.js';
+export { ProfileError } from './profile-error.js';
 
 const PROFILE_DATABASE_BUSY_TIMEOUT_MS = 5_000;
 
@@ -66,10 +76,6 @@ export interface MutationIdentity {
   operation: string;
   target: string;
   requestHash: string;
-}
-
-export class ProfileError extends Error {
-  constructor(readonly code: string, message: string) { super(message); }
 }
 
 export class MarketplaceProfileStore {
@@ -227,10 +233,9 @@ export class MarketplaceProfileStore {
     assertUuid(profile.accountId, 'account');
     assertUuid(profile.agentId, 'agent');
     assertUuid(profile.identityId, 'identity');
-    const validAddress = profile.controllerNetwork === 'ATTO'
-      ? /^atto:\/\/[a-z2-7]{61}$/.test(profile.controllerAddress)
-      : /^(?:nano|xrb)_[13][13456789abcdefghijkmnopqrstuwxyz]{59}$/.test(profile.controllerAddress);
-    if (!validAddress) throw new ProfileError('CONTROLLER_ADDRESS', `The configured ${profile.controllerNetwork} controller address is invalid.`);
+    if (!isControllerAddress(profile.controllerNetwork, profile.controllerAddress)) {
+      throw new ProfileError('CONTROLLER_ADDRESS', `The configured ${profile.controllerNetwork} controller address is invalid.`);
+    }
     const maximumIndex = profile.controllerNetwork === 'ATTO' ? 0x7fff_ffff : 0xffff_ffff;
     if (profile.controllerIndex !== undefined && (!Number.isSafeInteger(profile.controllerIndex) || profile.controllerIndex < 0 || profile.controllerIndex > maximumIndex)) {
       throw new ProfileError('CONTROLLER_INDEX', `The ${profile.controllerNetwork} controller wallet index must be from 0 through ${maximumIndex}.`);
@@ -450,17 +455,6 @@ export class MarketplaceProfileStore {
       state: row.state as 'PENDING' | 'COMPLETE', resultIdentity: nullableString(row.result_identity) };
   }
 
-  listFundingRecoveryProfileAliases(profile: Pick<MarketplaceProfile, 'id' | 'origin' | 'accountId' | 'identityId'>,
-    requestId: string): Array<{profileId:string}> {
-    assertProfileId(profile.id);
-    assertUuid(requestId, 'request');
-    const rows=this.db.prepare(`SELECT p.id FROM profiles p JOIN mutations m ON m.profile_id=p.id
-      WHERE p.id<>? AND p.origin=? AND p.account_id=? AND p.identity_id=? AND m.request_id=?
-        AND m.operation='marketplace-fund' AND m.target=p.account_id ORDER BY p.id`)
-      .all(profile.id,profile.origin,profile.accountId,profile.identityId,requestId) as Array<{id:string}>;
-    return rows.map(row => ({profileId:String(row.id)}));
-  }
-
   setPendingMutationResultIdentity(profileId: string, requestId: string, requestHash: string,
     expectedResultIdentity: string | null, resultIdentity: string): void {
     assertProfileId(profileId);
@@ -676,9 +670,6 @@ export class MarketplaceProfileStore {
   private schemaError(): ProfileError {
     return new ProfileError('PROFILE_SCHEMA','This Marketplace MCP profile database uses an unsupported schema. Configure a fresh Marketplace MCP home; native wallet directories and their recovery state must be retained.');
   }
-
-
-
 }
 
 function profileFromRow(row: Record<string, unknown>): MarketplaceProfile {
@@ -697,27 +688,25 @@ function profileFromRow(row: Record<string, unknown>): MarketplaceProfile {
 }
 
 function assertProfileId(value: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(value)) throw new ProfileError('PROFILE_ID', 'Profile IDs must be 1 to 48 letters, digits, underscores or hyphens.');
+  if (!isProfileId(value)) throw new ProfileError('PROFILE_ID', 'Profile IDs must be 1 to 48 letters, digits, underscores or hyphens.');
 }
 
 function assertUuid(value: string, label: string): void {
-  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)) {
+  if (!isUuid(value)) {
     throw new ProfileError('INVALID_ID', `The ${label} ID must be a canonical UUID.`);
   }
 }
 
 function assertOpaqueHandle(value: string): void {
-  if (!/^[a-f0-9]{32}$/.test(value)) throw new ProfileError('HANDOFF_ID', 'Handoff IDs must be opaque 128-bit handles.');
+  if (!isOpaqueHandle(value)) throw new ProfileError('HANDOFF_ID', 'Handoff IDs must be opaque 128-bit handles.');
 }
 
 function assertOrigin(value: string): void {
-  let url: URL;
-  try { url = new URL(value); } catch { throw new ProfileError('PROFILE_ORIGIN', 'The Marketplace origin must be an absolute HTTPS origin.'); }
-  const loopback = ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname.toLowerCase());
-  if (url.username || url.password || url.pathname !== '/' || url.search || url.hash
-    || (url.protocol !== 'https:' && !(url.protocol === 'http:' && loopback))) {
-    throw new ProfileError('PROFILE_ORIGIN', 'The Marketplace origin must be HTTPS; HTTP is allowed only for loopback development.');
-  }
+  parseMarketplaceOrigin(value, reason => {
+    throw new ProfileError('PROFILE_ORIGIN', reason === 'syntax'
+      ? 'The Marketplace origin must be an absolute HTTPS origin.'
+      : 'The Marketplace origin must be HTTPS; HTTP is allowed only for loopback development.');
+  });
 }
 
 function nullableString(value: unknown): string | null { return typeof value === 'string' ? value : null; }
@@ -730,73 +719,6 @@ function parseScopes(value: unknown): string[] {
   } catch { return []; }
 }
 
-/** Validates public directory metadata without reading any wallet files or secrets. */
-export function assertWalletDirectory(path: string, allowMissing = false): boolean {
-  if (!isAbsolute(path) || path.length > 4096 || resolve(path) !== path
-    || /[\u0000-\u001f\u007f]/.test(path)) throw walletPathError();
-  if (process.platform === 'win32') {
-    try { assertPrivatePermissions(path, 'directory'); return true; }
-    catch (error) {
-      if (!allowMissing || (error as NodeJS.ErrnoException).code !== 'ENOENT') throw walletPathError();
-      // Check existing ancestors from the root before accepting a missing setup target.
-    }
-  }
-  let current = parse(path).root;
-  for (const component of path.slice(current.length).split(sep).filter(Boolean)) {
-    current = join(current, component);
-    let info;
-    try { info = lstatSync(current); }
-    catch (error) {
-      if (allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-      throw walletPathError();
-    }
-    if (!info.isDirectory() || info.isSymbolicLink()) throw walletPathError();
-  }
-  const info = lstatSync(path);
-  if (process.platform !== 'win32' && (typeof process.getuid !== 'function'
-    || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o700)) throw walletPathError();
-  return true;
-}
-
-function assertPrivateProfileFile(path: string, allowMissing: boolean): boolean {
-  let info;
-  try { info = lstatSync(path); }
-  catch (error) {
-    if (allowMissing && (error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw walletPathError();
-  }
-  if (!info.isFile() || info.isSymbolicLink() || info.nlink !== 1
-    || (process.platform !== 'win32' && (typeof process.getuid !== 'function'
-      || info.uid !== process.getuid() || (info.mode & 0o777) !== 0o600))) throw walletPathError();
-  return true;
-}
-
-/** Check existing SQLite artifacts before SQLite opens them. */
-function assertProfileFiles(home: string): void {
-  assertWalletDirectory(home);
-  const database = join(home, 'profiles.sqlite');
-  assertPrivateProfileFile(database, false);
-  for (const suffix of ['-journal', '-wal', '-shm']) assertPrivateProfileFile(database + suffix, true);
-}
-
-function walletPathError(): ProfileError {
-  return new ProfileError('WALLET_SETUP_REQUIRED', 'The selected Marketplace wallet or its private profile storage is missing or unsafe. Review the wallet selection in the local terminal.');
-}
-
 export function requireSession(profile: MarketplaceProfile): void {
   if (profile.authMode!=='controller-session') throw new ProfileError('SETUP_REQUIRED','This operation requires a controller-session profile. Use guided setup to configure a separate controller-session profile; scoped API-key profiles do not gain controller authority.');
-}
-
-function ensureProfileHome(home: string): void {
-  let current = parse(home).root;
-  for (const component of home.slice(current.length).split(sep).filter(Boolean)) {
-    current = join(current, component);
-    let created = false;
-    try { mkdirSync(current, { mode: 0o700 }); created = true; }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'EEXIST') throw error; }
-    const info = lstatSync(current);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new ProfileError('PROFILE_PATH', 'The Marketplace MCP profile directory must be a real directory.');
-    if (created) securePrivatePermissions(current, 'directory');
-  }
-
 }

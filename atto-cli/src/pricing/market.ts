@@ -1,5 +1,6 @@
 import { amountOutput, amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
+import { readBoundedText } from '../network/http.js';
 
 export const DEFAULT_METRICS_URL = 'https://gatekeeper.live.application.atto.cash/projections/metrics';
 const MAX_RESPONSE_BYTES = 1_048_576;
@@ -40,29 +41,13 @@ export class MarketData {
         await response.body?.cancel();
         throw new AttoError('MARKET_DATA_UNAVAILABLE', 'Market data is currently unavailable.', { httpStatus: response.status });
       }
-      if (Number(response.headers.get('content-length') ?? 0) > MAX_RESPONSE_BYTES) {
-        await response.body.cancel();
-        throw new AttoError('MARKET_DATA_INVALID', 'The market-data response exceeds the supported size.');
-      }
-      const reader = response.body.getReader();
-      const chunks: Uint8Array[] = [];
-      let size = 0;
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          size += value.byteLength;
-          if (size > MAX_RESPONSE_BYTES) {
-            await reader.cancel();
-            throw new AttoError('MARKET_DATA_INVALID', 'The market-data response exceeds the supported size.');
-          }
-          chunks.push(value);
-        }
-      } finally { reader.releaseLock(); }
-      const bytes = new Uint8Array(size);
-      let offset = 0;
-      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
-      try { payload = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes)); }
+      const body = await readBoundedText(response, {
+        maxBytes: MAX_RESPONSE_BYTES,
+        fatalUtf8: true,
+        onInvalidUtf8: () => { throw new AttoError('MARKET_DATA_INVALID', 'The market-data response is not valid JSON.'); },
+        onTooLarge: () => { throw new AttoError('MARKET_DATA_INVALID', 'The market-data response exceeds the supported size.'); },
+      });
+      try { payload = JSON.parse(body); }
       catch { throw new AttoError('MARKET_DATA_INVALID', 'The market-data response is not valid JSON.'); }
     } catch (error) {
       if (error instanceof AttoError) throw error;

@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 import { AttoSendBlock, AttoTransaction } from '@attocash/commons-core';
 import { AttoError } from '../domain/errors.js';
-import { parseAddress } from '../network/reader.js';
+import { parseAddress } from '../domain/address.js';
 
 export type AttoPaymentNetwork = 'atto:live' | 'atto:beta' | 'atto:dev' | 'atto:local';
 

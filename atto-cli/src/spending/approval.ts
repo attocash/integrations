@@ -1,14 +1,14 @@
 import { isDeepStrictEqual } from 'node:util';
+import { currentShell, quoteShellArgument } from '../domain/shell.js';
 import type { LimitsProposal, McpAccess } from './ledger.js';
 import type { AccountPool, SpendingPolicy } from '../wallet/types.js';
 
 /** Public guidance only; approval remains a separate human terminal operation. */
 export function approvalInstructions(proposal: LimitsProposal,
   current: { access: McpAccess; policy: SpendingPolicy; pool: AccountPool; messageSigningIndexes: number[] }) {
-  const shell = process.platform === 'win32' ? 'powershell' : 'posix';
-  const quote = (argument: string) => /^[a-z\d_./:@=-]+$/i.test(argument) ? argument
-    : `'${argument.replace(/'/g, shell === 'powershell' ? "''" : "'\\''")}'`;
-  const args = ['--data-dir', proposal.directory, 'limits', 'approve', proposal.id].map(quote).join(' ');
+  const shell = currentShell();
+  const args = ['--data-dir', proposal.directory, 'limits', 'approve', proposal.id]
+    .map(argument => quoteShellArgument(argument, shell)).join(' ');
   const pool = proposal.pool ?? current.pool;
   return {
     method: 'local-terminal',

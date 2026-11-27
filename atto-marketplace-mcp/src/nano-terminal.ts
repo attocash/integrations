@@ -1,6 +1,5 @@
 import { takeJsonFlag, terminalFields, writeTerminalResult } from './terminal-output.js';
 import { defaultMarketplaceHome } from './defaults.js';
-import { createInterface } from 'node:readline/promises';
 import { join, resolve } from 'node:path';
 import { provisionNanoWallet, approveNanoWalletPolicy, loadConfiguration, validateConfiguration, inspectNanoSeed, inspectNanoRecoveryWallet, type ControllerPurpose } from '@attocash/atto-marketplace-nano-adapter';
 import { initializeMarketplaceRecoveryWallet } from '@attocash/cli/internal-marketplace';
@@ -12,6 +11,7 @@ import { ProfileError } from './profile-store.js';
 import { callWallet } from './wallet-process.js';
 import { defaultNanoRpcUrl, usesMarketplaceWork } from './nano-work.js';
 import { validateNanoRpcUrl } from './nano-setup.js';
+import { confirmWithApprove, requireInteractiveTerminal } from './terminal-input.js';
 
 export const nanoWalletUsage = `Nano wallet: atto-marketplace-mcp wallet setup --asset XNO --network <nano:dev|nano:mainnet> [--rpc-url <url>] [--work-url <url>] --origin <marketplace-origin> --audience <audience> [--home <private-directory>] [--index <index>] [--recovery-wallet-dir <existing-Atto-wallet-directory> | --seed-file <private-file>] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw>] [--rolling-24h-atomic <raw>] [--unlimited]\nRPC defaults for new profiles: nano:mainnet uses https://rpc.nano.to; nano:dev uses http://localhost:17076. Existing profiles retain their configured RPC when --rpc-url is omitted. Work uses an explicit or saved --work-url. Signed-in production mainnet wallets using the default RPC use Marketplace for work. Other wallets use their RPC.\nPolicy: atto-marketplace-mcp wallet policy --asset XNO [--home <private-directory>] [--allow-external-transfers] [--allow-purpose <purpose>] [--max-payment-atomic <raw> --rolling-24h-atomic <raw> | --unlimited]\nUnlimited spending can spend the available wallet balance, including future deposits.\nApproval: atto-marketplace-mcp approve <private-request-path> [--home <private-directory>]\nStatus: atto-marketplace-mcp wallet status --asset XNO [--home <private-directory>]\n`;
 
@@ -107,12 +107,10 @@ function environment(home:string|undefined,env:NodeJS.ProcessEnv):NodeJS.Process
   return managedWalletEnvironment(resolve(home??env.MARKETPLACE_MCP_HOME??defaultMarketplaceHome(env)),env);
 }
 function requireTerminal():void {
-  if(!process.stdin.isTTY||!process.stderr.isTTY)throw new ProfileError('TERMINAL_REQUIRED','Marketplace wallet setup and approvals require an interactive local terminal.');
+  requireInteractiveTerminal('Marketplace wallet setup and approvals require an interactive local terminal.');
 }
-async function confirm(preview:string):Promise<boolean> {
-  process.stderr.write(preview.endsWith('\n')?preview:`${preview}\n`);
-  const terminal=createInterface({input:process.stdin,output:process.stderr});
-  try{return (await terminal.question('Type APPROVE to confirm: ')).trim()==='APPROVE';}finally{terminal.close();}
+function confirm(preview:string):Promise<boolean> {
+  return confirmWithApprove(preview);
 }
 function usage():ProfileError{return new ProfileError('SETUP_USAGE',nanoWalletUsage.trim());}
 

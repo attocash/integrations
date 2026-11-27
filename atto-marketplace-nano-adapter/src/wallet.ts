@@ -1,7 +1,7 @@
 import { parseJsonObject } from './json.js';
 import { isDeepStrictEqual } from 'node:util';
 import { NanoStateBlock, MAX_RAW, ZERO_HASH, addressPublicKey, canonicalAddress, canonicalHash, upperHex, validWork, type NanoNetwork } from './protocol.js';
-import { parseRelayOffer, relayPaymentPayload, type RelayTerms, type WalletRelayRequest } from '@attocash/cli/internal-marketplace';
+import { parseRelayOffer, relayPaymentPayload, type DurableRelayRequest, type RelayRequest, type RelayTerms, type WalletRelayRequest } from '@attocash/cli/internal-marketplace';
 import { NanoRpcClient, DEV_GENESIS_ACCOUNT, DEV_GENESIS_HASH, MAIN_GENESIS_ACCOUNT, MAIN_GENESIS_HASH, requireConfirmedFrontier, type NanoAccountSnapshot, type NanoWorkProvider } from './rpc.js';
 import { canonical, defaultDataDirectory, exactKeys, loadConfiguration, positiveRaw, sha256, text, withPrivateKey, type NanoWalletConfiguration } from './configuration.js';
 import { signControllerProof, validateControllerProof, verifyNanoMessage, type ControllerProofRequest } from './controller.js';
@@ -15,6 +15,7 @@ export interface NanoWalletOpenOptions {
     selectWorkProvider?: (configuration: NanoWalletConfiguration) => NanoWorkProvider | undefined;
     now?: () => number;
 }
+export type NanoRelayRequest = (Omit<RelayRequest, 'index'> & { index?: never }) | (Omit<DurableRelayRequest, 'index'> & { index?: never });
 export interface NanoTransferRequest {
     network: NanoNetwork;
     destination: string;
@@ -55,6 +56,26 @@ export type NanoWalletRequest = {
     args: {
         network: NanoNetwork;
         hash: string;
+    };
+} | {
+    operation: 'payment.prepare';
+    args: NanoRelayRequest;
+} | {
+    operation: 'payment.status';
+    args: {
+        requestId: string;
+    };
+} | {
+    operation: 'payment.relay.check';
+    args: {
+        requestId: string;
+        transactionHash: string;
+    };
+} | {
+    operation: 'payment.reauthorization.check';
+    args: {
+        requestId: string;
+        transactionHash: string;
     };
 } | {
     operation: 'devsource.open';
@@ -169,7 +190,7 @@ export class NanoWallet {
                 const signature = await signControllerProof(request, this.configuration, this.now(), () => { this.refreshPolicy(); return { config: this.configuration, now: this.now() }; });
                 return { signature };
             }
-            case 'message.verify': return { valid: verifyNanoMessage(args as any) };
+            case 'message.verify': return { valid: verifyMessageArgs(args) };
             case 'transfer.send': return await this.locked(() => this.transfer(args));
             case 'payment.prepare': return await this.locked(() => this.prepareRelay(args));
             case 'payment.status': {
@@ -584,7 +605,7 @@ export class NanoWallet {
 export async function dispatchNanoOperation(env: NodeJS.ProcessEnv, operation: string, args: Record<string, unknown> = {},
     selectWorkProvider?: NanoWalletOpenOptions['selectWorkProvider']): Promise<Record<string, unknown>> {
     if (operation === 'message.verify')
-        return { valid: verifyNanoMessage(args as any) };
+        return { valid: verifyMessageArgs(args) };
     const wallet = NanoWallet.open({ dataDir: defaultDataDirectory(env), ...(selectWorkProvider && { selectWorkProvider }) });
     try {
         return await wallet.call(operation, args);
@@ -592,4 +613,14 @@ export async function dispatchNanoOperation(env: NodeJS.ProcessEnv, operation: s
     finally {
         wallet.close();
     }
+}
+
+function verifyMessageArgs(args: unknown): boolean {
+    if (!args || typeof args !== 'object' || Array.isArray(args)) return false;
+    const record = args as Record<string, unknown>;
+    if (Object.keys(record).length !== 3 || typeof record.address !== 'string'
+        || typeof record.message !== 'string' || typeof record.signature !== 'string') {
+        return false;
+    }
+    return verifyNanoMessage({ address: record.address, message: record.message, signature: record.signature });
 }

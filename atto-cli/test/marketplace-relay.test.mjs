@@ -238,3 +238,22 @@ test('concurrent ATTO prepares retain one header and use one allowance', {timeou
     assert.equal(app.ledger.usage().pendingRaw,'40');assert.equal(f.state.publicationAttempts.length,0);
   } finally { f.state.holdWork.release(); }
 });
+
+test('denied ATTO relay prepares leave no journal reservation and malformed inputs report INVALID_INPUT', async t => {
+  // Given an MCP wallet whose approved pool includes only account 0 and a valid relay offer targeting account 1.
+  const f = await fixture(t, ['100', '100']);
+  f.app.store.set('spending.pool', { indexes: [0], consolidate: false });
+  const app = f.open('mcp', { internalMarketplaceAuthorizeWrite: () => {} });
+  const p = { ...terms('ATTO', f.addresses[1].address, f.recipient.address), baselineFrontier: '01'.repeat(32) };
+  const unapprovedRequest = { requestId: paymentId, origin: 'https://marketplace.example', audience: 'marketplace', terms: p, index: 1, paymentRequired: offer(p) };
+
+  // When preparing a relay payment with an unapproved source index or malformed input fields.
+  await assert.rejects(app.marketplaceRelay('payment_prepare', unapprovedRequest), { code: 'POOL_APPROVAL_REQUIRED' });
+  await assert.rejects(app.marketplaceRelay('payment_prepare', { requestId: 'not-a-uuid' }), { code: 'INVALID_INPUT' });
+  await assert.rejects(app.marketplaceRelay('payment_status', { requestId: 'not-a-uuid' }), { code: 'INVALID_INPUT' });
+
+  // Then no relay reservation or allowance usage is left behind in the payment journal.
+  assert.equal(app.ledger.get(paymentId), undefined);
+  assert.equal(app.ledger.journalList().items.length, 0);
+  assert.equal(app.ledger.usage().pendingRaw, '0');
+});

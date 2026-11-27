@@ -1,10 +1,19 @@
 import {createInterface} from 'node:readline/promises';
 import {homedir} from 'node:os';
 import {isAbsolute,join,normalize} from 'node:path';
-import {ProfileError} from './profile-store.js';
+import {ProfileError} from './profile-error.js';
 export type Prompt=(question:string)=>Promise<string>;
+export function requireInteractiveTerminal(message:string):void {
+  if(!process.stdin.isTTY||!process.stderr.isTTY)throw new ProfileError('TERMINAL_REQUIRED',message);
+}
 export function requireSetupTerminal():void {
-  if(!process.stdin.isTTY||!process.stderr.isTTY)throw new ProfileError('TERMINAL_REQUIRED','Marketplace setup requires an interactive local terminal.');
+  requireInteractiveTerminal('Marketplace setup requires an interactive local terminal.');
+}
+export async function confirmWithApprove(preview:string):Promise<boolean> {
+  process.stderr.write(preview.endsWith('\n')?preview:`${preview}\n`);
+  const terminal=createInterface({input:process.stdin,output:process.stderr});
+  try{return (await terminal.question('Type APPROVE to confirm: ')).trim()==='APPROVE';}
+  finally{terminal.close();}
 }
 export async function terminalPrompt(question:string):Promise<string> {
   requireSetupTerminal();

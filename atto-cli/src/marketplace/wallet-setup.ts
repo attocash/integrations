@@ -1,16 +1,16 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, join } from 'node:path';
 import { isDeepStrictEqual } from 'node:util';
-import { DatabaseSync } from 'node:sqlite';
-import { AttoAddress } from '@attocash/commons-core';
-import { requireTerminal } from '../cli/terminal.js';
 import { AttoApplication } from '../application/app.js';
+import { requireTerminal } from '../cli/terminal.js';
+import { parseAddress } from '../domain/address.js';
 import { amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
+import { formatSpendingPolicy, validateSpendingPolicy } from '../spending/authority.js';
 import { SpendLedger, type LimitsProposal, type McpAccess } from '../spending/ledger.js';
-import { inspectWalletProfile, type WalletProfile } from '../storage/profiles.js';
-import { StateStore } from '../storage/state.js';
 import { assertPrivatePermissionsBatch } from '../storage/private-permissions.js';
+import { inspectWalletProfile, type WalletProfile } from '../storage/profiles.js';
+import { openReadOnlyState, STATE_SCHEMA_VERSION, StateStore } from '../storage/state.js';
 import type { AccountPool, NetworkName, SpendingPolicy, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
 
 /** Public saved state only. Recovery credentials and payment journals never enter this snapshot. */
@@ -33,14 +33,6 @@ export interface MarketplaceWalletSetupSnapshot {
   formattedLimits: string;
 }
 
-export function formatSpendingPolicy(policy: SpendingPolicy): string {
-  const perPayment = policy.perRequest ? `${policy.perRequest.amount} ${policy.perRequest.unit}` : 'Unlimited';
-  const rolling = policy.rolling.length
-    ? policy.rolling.map(rule => `${rule.amount} ${rule.unit} / ${rule.days} day${rule.days === 1 ? '' : 's'}`).join(', ')
-    : 'Unlimited';
-  return `Per payment: ${perPayment}; rolling: ${rolling}`;
-}
-
 function snapshot(store: StateStore, index: number): MarketplaceWalletSetupSnapshot {
   if (store.get('wallet.reset')) throw new AttoError('WALLET_RESET_REQUIRED', 'Finish wallet reset before configuring Marketplace.');
   const identity = store.get<WalletIdentity>('identity');
@@ -59,17 +51,14 @@ function snapshot(store: StateStore, index: number): MarketplaceWalletSetupSnaps
   }
   try {
     if (!/^[0-9a-f]{64}$/.test(identity.fingerprint)
-      || AttoAddress.parse(identity.address).value !== identity.address
-      || AttoAddress.parse(address.address).value !== address.address) throw new Error();
+      || parseAddress(identity.address).value !== identity.address
+      || parseAddress(address.address).value !== address.address) throw new Error();
   } catch {
     throw new AttoError('INVALID_STATE', 'The saved wallet identity or account address is invalid. Review it in the Atto CLI before setup.');
   }
   const ledger = new SpendLedger(store);
   const policy = ledger.policy();
-  const authorityRevision = store.get<number>('spending.policyRevision') ?? 0;
-  if (!Number.isSafeInteger(authorityRevision) || authorityRevision < 0 || authorityRevision === Number.MAX_SAFE_INTEGER) {
-    throw new AttoError('INVALID_STATE', 'The saved spending-policy revision is invalid.');
-  }
+  const authorityRevision = ledger.authorityRevision();
   return {
     directory: store.directory, profile: inspectWalletProfile(store.directory), address: address.address, index,
     fingerprint: identity.fingerprint, network: `atto:${settings.network.toLowerCase() as Lowercase<NetworkName>}`,
@@ -100,11 +89,9 @@ async function withExistingWallet<T>(options: { directory: string; index: number
     })),
   ]);
   // Compact setup must not implicitly upgrade or repair an older profile.
-  const inspection = new DatabaseSync(join(profile.directory, 'state.sqlite'), { readOnly: true });
+  const inspection = openReadOnlyState(profile.directory);
   try {
-    const version = inspection.prepare('PRAGMA user_version').get()?.user_version;
-    const table = inspection.prepare("SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'settings'").get();
-    if (version !== 2 || !table) {
+    if (inspection.userVersion !== STATE_SCHEMA_VERSION || !inspection.hasSettingsTable()) {
       throw new AttoError('STATE_VERSION', 'Open and review this wallet in the current Atto CLI before using compact Marketplace setup.');
     }
   } finally { inspection.close(); }
@@ -205,7 +192,7 @@ export async function prepareMarketplacePayments(options: {
   }
   const policy = structuredClone(options.policy !== undefined ? options.policy : intent.policy);
   if (!policy) throw new AttoError('INVALID_POLICY', 'Limited spending requires a bounded policy.');
-  validateRequestedPolicy(policy);
+  validateSpendingPolicy(policy);
   if (mode === 'limited' && !marketplaceSpendingPolicyBounded(policy)) {
     throw new AttoError('INVALID_POLICY', 'Limited spending requires a bounded policy.');
   }
@@ -228,11 +215,12 @@ export async function prepareMarketplacePayments(options: {
       : { ...before.pool, indexes: [...before.pool.indexes, before.index].sort((a, b) => a - b) },
     messageSigningIndexes: before.messageSigningIndexes,
   };
-  if(requested.pool.indexes.length>100)throw new AttoError('INVALID_POOL','The native payment pool already has 100 accounts. Review its pool in advanced wallet setup before adding this selected account.');
+  if (requested.pool.indexes.length > 100) {
+    throw new AttoError('INVALID_POOL', 'The native payment pool already has 100 accounts. Review its pool in advanced wallet setup before adding this selected account.');
+  }
   const changesAuthority = !isDeepStrictEqual(requested, {
     policy: before.policy, access: before.access, pool: before.pool, messageSigningIndexes: before.messageSigningIndexes,
   });
-  if (requested.pool.indexes.length > 100) throw new AttoError('INVALID_POOL', 'The shared native payment pool already contains the maximum of 100 accounts. Review its pool in the Atto CLI before adding this account.');
   const check = (store: StateStore): void => {
     assertSnapshot(store, before);
     if (resume) new SpendLedger(store).reviewProposal(resume.id, proposalWallet(before));
@@ -277,23 +265,6 @@ export async function prepareMarketplacePayments(options: {
 
 function validatePaymentMode(mode: MarketplacePaymentMode): void {
   if (!['login-only', 'limited', 'unlimited'].includes(mode)) throw new AttoError('INVALID_INPUT', 'Choose login-only, limited, or unlimited spending.');
-}
-
-function validateRequestedPolicy(policy: SpendingPolicy): void {
-  if (!policy || typeof policy !== 'object' || policy.perRequest === undefined || !Array.isArray(policy.rolling)) {
-    throw new AttoError('INVALID_POLICY', 'Provide a per-request limit or null and an array of rolling limits.');
-  }
-  try {
-    if (policy.perRequest !== null) {
-      if (!['ATTO', 'RAW'].includes(policy.perRequest.unit)) throw new Error();
-      amountRaw(policy.perRequest.amount, policy.perRequest.unit, true);
-    }
-    for (const rule of policy.rolling) {
-      if (!rule || !Number.isSafeInteger(rule.days) || rule.days <= 0 || !Number.isSafeInteger(rule.days * 86_400_000)) throw new Error();
-      if (!['ATTO', 'RAW'].includes(rule.unit)) throw new Error();
-      amountRaw(rule.amount, rule.unit, true);
-    }
-  } catch { throw new AttoError('INVALID_POLICY', 'Limits require valid decimal amounts, explicit ATTO or RAW units, and positive whole days.'); }
 }
 
 function proposalWallet(before: MarketplaceWalletSetupSnapshot) {

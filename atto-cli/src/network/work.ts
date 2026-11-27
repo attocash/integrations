@@ -1,5 +1,6 @@
 import { AttoBlock, AttoWork, attoBlockWorkTarget } from '@attocash/commons-core';
 import { AttoError } from '../domain/errors.js';
+import { readBoundedText } from './http.js';
 
 const RESPONSE_LIMIT = 2048;
 
@@ -35,22 +36,11 @@ export async function requestWork(block: AttoBlock, url: string, signal: AbortSi
 }
 
 async function readResponse(response: Response): Promise<unknown> {
-  if (!response.body) throw new AttoError('INVALID_WORK', 'The worker returned an empty response.');
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > RESPONSE_LIMIT) throw new AttoError('INVALID_WORK', 'The worker response exceeds the allowed size.');
-      chunks.push(value);
-    }
-    try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
-    catch { throw new AttoError('INVALID_WORK', 'The worker returned malformed JSON.'); }
-  } finally {
-    await reader.cancel().catch(() => undefined);
-    reader.releaseLock();
-  }
+  const text = await readBoundedText(response, {
+    maxBytes: RESPONSE_LIMIT,
+    onEmptyBody: () => { throw new AttoError('INVALID_WORK', 'The worker returned an empty response.'); },
+    onTooLarge: () => { throw new AttoError('INVALID_WORK', 'The worker response exceeds the allowed size.'); },
+  });
+  try { return JSON.parse(text); }
+  catch { throw new AttoError('INVALID_WORK', 'The worker returned malformed JSON.'); }
 }

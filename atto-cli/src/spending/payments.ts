@@ -1,28 +1,26 @@
-import { bindDestination, type DestinationBinding } from './destination.js';
 import { createHash } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import { isDeepStrictEqual } from 'node:util';
-import { z } from 'zod';
 import {
-  AttoAccount, AttoAmount, AttoBlock, AttoOpenBlock, AttoReceivable, AttoReceiveBlock,
-  AttoSeed, AttoSendBlock, AttoSignature, AttoTransaction, AttoUnit, toAttoIndex,
+  AttoAccount, AttoAmount, AttoBlock, AttoOpenBlock, AttoReceiveBlock,
+  AttoSeed, AttoSendBlock, AttoTransaction, AttoUnit, toAttoIndex,
 } from '@attocash/commons-core';
+import { parseAddress } from '../domain/address.js';
 import { amountOutput, amountRaw } from '../domain/amount.js';
 import { AttoError } from '../domain/errors.js';
-import { NodeReader, parseAddress, publicModel } from '../network/reader.js';
+import { NodeReader, publicModel } from '../network/reader.js';
 import { retryNetwork, type SendRetry } from '../network/retry.js';
 import type { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
 import type { StateStore } from '../storage/state.js';
-import { derivedSigner, signingWallet, publishTransaction } from '../wallet/signing.js';
+import { derivedSigner, publishTransaction, signingWallet } from '../wallet/signing.js';
 import type { SendRequest, WalletAddress, WalletSettings } from '../wallet/types.js';
 import type { WalletWork } from '../wallet/work.js';
+import { bindDestination, type DestinationBinding } from './destination.js';
 import { SpendLedger, type ConsolidationStep, type SendRecord } from './ledger.js';
 import { planPayment, type PoolAccount } from './pool.js';
 import { reconcileBlock, reconcileSend } from './reconcile.js';
-import { wireTransaction } from './atto-x402.js';
-import { parseDurableRelayRequest, parseRelayOffer, relayPaymentPayload, validateRetainedRelayPayload, type WalletRelayRequest } from '../marketplace/relay.js';
-import { parseJsonObject } from '../marketplace/strict-json.js';
+import { RelayPayments } from './relay-payments.js';
 
 interface PaymentWallet {
   settings(): WalletSettings;
@@ -36,10 +34,26 @@ type Quote = Awaited<ReturnType<MarketData['quoteUsd']>>;
 
 /** Owns payment selection, reservations, publication and recovery as one workflow. */
 export class Payments {
+  private readonly relay: RelayPayments;
+
   constructor(private readonly store: StateStore, private readonly ledger: SpendLedger,
     private readonly wallet: PaymentWallet, private readonly market: MarketData, private readonly work: WalletWork,
     private readonly retry?: SendRetry, private readonly onDestination?: (binding: DestinationBinding) => void,
-) {}
+  ) {
+    this.relay = new RelayPayments({
+      store,
+      ledger,
+      wallet,
+      work,
+      retry,
+      requireApproved: (record, requireReservation) => this.requireApproved(record, requireReservation),
+      checkBlock: (record, block) => this.checkBlock(record, block),
+      candidateBinding: record => this.candidateBinding(record),
+      retainedTransaction: record => this.retainedTransaction(record),
+      reconcile: () => this.reconcile(),
+      reconcileRecord: record => this.reconcileRecord(record),
+    });
+  }
 
   private reader() { return new NodeReader(this.wallet.settings()); }
   private indexes(record: SendRecord) { return record.plan?.indexes ?? [record.index]; }
@@ -299,7 +313,7 @@ export class Payments {
     });
     try {
       if (step?.kind === 'receive') {
-        const receivable = await this.pendingReceivable(step.destination, sendHash!);
+        const receivable = await this.reader().findPendingReceivable(step.destination, sendHash!, { requireReceiverMatch: true });
         if (!receivable || receivable.amount.toString() !== step.raw || receivable.network.name !== settings.network) {
           throw new AttoError('RECEIVABLE_NOT_PENDING', 'The consolidation transfer is not available to receive yet. Resume this payment with the same request ID.');
         }
@@ -314,7 +328,7 @@ export class Payments {
     } finally { execution.wallet.close(); }
   }
 
-  private candidateBinding(record: SendRecord, step?: ConsolidationStep): string {
+  candidateBinding(record: SendRecord, step?: ConsolidationStep): string {
     // Bind retained bytes to the original request, quote and already-selected plan.
     return createHash('sha256').update(JSON.stringify({ id: record.id, index: record.index,
       sourceAddress: record.sourceAddress, network: record.network, destination: record.destination, raw: record.raw,
@@ -382,143 +396,11 @@ export class Payments {
     return transaction;
   }
 
-  async prepareRelay(input: Record<string, unknown>): Promise<unknown> {
-    const binding = z.strictObject({ requestId: z.string().uuid(), origin: z.string(), audience: z.string(), terms: z.record(z.string(), z.unknown()),
-      index: z.number().int().min(0).max(0x7fff_ffff) });
-    const parsed = z.union([binding.extend({ paymentRequired: z.string() }), binding.extend({ mode: z.literal('DURABLE_NATIVE') })]).parse(input);
-    const request = parsed as unknown as WalletRelayRequest & { index: number };
-    const prior = this.ledger.get(request.requestId);
-    const offer = request.mode === undefined ? parseRelayOffer(request, Boolean(prior?.hash)) : undefined;
-    const terms = request.mode === 'DURABLE_NATIVE' ? parseDurableRelayRequest(request) : offer!.terms;
-    if (terms.asset !== 'ATTO' || terms.network !== `atto:${this.wallet.settings().network.toLowerCase()}`
-      || this.wallet.addresses().find(value => value.index === request.index)?.address !== terms.senderAddress
-      || parseAddress(terms.recipientAddress).value !== terms.recipientAddress
-      || terms.senderAddress === terms.recipientAddress) throw new AttoError('NETWORK_MISMATCH', 'The relay sender, destination or network differs from the selected wallet.');
-    // Market may have confirmed an older relay while this wallet process was offline.
-    // Canonical observation releases only completed/competing candidates; it never publishes.
-    await this.reconcile();
-    return this.store.withAccountLocks([request.index], async () => {
-      const record = await this.store.withWalletLock(async () => {
-        this.wallet.requireWrite();
-        const existing = this.ledger.get(request.requestId);
-        if (existing && (!existing.relay || existing.relay.mode !== request.mode)) {
-          throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another wallet operation or relay mode.');
-        }
-        if (!existing) this.ledger.assertAccountAvailable(request.index);
-        if (request.mode === undefined && existing?.relay && existing.relay.paymentRequired !== request.paymentRequired) {
-          this.ledger.refreshUnusedRelay(existing.id, { ...request, version: 1 });
-        }
-        const saved = this.ledger.reserve({ id: request.requestId, index: request.index, destination: terms.recipientAddress,
-          raw: terms.amountAtomic, sourceAddress: terms.senderAddress, network: this.wallet.settings().network,
-          selection: 'explicit', createdAt: existing?.createdAt ?? Date.now(), relay: { ...request, version: 1 } });
-        this.requireApproved(saved, saved.status !== 'published');
-        return saved;
-      });
-      if (record.status === 'failed') throw new AttoError('REQUEST_FAILED', 'Recover this original rejected native payment; no replacement was prepared.');
-      if (!record.hash) {
-        const seed = await this.wallet.seed();
-        let wallet: Awaited<ReturnType<typeof signingWallet>>['wallet'] | undefined;
-        try {
-          const execution = await signingWallet(seed, request.index, this.wallet.settings(), async block => {
-            await this.store.withWalletLock(async () => {
-              const current = this.ledger.get(record.id)!;
-              this.requireApproved(current); this.checkBlock(current, block);
-              if (!(block instanceof AttoSendBlock) || BigInt(block.height.toString()) <= BigInt(terms.baselineHeight)
-                || (BigInt(block.height.toString()) === BigInt(terms.baselineHeight) + 1n
-                  && terms.baselineFrontier !== null
-                  && block.previous.toString().toLowerCase() !== terms.baselineFrontier.toLowerCase())) {
-                throw new AttoError('TRANSACTION_MISMATCH', 'The candidate predates the frozen sender baseline.');
-              }
-            });
-          }, this.work.worker(), this.retry);
-          wallet = execution.wallet;
-          const transaction = await wallet.prepareSendByIndex(toAttoIndex(request.index), parseAddress(record.destination), AttoAmount.from(AttoUnit.RAW, record.raw), null);
-          await this.store.withWalletLock(async () => {
-            const current = this.ledger.get(record.id)!;
-            this.requireApproved(current); this.checkBlock(current, transaction.block);
-            const payload = { transaction: wireTransaction(transaction) };
-            const authorization = offer ? { paymentSignature: relayPaymentPayload(offer, record.id, payload) }
-              : { nativePayloadJson: JSON.stringify(payload) };
-            this.ledger.signed(record.id, transaction.hash.toString(), transaction.block.toJson(), transaction.toJson(), this.candidateBinding(current), authorization);
-          });
-        } finally { wallet?.close(); seed.value.fill(0); }
-      } else if (offer && !record.relay!.paymentSignature) {
-        // Complete a pre-upgrade prepare using the original signed transaction.
-        const transaction = await this.retainedTransaction(record);
-        const header = relayPaymentPayload(offer, record.id, { transaction: wireTransaction(transaction) });
-        await this.store.withWalletLock(async () => {
-          const current = this.ledger.get(record.id)!;
-          this.requireApproved(current, current.status !== 'published');
-          this.ledger.authorizeRelay(record.id, header);
-        });
-      }
-      return this.relayResult(this.ledger.get(record.id)!);
-    });
-  }
+  prepareRelay(input: Record<string, unknown>): Promise<unknown> { return this.relay.prepare(input); }
+  relayStatus(input: Record<string, unknown>): Promise<unknown> { return this.relay.status(input); }
+  checkDurableRelayAuthorization(input: Record<string, unknown>): Promise<unknown> { return this.relay.checkDurableAuthorization(input); }
 
-  private async relayResult(record: SendRecord): Promise<unknown> {
-    if (!record.relay) throw new AttoError('REQUEST_CONFLICT', 'This request belongs to another wallet operation.');
-    const transaction = record.hash ? await this.retainedTransaction(record) : undefined;
-    const result = { requestId: record.id, origin: record.relay.origin, audience: record.relay.audience, terms: record.relay.terms,
-      network: record.relay.terms.network, sourceAddress: record.sourceAddress, destination: record.destination, amountAtomic: record.raw,
-      hash: record.hash ?? null, state: record.status };
-    if (record.relay.mode === 'DURABLE_NATIVE') {
-      const payload = record.relay.nativePayloadJson ? parseJsonObject(record.relay.nativePayloadJson) : null;
-      if (transaction && !isDeepStrictEqual(payload, { transaction: wireTransaction(transaction) })) {
-        throw new AttoError('INVALID_STATE', 'The retained native payload differs from its original relay authorization.');
-      }
-      return { ...result, mode: record.relay.mode, payload };
-    }
-    if (record.relay.paymentSignature) {
-      if (!transaction) throw new AttoError('INVALID_STATE', 'Missing signed relay transaction.');
-      const offer = parseRelayOffer(record.relay, true);
-      const { payload, proof } = validateRetainedRelayPayload(offer, record.id, record.relay.paymentSignature, transaction.hash.toString());
-      if (!isDeepStrictEqual(payload, { transaction: wireTransaction(transaction) })
-        || (proof && !await AttoSignature.Companion.parse(proof.signature).isValidMessage(transaction.address.publicKey, Int8Array.from(Buffer.from(proof.message))))) {
-        throw new AttoError('INVALID_STATE', 'The retained relay payload differs from its original authorization.');
-      }
-    }
-    return { ...result, paymentRequired: record.relay.paymentRequired, paymentSignature: record.relay.paymentSignature ?? null };
-  }
-
-  async relayStatus(input: Record<string, unknown>): Promise<unknown> {
-    const { requestId, index } = z.strictObject({ requestId: z.string().uuid(), index: z.number().int().min(0).max(0x7fff_ffff).optional() }).parse(input), record = this.ledger.get(requestId);
-    if (!record) return { requestId, state: 'NOT_FOUND' };
-    if (index !== undefined && index !== record.index) throw new AttoError('REQUEST_CONFLICT', 'The original relay belongs to another selected wallet account.');
-    return this.store.withAccountLocks([record.index], async () => {
-      const current = this.ledger.get(requestId)!;
-      if (!current.relay) throw new AttoError('REQUEST_CONFLICT', 'This request ID belongs to another native operation.');
-      if (current.relay.mode !== 'DURABLE_NATIVE') await this.reconcileRecord(current);
-      return this.relayResult(this.ledger.get(requestId)!);
-    });
-  }
-
-  async checkDurableRelayAuthorization(input: Record<string, unknown>): Promise<unknown> {
-    const { requestId, index, transactionHash } = z.strictObject({ requestId: z.string().uuid(),
-      index: z.number().int().min(0).max(0x7fff_ffff), transactionHash: z.string().regex(/^[a-fA-F0-9]{64}$/) }).parse(input);
-    return this.store.withAccountLocks([index], async () => {
-      const record = this.ledger.get(requestId);
-      if (record?.relay?.mode !== 'DURABLE_NATIVE' || record.index !== index || record.status === 'failed'
-        || record.hash?.toLowerCase() !== transactionHash.toLowerCase()) {
-        throw new AttoError('REQUEST_CONFLICT', 'This request has no matching signed durable relay authorization.');
-      }
-      const result = await this.relayResult(record);
-      await this.store.withWalletLock(async () => this.requireApproved(record));
-      return result;
-    });
-  }
-
-  private async pendingReceivable(address: string, hash: string): Promise<AttoReceivable | undefined> {
-    const done = new AbortController();
-    let found: AttoReceivable | undefined;
-    await this.reader().stream({ event: 'receivable', addresses: [address], minAmountRaw: '1' }, model => {
-      const candidate = model as AttoReceivable;
-      if (candidate.hash.toString() === hash && candidate.receiverAddress.value === address) { found = candidate; done.abort(); }
-    }, AbortSignal.any([done.signal, AbortSignal.timeout(2000)]));
-    return found;
-  }
-
-  async reconcile(candidateIndexes?: number[]): Promise<void> {
+  async reconcile(): Promise<void> {
     for (const record of this.ledger.pending()) {
       if (record.external) continue;
       const release = this.store.tryAccountLocks(this.indexes(record));

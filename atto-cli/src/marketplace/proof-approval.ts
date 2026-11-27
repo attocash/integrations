@@ -1,6 +1,22 @@
 import { createHash } from 'node:crypto';
 import { AttoError } from '../domain/errors.js';
-import type { MarketplaceConnection } from './connection.js';
+import {
+  boundedAsciiSpaceReason, boundedDisputeText, javaTrim, lengthPrefixedSha256,
+  normalizeDisputeText, normalizeEvidenceUrls,
+} from './jvm-canonical.js';
+import { isProofWindowValid, parseControllerProofFrame } from './proof-frame.js';
+
+export { normalizeDisputeText, normalizeEvidenceUrls };
+
+export interface ProofApprovalConnection {
+  apiUrl: string;
+  audience: string;
+  controllerIndex: number;
+  controllerAddress: string;
+  accountId: string;
+  identityId: string;
+  browserOrigins?: string[];
+}
 
 const PURPOSES = new Set([
   'login', 'API-key creation', 'API-key rotation', 'API-key revocation',
@@ -65,8 +81,7 @@ export function validateMarketplaceUserProofApproval(input: unknown, options: {
     || message.issuedAt !== request.challenge.issuedAt || message.expiresAt !== request.challenge.expiresAt
     || message.bindingHash !== bindingHash(request, message.network)) throw protocolFailure();
   const issued = millis(request.challenge.issuedAt), expires = millis(request.challenge.expiresAt);
-  if (expires <= issued || expires - issued > 300_000 || issued > (options.now ?? Date.now()) + 30_000
-    || (!options.allowExpired && expires <= (options.now ?? Date.now()))) {
+  if (!isProofWindowValid(issued, expires, { now: options.now, allowExpired: options.allowExpired })) {
     throw new AttoError('MARKETPLACE_APPROVAL_EXPIRED', 'The Marketplace approval challenge has expired or is outside its five-minute lifetime. Request a new challenge.');
   }
   return request;
@@ -102,7 +117,7 @@ export interface MarketplaceProofApprovalPreview {
   action: Record<string, unknown>;
 }
 
-export function inspectMarketplaceProofApproval(input: unknown, connection: MarketplaceConnection | undefined,
+export function inspectMarketplaceProofApproval(input: unknown, connection: ProofApprovalConnection | undefined,
   knownAddress: (index: number) => string | undefined): { request: MarketplaceProofApprovalRequest; preview: MarketplaceProofApprovalPreview } {
   const request = parseRequest(input);
   const origin = parseOrigin(request.marketplaceOrigin);
@@ -159,8 +174,7 @@ export function inspectMarketplaceProofApproval(input: unknown, connection: Mark
     || message.network !== 'live' || expected !== request.purpose) throw protocolFailure();
   const issuedAt = millis(request.challenge.issuedAt);
   const expiresAt = millis(request.challenge.expiresAt);
-  const now = Date.now();
-  if (issuedAt > now + 30_000 || expiresAt <= now || expiresAt <= issuedAt || expiresAt - issuedAt > 300_000) {
+  if (!isProofWindowValid(issuedAt, expiresAt)) {
     throw new AttoError('MARKETPLACE_APPROVAL_EXPIRED', 'The Marketplace approval challenge has expired or is outside its five-minute lifetime. Request a new challenge.');
   }
   const binding = bindingHash(request, message.network);
@@ -177,11 +191,11 @@ export function inspectMarketplaceProofApproval(input: unknown, connection: Mark
   return { request: request as MarketplaceProofApprovalRequest, preview };
 }
 
-export function approvalRequestDigest(request: MarketplaceProofApprovalRequest): string {
+export function approvalRequestDigest(request: MarketplaceUserProofApprovalRequest): string {
   return sha256(canonicalJson(request));
 }
 
-export function createMarketplaceProofApprovalResponse(request: MarketplaceProofApprovalRequest, signature: string): MarketplaceProofApprovalResponse {
+export function createMarketplaceProofApprovalResponse(request: MarketplaceUserProofApprovalRequest, signature: string): MarketplaceProofApprovalResponse {
   if (typeof signature !== 'string' || signature.length < 32 || signature.length > 4096 || /[\r\n\0]/.test(signature)) throw protocolFailure();
   return { version: 1, type: 'marketplace-controller-approval-response', profileId: request.profileId,
     handoffId: request.handoffId, requestDigest: approvalRequestDigest(request),
@@ -218,27 +232,10 @@ function parseRequest(input: unknown, network: 'ATTO' | 'NANO' = 'ATTO'): Market
   return value as unknown as MarketplaceUserProofApprovalRequest;
 }
 
-function parseProofMessage(request: MarketplaceUserProofApprovalRequest, header = 'Marketplace Agent Controller Proof v1'): { audience: string; network: string; address: string; purpose: string; challengeId: string; bindingHash?: string; issuedAt: string; expiresAt: string } {
-  const lines = request.challenge.message.split('\n');
-  if (lines.length !== 9 && lines.length !== 10) throw protocolFailure();
-  if (lines[0] !== header || !lines[1]?.startsWith('Audience: ')
-    || !lines[2]?.startsWith('Network: ') || !lines[3]?.startsWith('Address: ')
-    || !lines[4]?.startsWith('Purpose: ') || !lines[5]?.startsWith('Request ID: ')) throw protocolFailure();
-  const hasBinding = lines[6]?.startsWith('Binding Hash: ') === true;
-  const nonceIndex = hasBinding ? 7 : 6;
-  if ((hasBinding && lines.length !== 10) || (!hasBinding && lines.length !== 9)
-    || !/^Nonce: [0-9a-f]{64}$/.test(lines[nonceIndex] ?? '')
-    || !lines[nonceIndex + 1]?.startsWith('Issued At: ')
-    || !lines[nonceIndex + 2]?.startsWith('Expiration Time: ')) throw protocolFailure();
-  const bindingHash = hasBinding ? lines[6]!.slice('Binding Hash: '.length) : undefined;
-  if (bindingHash !== undefined && !/^[0-9a-f]{64}$/.test(bindingHash)) throw protocolFailure();
-  return {
-    audience: lines[1]!.slice('Audience: '.length), network: lines[2]!.slice('Network: '.length),
-    address: lines[3]!.slice('Address: '.length), purpose: lines[4]!.slice('Purpose: '.length),
-    challengeId: lines[5]!.slice('Request ID: '.length), ...(bindingHash ? { bindingHash } : {}),
-    issuedAt: lines[nonceIndex + 1]!.slice('Issued At: '.length),
-    expiresAt: lines[nonceIndex + 2]!.slice('Expiration Time: '.length),
-  };
+function parseProofMessage(request: MarketplaceUserProofApprovalRequest, header = 'Marketplace Agent Controller Proof v1') {
+  const frame = parseControllerProofFrame(request.challenge.message, header);
+  if (!frame) throw protocolFailure();
+  return frame;
 }
 
 function expectedPurpose(action: Record<string, unknown>): string {
@@ -391,7 +388,7 @@ function bindingHash(request: MarketplaceUserProofApprovalRequest, signerNetwork
     const key = uuid(action.idempotencyKey);
     const statement = boundedDisputeText(action.statement);
     const auditReason = boundedDisputeText(action.auditReason);
-    const evidence = canonicalEvidenceUrls(action.evidenceUrls);
+    const evidence = normalizeEvidenceUrls(action.evidenceUrls);
     if (!taskId || engagementVersion === undefined || !representedAgentId
       || (reason !== 'NON_DELIVERY' && reason !== 'DELIVERABLE_MISMATCH' && reason !== 'OTHER')
       || !key || statement === undefined || auditReason === undefined || evidence === undefined) throw protocolFailure();
@@ -412,7 +409,7 @@ function bindingHash(request: MarketplaceUserProofApprovalRequest, signerNetwork
   throw protocolFailure();
 }
 
-function browserOriginAllowed(connection: MarketplaceConnection, proofOrigin: string): boolean {
+function browserOriginAllowed(connection: ProofApprovalConnection, proofOrigin: string): boolean {
   const apiOrigin = new URL(connection.apiUrl).origin;
   const allowed = connection.browserOrigins ?? [apiOrigin];
   return allowed.includes(proofOrigin);
@@ -420,137 +417,6 @@ function browserOriginAllowed(connection: MarketplaceConnection, proofOrigin: st
 
 function safeVersion(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-}
-
-function boundedAsciiSpaceReason(value: unknown, maximumCodePoints: number): string | undefined {
-  if (typeof value !== 'string' || /[\u0000-\u001f\u007f]/.test(value)) return undefined;
-  const normalized = value.replace(/^ +| +$/g, '');
-  return [...normalized].length >= 1 && [...normalized].length <= maximumCodePoints ? normalized : undefined;
-}
-
-function boundedDisputeText(value: unknown): string | undefined {
-  if (typeof value !== 'string' || value.includes('\0')) return undefined;
-  const normalized = normalizeDisputeText(value);
-  return [...normalized].length >= 1 && [...normalized].length <= 2_000 ? normalized : undefined;
-}
-
-export function normalizeDisputeText(value: string): string {
-  const characters = [...value];
-  let first = 0;
-  let last = characters.length;
-  while (first < last && isKotlinWhitespace(characters[first]!)) first++;
-  while (last > first && isKotlinWhitespace(characters[last - 1]!)) last--;
-  return characters.slice(first, last).join('');
-}
-
-function isKotlinWhitespace(character: string): boolean {
-  const point = character.codePointAt(0)!;
-  return (point >= 0x0009 && point <= 0x000d) || (point >= 0x001c && point <= 0x0020)
-    || point === 0x00a0 || point === 0x1680 || (point >= 0x2000 && point <= 0x200a)
-    || point === 0x2028 || point === 0x2029 || point === 0x202f || point === 0x205f || point === 0x3000;
-}
-
-function canonicalEvidenceUrls(value: unknown): string[] | undefined {
-  if (!Array.isArray(value) || value.length > 5 || value.some(item => typeof item !== 'string')) return undefined;
-  const urls: string[] = [];
-  for (const item of value as string[]) {
-    if (item.length < 1 || item.length > 2_048) return undefined;
-    const canonical = backendEvidenceUrl(item);
-    if (!canonical) return undefined;
-    urls.push(canonical);
-  }
-  return new Set(urls).size === urls.length ? urls : undefined;
-}
-
-export function normalizeEvidenceUrls(value: unknown): string[] | undefined {
-  return canonicalEvidenceUrls(value);
-}
-
-function backendEvidenceUrl(raw: string): string | undefined {
-  // java.net.URI.toASCIIString emits non-ASCII URI text in NFC form before
-  // escaping its UTF-8 bytes. Keep the same spelling behavior for the
-  // backend's length-prefixed approval binding.
-  const normalized = raw.normalize('NFC');
-  const match = /^([A-Za-z][A-Za-z0-9+.-]*):\/\/([^/?#]*)(.*)$/su.exec(normalized);
-  if (!match || match[1]!.toLowerCase() !== 'https') return undefined;
-  const authority = match[2]!;
-  if (!authority || authority.includes('@') || !validUriCharacters(normalized)) return undefined;
-  const serverAuthority = /^([^:\[\]@/?#]+)(?::([0-9]*))?$/u.exec(authority);
-  if (!serverAuthority) return undefined;
-  const rawHost = serverAuthority[1]!;
-  const portText = serverAuthority[2];
-  if (portText !== undefined && portText !== '') {
-    const port = Number(portText);
-    if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) return undefined;
-  }
-  const host = rawHost.toLowerCase();
-  const labels = host.split('.');
-  if (labels.length < 2 || labels.some(label => !label || label.length > 63
-    || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(label))
-    || labels.at(-1)!.length < 2 || /^\d+$/.test(labels.at(-1)!)
-    || ['localhost','local','internal','test','invalid'].includes(labels.at(-1)!)
-    || /^[0-9.]+$/.test(host) || host.includes(':')) return undefined;
-  return toAsciiUri(normalized);
-}
-
-function validUriCharacters(value: string): boolean {
-  const match = /^[A-Za-z][A-Za-z0-9+.-]*:\/\/([^/?#]*)(.*)$/su.exec(value);
-  if (!match) return false;
-  const suffix = match[2]!;
-  const fragmentAt = suffix.indexOf('#');
-  if (fragmentAt >= 0 && suffix.indexOf('#', fragmentAt + 1) >= 0) return false;
-  const queryAt = suffix.indexOf('?');
-  const pathEnd = Math.min(queryAt < 0 ? suffix.length : queryAt,
-    fragmentAt < 0 ? suffix.length : fragmentAt);
-  const path = suffix.slice(0, pathEnd);
-  if (path !== '' && !path.startsWith('/')) return false;
-  const query = queryAt >= 0 && (fragmentAt < 0 || queryAt < fragmentAt)
-    ? suffix.slice(queryAt + 1, fragmentAt < 0 ? suffix.length : fragmentAt) : undefined;
-  const fragment = fragmentAt >= 0 ? suffix.slice(fragmentAt + 1) : undefined;
-  const authority = match[1]!;
-  return validUriPart(authority, 'authority')
-    && validUriPart(path, 'path')
-    && (query === undefined || validUriPart(query, 'query'))
-    && (fragment === undefined || validUriPart(fragment, 'fragment'));
-}
-
-function validUriPart(value: string, part: 'authority' | 'path' | 'query' | 'fragment'): boolean {
-  for (let index = 0; index < value.length;) {
-    const point = value.codePointAt(index)!;
-    const character = String.fromCodePoint(point);
-    if (point <= 0x20 || (point >= 0x7f && point <= 0x9f) || (point >= 0xd800 && point <= 0xdfff)) return false;
-    if (point <= 0x7f) {
-      const allowed = part === 'authority'
-        ? /^[A-Za-z0-9.:-]$/
-        : part === 'path'
-          ? /^[A-Za-z0-9\-._~!$&'()*+,;=:@/%]$/
-          : /^[A-Za-z0-9\-._~!$&'()*+,;=:@/?%\[\]]$/;
-      if (!allowed.test(character)) return false;
-    }
-    if (character === '%' && !/^[0-9A-Fa-f]{2}$/.test(value.slice(index + 1, index + 3))) return false;
-    index += character.length;
-  }
-  return true;
-}
-
-function toAsciiUri(value: string): string {
-  return [...value].map(character => {
-    const point = character.codePointAt(0)!;
-    if (point <= 0x7f) return character;
-    return [...Buffer.from(character, 'utf8')].map(byte => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join('');
-  }).join('');
-}
-
-function lengthPrefixedSha256(fields: string[]): string {
-  const digest = createHash('sha256');
-  for (const field of fields) {
-    const bytes = Buffer.from(field, 'utf8');
-    const length = Buffer.alloc(4);
-    length.writeUInt32BE(bytes.length);
-    digest.update(length);
-    digest.update(bytes);
-  }
-  return digest.digest('hex');
 }
 
 function parseOrigin(value: string): string {
@@ -587,7 +453,6 @@ function millis(value: string): number {
   return result;
 }
 
-function javaTrim(value: string): string { return value.replace(/^[\u0000-\u0020]+|[\u0000-\u0020]+$/g, ''); }
 function sha256(value: string): string { return createHash('sha256').update(value, 'utf8').digest('hex'); }
 function protocolFailure(): AttoError { return new AttoError('MARKETPLACE_APPROVAL_PROTOCOL', 'This typed Marketplace wallet-approval request is invalid. Request a fresh approval file from Marketplace.'); }
 

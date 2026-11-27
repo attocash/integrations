@@ -2,9 +2,14 @@ import { parseJsonObject } from '@attocash/cli/internal-marketplace';
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createApprovalRequest } from './approval-files.js';
+import { approveBrowserSignInGrant } from './approval-terminal.js';
 import { MarketplaceApiClient, requireLiveController } from './marketplace-api.js';
-import { MarketplaceProfileStore, ProfileError } from './profile-store.js';
 import { uuid } from './marketplace-results.js';
+import { parseChallengeEnvelope } from './marketplace-validation.js';
+import { MarketplaceProfileStore, ProfileError } from './profile-store.js';
+import { requireSetupTerminal } from './terminal-input.js';
+import { managedWalletEnvironment } from './wallet-home.js';
 
 export const browserOrigin = 'https://atto.market';
 const pairLifetimeMs = 45_000;
@@ -147,4 +152,77 @@ export async function pairBrowser(launch: BrowserLauncher, signal: AbortSignal,
     if (response.destroyed) return;
     response.writeHead(approved ? 204 : 403).end();
   }
+}
+
+export async function configureBrowserSignIn(
+  store: MarketplaceProfileStore,
+  id: string,
+  operation: 'enable' | 'disable' | 'status',
+  env: NodeJS.ProcessEnv,
+  print: (value: unknown) => void,
+): Promise<void> {
+  const profile = store.getProfile(id);
+  const grant = store.browserSignInGrant(id);
+  if (operation === 'status') {
+    print({ profileId: id, browserSignIn: grant?.state ?? 'disabled' });
+    return;
+  }
+  requireSetupTerminal();
+  const api = new MarketplaceApiClient(store, id);
+  const prefix = '/v1/agent/auth/browser-sign-in/grants';
+  if (operation === 'disable') {
+    const secret = store.disableBrowserSignInGrant(id);
+    if (secret) {
+      try {
+        await api.request(prefix + '/revoke', { method: 'POST', auth: 'live-controller', allowStatus: [204], body: { grantSecret: secret } });
+      } catch {
+        throw new ProfileError('BROWSER_REVOCATION_PENDING', 'Browser sign-in is disabled locally. Server revocation is pending. Retry --browser-sign-in disable with this controller session.');
+      }
+      store.forgetBrowserSignInGrant(id, secret, 'revocation_pending');
+    }
+    print({ profileId: id, browserSignIn: 'disabled' });
+    return;
+  }
+  requireLiveController(profile);
+  if (grant?.state === 'enabled') {
+    print({ profileId: id, browserSignIn: 'enabled' });
+    return;
+  }
+  if (grant) throw new ProfileError('BROWSER_GRANT_PENDING', 'A grant change is pending. Use --browser-sign-in disable to revoke the previous enrollment before enabling a new grant.');
+  const secret = randomBytes(32).toString('base64url');
+  const grantHash = createHash('sha256').update(secret, 'utf8').digest('hex');
+  store.startBrowserSignInGrant(id, secret);
+  let submitting = false;
+  const setupProtocolFailure = (): never => {
+    throw new ProfileError('SETUP_PROTOCOL', 'Marketplace setup returned an invalid response. Check the pinned origin and repeat only after confirming the previous action had no effect.');
+  };
+  try {
+    const challenge = parseChallengeEnvelope((await api.request(prefix + '/challenges', {
+      method: 'POST', auth: 'live-controller', allowStatus: [200, 201], body: { browserOrigin, grantHash },
+    })).json, setupProtocolFailure);
+    const request = createApprovalRequest({
+      profileId: id, handoffId: randomBytes(16).toString('hex'), origin: profile.origin,
+      audience: profile.audience, controllerNetwork: profile.controllerNetwork, controllerAddress: profile.controllerAddress,
+      controllerIndex: profile.controllerIndex, accountId: profile.accountId, identityId: profile.identityId,
+      purpose: 'browser sign-in grant', action: { kind: 'browser-sign-in-grant', browserOrigin, grantHash }, challenge,
+    });
+    if ((challenge.accountId !== undefined && challenge.accountId !== profile.accountId)
+      || (challenge.controllerId !== undefined && challenge.controllerId !== profile.identityId)) setupProtocolFailure();
+    const signature = await approveBrowserSignInGrant(request, managedWalletEnvironment(store.home, env));
+    const current = store.browserSignInGrant(id);
+    if (current?.state !== 'enrolling' || current.secret !== secret) throw new ProfileError('BROWSER_GRANT_CHANGED', 'Browser sign-in changed during approval.');
+    submitting = true;
+    await api.request(prefix, {
+      method: 'POST', auth: 'live-controller', allowStatus: [204],
+      body: { browserOrigin, grantHash, challengeId: challenge.challengeId, message: challenge.message, signature },
+    });
+    store.activateBrowserSignInGrant(id, secret);
+  } catch (error) {
+    if (!submitting) store.forgetBrowserSignInGrant(id, secret, 'enrolling');
+    if (error instanceof ProfileError) throw error;
+    throw new ProfileError('BROWSER_GRANT_FAILED', submitting
+      ? 'Marketplace enrollment could not be confirmed. Use --browser-sign-in disable to revoke it before enabling again.'
+      : 'Marketplace could not prepare browser sign-in. Check the controller session and its native wallet.');
+  }
+  print({ profileId: id, browserSignIn: 'enabled' });
 }

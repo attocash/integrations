@@ -1,10 +1,9 @@
 import { existsSync } from 'node:fs';
 import { isAbsolute, join, resolve } from 'node:path';
-import { isDeepStrictEqual } from 'node:util';
 import { AttoApplication } from '../application/app.js';
 import { amountRaw } from '../domain/amount.js';
-import { formatSpendingPolicy as formatPolicy } from '../marketplace/wallet-setup.js';
 import { AttoError } from '../domain/errors.js';
+import { formatSpendingPolicy as formatPolicy } from '../spending/authority.js';
 import { defaultCliDirectory, dedicatedMcpDirectory, resolveWalletProfile } from '../storage/profiles.js';
 import type { AccountPool, SpendingPolicy, WalletIdentity, WalletSettings } from '../wallet/types.js';
 import { hiddenPrompt, requireTerminal, showRecovery, terminalPrompt } from './terminal.js';
@@ -202,10 +201,8 @@ export async function setupMarketplaceWallet({
 
     // Reading limits_get reconciles payments. Reuse onboarding only inspects
     // saved authority, leaving existing payment journals untouched.
-    const usage = reuseExisting ? {
-      policy: application.ledger.policy(), pool: application.ledger.pool(),
-      access: application.ledger.mcpAccess(), messageSigningIndexes: application.ledger.messageSigningIndexes(),
-    } : await application.call('limits_get') as { policy: SpendingPolicy; pool: AccountPool; access: 'read-only' | 'spend'; messageSigningIndexes: number[] };
+    const usage = reuseExisting ? application.authoritySnapshot()
+      : await application.call('limits_get') as { policy: SpendingPolicy; pool: AccountPool; access: 'read-only' | 'spend'; messageSigningIndexes: number[] };
     if (reuseExisting) {
       process.stderr.write([
         `Current MCP access: ${usage.access}`,
@@ -222,23 +219,11 @@ export async function setupMarketplaceWallet({
     const policy = keepPolicy ? usage.policy : await boundedPolicy();
     const messageSigningIndexes = typedControllerApprovals ? usage.messageSigningIndexes : reuseExisting
       ? [...new Set([...usage.messageSigningIndexes, controllerIndex])].sort((a, b) => a - b) : [controllerIndex];
-    const proposal = reuseExisting ? await application.store.withWalletLock(async () => {
-      if (application.store.get('wallet.reset')) {
-        throw new AttoError('WALLET_RESET_REQUIRED', 'Finish wallet reset before configuring Marketplace.');
-      }
-      // Fail rather than replacing authority changed by another CLI/MCP session
-      // while the user was answering terminal prompts.
-      if (!isDeepStrictEqual(usage, {
-        policy: application.ledger.policy(), pool: application.ledger.pool(),
-        access: application.ledger.mcpAccess(), messageSigningIndexes: application.ledger.messageSigningIndexes(),
-      }) || !isDeepStrictEqual(status.settings, application.store.get('settings'))
-        || !isDeepStrictEqual(status.identity, application.store.get('identity'))) {
-        throw new AttoError('PROPOSAL_STALE', 'The shared wallet settings or authority changed during setup. Review the current wallet and run setup again.');
-      }
-      if (isDeepStrictEqual(usage, { policy, access: 'spend', pool, messageSigningIndexes })) return null;
-      return application.ledger.proposePolicy(policy, 'spend', {
-        directory: profile.directory, walletFingerprint: status.identity!.fingerprint, network: status.settings.network,
-      }, pool, messageSigningIndexes);
+    const proposal = reuseExisting ? await application.proposeLimitsIfUnchanged({
+      expectedUsage: usage,
+      expectedSettings: status.settings,
+      expectedIdentity: status.identity,
+      requested: { policy, access: 'spend', pool, messageSigningIndexes },
     }) : (await application.call('limits_propose', {
       policy, access: 'spend', pool, messageSigningIndexes,
     }) as { proposal: { id: string } }).proposal;

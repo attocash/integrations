@@ -1,13 +1,17 @@
-import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { AttoAccount, AttoAccountEntry, AttoAddress, AttoAmount, AttoHash, AttoInstant, AttoReceivable, AttoTransaction, AttoUnit, toAttoHeight, type AttoJob } from '@attocash/commons-core';
 import { AccountHeightSearch, HeightSearch } from '@attocash/commons-node';
 import { AttoNodeClientAsyncBuilder } from '@attocash/commons-node-remote';
-import { AttoError } from '../domain/errors.js';
+import { parseAddress } from '../domain/address.js';
 import { amountRaw } from '../domain/amount.js';
-import { publicEntry } from './entry.js';
-import { resolveNodeBatchSize } from './batching.js';
+import { AttoError } from '../domain/errors.js';
 import type { ListRequest, StreamFilter, WalletSettings } from '../wallet/types.js';
+import { resolveNodeBatchSize } from './batching.js';
+import { publicEntry } from './entry.js';
+import { listPaginatedHistory } from './history.js';
+import { readBoundedText } from './http.js';
+
+export { parseAddress } from '../domain/address.js';
 
 // Ktor's Node engine uses require while Commons is imported as ESM.
 Object.assign(globalThis, { require: createRequire(import.meta.url) });
@@ -16,7 +20,6 @@ const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_HEIGHT = 18446744073709551615n;
 const numericStrings = new Set(['amount', 'balance', 'previousBalance', 'height', 'fromHeight', 'toHeight', 'weight']);
 type Model = AttoAccount | AttoAccountEntry | AttoReceivable | AttoTransaction;
-type HistoryCursor = { version: 1; scope: string; addressIndex: number; nextHeight: string; upper: Array<string | null> };
 
 function jsonExact(text: string): unknown {
   return JSON.parse(text, (key: string, value: unknown, context?: { source?: string }) => {
@@ -34,11 +37,6 @@ export function publicModel(model: unknown): unknown {
     return publicEntry(jsonExact(model.toJson()));
   }
   return publicEntry(jsonExact(JSON.stringify(model, (_key, value) => typeof value === 'bigint' ? value.toString() : value)));
-}
-
-export function parseAddress(value: string): AttoAddress {
-  try { return AttoAddress.parse(value); }
-  catch { throw new AttoError('INVALID_ADDRESS', 'Provide a valid Atto address.'); }
 }
 
 function parseHash(value: string): string {
@@ -120,22 +118,12 @@ export class NodeReader {
     const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
     try {
       const response = await this.request(path, combined, firstEvent, requestBody);
-      let body = '';
-      const decoder = new TextDecoder();
-      let size = 0;
-      if (!response.body) throw new AttoError('INVALID_NODE_RESPONSE', 'The node response has no body.');
-      const reader = response.body.getReader();
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          size += value.length;
-          if (size > MAX_RESPONSE_BYTES) throw new AttoError('INVALID_NODE_RESPONSE', 'The node response exceeded the size limit.');
-          body += decoder.decode(value, { stream: true });
-          if (firstEvent && body.includes('\n')) { body = body.slice(0, body.indexOf('\n')); break; }
-        }
-      } finally { await reader.cancel().catch(() => undefined); reader.releaseLock(); }
-      body += decoder.decode();
+      const body = await readBoundedText(response, {
+        maxBytes: MAX_RESPONSE_BYTES,
+        firstLineOnly: firstEvent,
+        onEmptyBody: () => { throw new AttoError('INVALID_NODE_RESPONSE', 'The node response has no body.'); },
+        onTooLarge: () => { throw new AttoError('INVALID_NODE_RESPONSE', 'The node response exceeded the size limit.'); },
+      });
       if (firstEvent && !body.trim()) return null;
       try { return parse(body); }
       catch { throw new AttoError('INVALID_NODE_RESPONSE', 'The node returned an invalid response.'); }
@@ -198,6 +186,38 @@ export class NodeReader {
 
   voterWeight(address: string): Promise<unknown> {
     return this.get(`vote-weights/${parseAddress(address).path}`, jsonExact);
+  }
+
+  async findPendingReceivable(
+    address: string,
+    hash: string,
+    options: { timeoutMs?: number; requireReceiverMatch?: boolean; throwOnTimeout?: boolean } = {},
+  ): Promise<AttoReceivable | undefined> {
+    const targetHash = hash.toUpperCase();
+    const timeoutMs = options.timeoutMs ?? 2_000;
+    let found: AttoReceivable | undefined;
+    const foundController = new AbortController();
+    const timeoutController = new AbortController();
+    const timer = setTimeout(() => timeoutController.abort(), timeoutMs);
+    const combined = AbortSignal.any([foundController.signal, timeoutController.signal]);
+    try {
+      await this.stream({ event: 'receivable', addresses: [address], minAmountRaw: '1' }, model => {
+        const candidate = model as AttoReceivable;
+        if (candidate.hash.toString().toUpperCase() === targetHash
+          && (!options.requireReceiverMatch || candidate.receiverAddress.value === address)) {
+          found = candidate;
+          foundController.abort();
+        }
+      }, combined);
+    } catch (error) {
+      if (!combined.aborted) throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!found && timeoutController.signal.aborted && options.throwOnTimeout) {
+      throw new AttoError('RECEIVABLE_LOOKUP_TIMEOUT', 'Checking the pending payment timed out. Retry receiving it; its absence has not been confirmed.');
+    }
+    return found;
   }
 
   async stream(filter: StreamFilter, onEvent: (model: Model) => void, signal: AbortSignal): Promise<void> {
@@ -302,112 +322,25 @@ export class NodeReader {
       throw new AttoError('INVALID_LIST', 'last must be a positive safe integer for address-specific transaction or entry history.');
     }
     const timeout = AbortSignal.timeout(timeoutMs);
-    const done = new AbortController();
-    const combined = AbortSignal.any([timeout, done.signal, ...(signal ? [signal] : [])]);
-    const items: unknown[] = [];
     if (!isReplayable(filter)) {
       if (request.cursor) throw new AttoError('INVALID_CURSOR', 'Continuation cursors require address-specific transaction or entry history.');
+      const done = new AbortController();
+      const combined = AbortSignal.any([timeout, done.signal, ...(signal ? [signal] : [])]);
+      const items: unknown[] = [];
       await this.stream(filter, model => { items.push(publicModel(model)); if (items.length === limit) done.abort(); }, combined);
       if (signal?.aborted) throw new AttoError('CANCELLED', 'The network request was cancelled.');
       return { items, timedOut: timeout.aborted && !done.signal.aborted, ...(done.signal.aborted ? { limitReached: true } : {}) };
     }
-    const historyFilter = last === undefined ? filter : { ...filter, last };
-    const scope = createHash('sha256').update(JSON.stringify([this.settings.nodeUrl, this.settings.network, historyFilter])).digest('hex');
-    const addresses = filter.addresses!;
-    let cursor: HistoryCursor = { version: 1, scope, addressIndex: 0, nextHeight: filter.fromHeight!, upper: addresses.map(() => null) };
-    if (request.cursor) {
-      try {
-        if (request.cursor.length > 20_000) throw new Error();
-        const parsed = JSON.parse(Buffer.from(request.cursor, 'base64url').toString('utf8')) as HistoryCursor;
-        if (parsed.version !== 1 || parsed.scope !== scope || !Number.isInteger(parsed.addressIndex) || parsed.addressIndex < 0 || parsed.addressIndex >= addresses.length || !Array.isArray(parsed.upper) || parsed.upper.length !== addresses.length) throw new Error();
-        height(parsed.nextHeight);
-        for (const upper of parsed.upper) if (upper !== null) height(upper, true);
-        cursor = parsed;
-      } catch { throw new AttoError('INVALID_CURSOR', 'The continuation cursor is invalid or belongs to a different query.'); }
-    }
-    try {
-      const fromHeight = BigInt(filter.fromHeight!);
-      const firstHeight = (upper: bigint) => {
-        if (last === undefined) return fromHeight;
-        const start = upper - BigInt(last) + 1n;
-        return start > fromHeight ? start : fromHeight;
-      };
-      const advance = () => {
-        while (cursor.addressIndex < addresses.length) {
-          const upper = cursor.upper[cursor.addressIndex];
-          if (upper == null) return;
-          if (BigInt(cursor.nextHeight) <= BigInt(upper)) {
-            const start = firstHeight(BigInt(upper));
-            if (BigInt(cursor.nextHeight) < start) cursor.nextHeight = start.toString();
-            return;
-          }
-          cursor.addressIndex++;
-          cursor.nextHeight = filter.fromHeight!;
-        }
-      };
-      advance();
-      while (cursor.addressIndex < addresses.length && !combined.aborted) {
-        if (cursor.upper[cursor.addressIndex] === null) {
-          // Persist each nearby batch before requesting more heads. A small page
-          // need not read every selected account, and a timeout keeps prior work.
-          const unresolved = addresses.slice(cursor.addressIndex, cursor.addressIndex + batchSize)
-            .map((address, offset) => ({ address, index: cursor.addressIndex + offset }))
-            .filter(({ index }) => cursor.upper[index] === null);
-          const heads = await this.accounts(unresolved.map(({ address }) => address), combined);
-          heads.forEach((account, offset) => {
-            const currentHeight = account ? BigInt(String(account.height)) : 0n;
-            cursor.upper[unresolved[offset]!.index] = (filter.toHeight && BigInt(filter.toHeight) < currentHeight ? BigInt(filter.toHeight) : currentHeight).toString();
-          });
-          advance();
-          if (cursor.addressIndex === addresses.length) break;
-          if (cursor.upper[cursor.addressIndex] === null) continue;
-        }
-        let capacity = limit - items.length;
-        const planned: Array<{ index: number; from: bigint; to: bigint; next: bigint; pending: Map<string, Model> }> = [];
-        for (let index = cursor.addressIndex; index < addresses.length && capacity > 0 && planned.length < batchSize; index++) {
-          if (cursor.upper[index] === null) break;
-          const upper = BigInt(cursor.upper[index]!);
-          const from = index === cursor.addressIndex ? BigInt(cursor.nextHeight) : firstHeight(upper);
-          if (from > upper) continue;
-          const count = upper - from + 1n < BigInt(capacity) ? upper - from + 1n : BigInt(capacity);
-          planned.push({ index, from, to: from + count - 1n, next: from, pending: new Map() });
-          capacity -= Number(count);
-        }
-        const ranges = planned.map(range => new AccountHeightSearch(parseAddress(addresses[range.index]!), toAttoHeight(range.from.toString()), toAttoHeight(range.to.toString())));
-        await this.subscription(filter, model => {
-          const position = eventPosition(model);
-          const range = position && planned.find(range => addresses[range.index] === position.address);
-          if (!position || !range || BigInt(position.height) < range.from || BigInt(position.height) > range.to) {
-            throw new AttoError('INVALID_NODE_RESPONSE', 'The node returned an event outside the requested account range.');
-          }
-          if (BigInt(position.height) < range.next) return;
-          if (BigInt(position.height) !== range.next) throw new AttoError('HISTORY_GAP', 'The node returned a gap in account history. Retry with a fully synchronized node.');
-          range.next++;
-          range.pending.set(position.height, model);
-          // Commit only the contiguous address-ordered prefix. Later-address
-          // records remain uncommitted and are safely replayed after a timeout.
-          while (cursor.addressIndex < addresses.length) {
-            const current = planned.find(range => range.index === cursor.addressIndex);
-            const next = current?.pending.get(cursor.nextHeight);
-            if (!next) break;
-            current!.pending.delete(cursor.nextHeight);
-            items.push(publicModel(next));
-            cursor.nextHeight = (BigInt(cursor.nextHeight) + 1n).toString();
-            advance();
-            if (items.length === limit) { done.abort(); break; }
-          }
-        }, combined, ranges);
-        if (!combined.aborted && planned.some(range => range.next <= range.to)) {
-          throw new AttoError('HISTORY_GAP', 'The node closed the stream before the requested history was complete.');
-        }
-      }
-    } catch (error) {
-      if (!combined.aborted) throw error;
-    }
-    if (signal?.aborted) throw new AttoError('CANCELLED', 'The network request was cancelled.');
-    return {
-      items, timedOut: timeout.aborted && !done.signal.aborted,
-      ...(cursor.addressIndex < addresses.length ? { nextCursor: Buffer.from(JSON.stringify(cursor)).toString('base64url') } : {}),
-    };
+    return listPaginatedHistory({
+      nodeUrl: this.settings.nodeUrl,
+      network: this.settings.network,
+      batchSize,
+      parseAddress,
+      parseHeight: height,
+      eventPosition,
+      publicModel,
+      accounts: (addresses, combined) => this.accounts(addresses, combined),
+      subscribe: (activeFilter, onEvent, combined, ranges) => this.subscription(activeFilter, onEvent, combined, ranges),
+    }, filter, request, limit, timeout, signal);
   }
 }

@@ -3,7 +3,8 @@ import { securePrivatePermissions, syncPrivateDirectory } from '@attocash/cli/in
 import { chmodSync, closeSync, constants, fstatSync, fsyncSync, linkSync, lstatSync, mkdirSync, openSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { dirname, join, relative, resolve, sep } from 'node:path';
-import { ProfileError } from './profile-store.js';
+import { isOpaqueHandle, isProfileId, type ApprovalChallenge } from './marketplace-validation.js';
+import { ProfileError } from './profile-error.js';
 import { canonicalJson } from './canonical-json.js';
 import { validAttoProof } from './atto-proof.js';
 import { offchainVerify } from '@attocash/atto-marketplace-nano-adapter/protocol';
@@ -44,6 +45,62 @@ export interface MarketplaceProofApprovalResponse {
   signature: string;
   controllerAddress: string;
   controllerIndex: number;
+}
+
+export function createApprovalRequest(input: {
+  profileId: string;
+  handoffId: string;
+  origin: string;
+  audience: string;
+  controllerNetwork?: 'ATTO' | 'NANO';
+  controllerAddress: string;
+  controllerIndex: number;
+  accountId?: string;
+  identityId?: string;
+  purpose: string;
+  action: Record<string, unknown>;
+  challenge: Pick<ApprovalChallenge, 'challengeId' | 'message' | 'issuedAt' | 'expiresAt'>;
+}): MarketplaceProofApprovalRequest {
+  return {
+    version: 1,
+    type: 'marketplace-controller-approval-request',
+    profileId: input.profileId,
+    handoffId: input.handoffId,
+    marketplaceOrigin: input.origin,
+    transport: 'AGENT_API',
+    proofOrigin: null,
+    audience: input.audience,
+    ...(input.accountId ? { accountId: input.accountId } : {}),
+    ...(input.identityId ? { identityId: input.identityId } : {}),
+    controller: { network: input.controllerNetwork ?? 'ATTO', address: input.controllerAddress, index: input.controllerIndex },
+    purpose: input.purpose,
+    action: input.action,
+    challenge: {
+      challengeId: input.challenge.challengeId,
+      message: input.challenge.message,
+      issuedAt: input.challenge.issuedAt,
+      expiresAt: input.challenge.expiresAt,
+    },
+  };
+}
+
+export function parseApprovalRequest(input: unknown, onInvalid?: () => never): MarketplaceProofApprovalRequest {
+  const fail = onInvalid ?? (() => {
+    throw new ProfileError('APPROVAL_FILE', 'The saved typed wallet approval request is invalid.');
+  });
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) fail();
+  const request = input as Record<string, unknown>;
+  const controller = request.controller !== null && typeof request.controller === 'object' && !Array.isArray(request.controller)
+    ? request.controller as Record<string, unknown> : undefined;
+  if (request.version !== 1 || request.type !== 'marketplace-controller-approval-request'
+    || typeof request.profileId !== 'string' || typeof request.handoffId !== 'string'
+    || typeof request.marketplaceOrigin !== 'string' || request.transport !== 'AGENT_API' || request.proofOrigin !== null
+    || typeof request.audience !== 'string' || typeof request.purpose !== 'string'
+    || !controller || (controller.network !== 'ATTO' && controller.network !== 'NANO')
+    || !request.challenge || !request.action || typeof request.action !== 'object') {
+    fail();
+  }
+  return request as unknown as MarketplaceProofApprovalRequest;
 }
 
 export async function writeApprovalRequest(home: string, profileId: string, handoffId: string, envelope: MarketplaceProofApprovalRequest): Promise<string> {
@@ -253,7 +310,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 }
 
 function assertNames(profileId: string, handoffId: string): void {
-  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,47}$/.test(profileId) || !/^[a-f0-9]{32}$/.test(handoffId)) throw invalidFile();
+  if (!isProfileId(profileId) || !isOpaqueHandle(handoffId)) throw invalidFile();
 }
 
 function invalidFile(): ProfileError {

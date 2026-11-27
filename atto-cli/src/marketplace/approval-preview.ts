@@ -1,4 +1,5 @@
-import { normalizeDisputeText, normalizeEvidenceUrls, type MarketplaceProofApprovalPreview } from './proof-approval.js';
+import { normalizeDisputeText, normalizeEvidenceUrls } from './jvm-canonical.js';
+import type { MarketplaceProofApprovalPreview } from './proof-approval.js';
 
 export function formatMarketplaceApprovalPreview(preview: MarketplaceProofApprovalPreview): string {
   const action = preview.action;

@@ -1,7 +1,8 @@
 import { nanoWorkResult } from './nano-work.js';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { resolve } from 'node:path';
 import { isProductionMarketplace } from './defaults.js';
+import { parseIsoDateMillis } from './marketplace-validation.js';
 import { MarketplaceProfileStore, ProfileError, requireSession, type MarketplaceProfile } from './profile-store.js';
 
 const NANO_WORK_PATH = '/v1/agent/wallets/xno/work';
@@ -403,9 +404,7 @@ function missingProfilePublicationFields(value: unknown): Array<'handle' | 'disp
   return supported.filter(field => Object.hasOwn(details, field));
 }
 
-export function newRequestId(): string { return randomUUID(); }
-
-async function readBounded(response: Response, overflowError?: MarketplaceApiError,
+export async function readBounded(response: Response, overflowError?: MarketplaceApiError,
   limitBytes = RESPONSE_LIMIT_BYTES): Promise<string> {
   if (!response.body) return '';
   const reader = response.body.getReader();
@@ -435,19 +434,13 @@ function parseRotatedTokens(input: unknown): { accessToken: string; accessExpire
   if (input === null || typeof input !== 'object' || Array.isArray(input)) throw new Error('bad refresh');
   const value = input as Record<string, unknown>;
   const token = (raw: unknown): raw is string => typeof raw === 'string' && raw.length >= 16 && raw.length <= TOKEN_LIMIT && !/[\r\n\0]/.test(raw);
-  const accessExpiresAt = dateMillis(value.accessExpiresAt);
-  const refreshExpiresAt = dateMillis(value.refreshExpiresAt);
+  const badDate = (): never => { throw new Error('bad date'); };
+  const accessExpiresAt = parseIsoDateMillis(value.accessExpiresAt, badDate);
+  const refreshExpiresAt = parseIsoDateMillis(value.refreshExpiresAt, badDate);
   if (!token(value.accessToken) || !token(value.refreshToken) || accessExpiresAt <= Date.now() || refreshExpiresAt < accessExpiresAt) {
     throw new Error('bad refresh');
   }
   return { accessToken: value.accessToken, accessExpiresAt, refreshToken: value.refreshToken, refreshExpiresAt };
-}
-
-function dateMillis(value: unknown): number {
-  if (typeof value !== 'string') throw new Error('bad date');
-  const timestamp = Date.parse(value);
-  if (!Number.isSafeInteger(timestamp) || timestamp <= 0) throw new Error('bad date');
-  return timestamp;
 }
 
 export function requireLiveController(profile: MarketplaceProfile): void {

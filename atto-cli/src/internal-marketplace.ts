@@ -29,7 +29,8 @@ export function createInternalMarketplaceWalletApplication(options: {
   };
 }
 
-export { withMarketplaceRecoverySeed, initializeMarketplaceRecoveryWallet, type MarketplaceRecoverySource } from './storage/recovery-seed.js';
+export { withMarketplaceRecoverySeed, type MarketplaceRecoverySource } from './storage/recovery-seed.js';
+export { initializeMarketplaceRecoveryWallet } from './cli/marketplace-recovery.js';
 export { validateMarketplaceUserProofApproval, type MarketplaceUserProofApprovalRequest } from './marketplace/proof-approval.js';
 
 /** Private, terminal-only typed signer. Public CLI/MCP operations remain unchanged. */

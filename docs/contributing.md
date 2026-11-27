@@ -83,18 +83,19 @@ a package.
 | Responsibility | Owner |
 | --- | --- |
 | Wallet operation schemas, write approval, and MCP tool hints | `atto-cli/src/application/operations.ts` |
-| Wallet dispatch and session lifecycle | `atto-cli/src/application/app.ts`; public library entry point `core.ts` |
+| Wallet dispatch and session lifecycle | `atto-cli/src/application/app.ts`; `wallet/lifecycle.ts` owns identity, settings, derivation, and reset; public library entry point `core.ts` |
+| CLI commands and presentation | `atto-cli/src/cli/cli.ts`, `cli/commands/`, `cli/output.ts`, and `cli/onboarding.ts` |
 | Receive candidates, recovery, and unresolved receive fences | `atto-cli/src/wallet/receive.ts`, shared by explicit and automatic receiving |
-| Spending policy, reservations, and account availability | `atto-cli/src/spending/ledger.ts`; `payments.ts` owns selection, signing, publication, and reconciliation |
-| Terminal Marketplace approval presentation | `atto-cli/src/marketplace/approval-preview.ts`; all rendered fields pass through terminal escaping |
+| Spending policy, reservations, and account availability | `atto-cli/src/spending/authority.ts` owns policy/access/pool/proposals; `ledger.ts` owns journal reservations; `payments.ts` and `relay-payments.ts` own selection, signing, publication, relay prep, and reconciliation |
+| Terminal Marketplace approval presentation and proof validation | `atto-cli/src/marketplace/approval-preview.ts`, `proof-approval.ts`, `proof-frame.ts`, and `jvm-canonical.ts` |
 | Wallet MCP protocol and transport | `atto-mcp/src/`, using the released CLI engine |
-| Marketplace tools and resource-specific commands | `atto-marketplace-mcp/src/server.ts` |
+| Marketplace tools and resource-specific commands | `atto-marketplace-mcp/src/server.ts`, `tools/` (`common.ts`, `public-and-wallet.ts`, `payments.ts`, `shop.ts`, `account.ts`, `work.ts`), and `services.ts` |
 | Direct payment negotiation and recovery | `atto-marketplace-mcp/src/direct-payments.ts` |
 | Shared x402 offer, challenge, and proof validation | `atto-cli/src/marketplace/relay.ts`, used by Marketplace MCP and both wallets |
 | Durable Marketplace mutations and private file uploads | `atto-marketplace-mcp/src/marketplace-mutation.ts` and `private-upload.ts` |
-| Protected Marketplace mutations and terminal approval recovery | `atto-marketplace-mcp/src/protected-mutation.ts` |
-| Marketplace profile persistence and submission claims | `atto-marketplace-mcp/src/profile-store.ts` |
-| Marketplace canonical serialization and asset/network rules | `atto-marketplace-mcp/src/canonical-json.ts` and `asset-network.ts` |
+| Protected Marketplace mutations, setup, and terminal approval recovery | `atto-marketplace-mcp/src/protected-mutation.ts`, `setup.ts`, `setup-recovery.ts`, `browser-sign-in.ts`, and `approval-terminal.ts` |
+| Marketplace profile persistence, private storage checks, and submission claims | `atto-marketplace-mcp/src/profile-store.ts`, `profile-error.ts`, and `private-directory.ts` |
+| Marketplace canonical serialization, validation, and asset/network rules | `atto-marketplace-mcp/src/canonical-json.ts`, `marketplace-validation.ts`, and `asset-network.ts` |
 | Nano native operation lifecycle and spend reservations | `atto-marketplace-nano-adapter/src/wallet.ts` and `journal.ts` |
 | Bounded Nano JSON parsing | `atto-marketplace-nano-adapter/src/json.ts`, shared by RPC and local recovery inputs |
 

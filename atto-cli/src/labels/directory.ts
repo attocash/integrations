@@ -2,7 +2,8 @@ import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } 
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import { parseAddress } from '../network/reader.js';
+import { parseAddress } from '../domain/address.js';
+import { readBoundedText } from '../network/http.js';
 
 export const DIRECTORY_URL = 'https://gatekeeper.live.application.atto.cash/projections/addresses';
 const FRESH_MS = 3_600_000;
@@ -27,22 +28,15 @@ interface Cache { snapshot?: DirectorySnapshot; fetchedAt?: number; failedAt?: n
 export async function fetchDirectory(fetcher: typeof fetch = fetch, signal?: AbortSignal): Promise<DirectorySnapshot> {
   const response = await fetcher(DIRECTORY_URL, { signal: AbortSignal.any([AbortSignal.timeout(3000), ...(signal ? [signal] : [])]), redirect: 'error', headers: { accept: 'application/json' } });
   try {
-    if (!response.ok || !response.body || !/^application\/json\b/i.test(response.headers.get('content-type') ?? '')
-      || Number(response.headers.get('content-length') ?? 0) > MAX_BYTES) throw new Error('Invalid directory response.');
-    const reader = response.body.getReader();
-    const chunks: Uint8Array[] = [];
-    let size = 0;
-    try {
-      for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        size += value.length;
-        if (size > MAX_BYTES) throw new Error('Directory response too large.');
-        chunks.push(value);
-      }
-    } finally { await reader.cancel(); reader.releaseLock(); }
-    return directorySchema.parse(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-  } finally { if (!response.body?.locked) await response.body?.cancel(); }
+    if (!response.ok || !response.body || !/^application\/json\b/i.test(response.headers.get('content-type') ?? '')) {
+      throw new Error('Invalid directory response.');
+    }
+    const text = await readBoundedText(response, {
+      maxBytes: MAX_BYTES,
+      onTooLarge: () => { throw new Error('Directory response too large.'); },
+    });
+    return directorySchema.parse(JSON.parse(text));
+  } finally { if (!response.body?.locked) await response.body?.cancel().catch(() => undefined); }
 }
 
 /** Disposable public cache, kept outside the profile's durable SQLite state. */

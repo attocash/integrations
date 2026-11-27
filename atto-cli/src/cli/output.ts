@@ -2,6 +2,7 @@ import type { ReceiveProgress } from '../wallet/auto-receive.js';
 import { modelAddress } from '../labels/presentation.js';
 import { AttoBlock } from '@attocash/commons-core';
 import { amountOutput } from '../domain/amount.js';
+import { quoteShellArgument } from '../domain/shell.js';
 import { resolveNodeBatchSize } from '../network/batching.js';
 import type { WalletSettings } from '../wallet/types.js';
 
@@ -115,13 +116,8 @@ function formatUnlabeledHumanResult(result: unknown, operation?: string): string
         const evidence = record(check.evidence) ? fields(check.evidence, '  ').join('\n') + '\n' : '';
         const remediation = record(check.remediation) ? check.remediation : undefined;
         const steps = Array.isArray(remediation?.steps) ? remediation.steps.map(step => `  ${text(step)}\n`).join('') : '';
-        const quoteArgument = (value: unknown) => {
-          const argument = String(value);
-          if (/^[a-z\d_./:@=-]+$/i.test(argument)) return argument;
-          return `'${argument.replace(/'/g, process.platform === 'win32' ? "''" : "'\\''")}'`;
-        };
         const command = Array.isArray(remediation?.command)
-          ? `  Command${process.platform === 'win32' ? ' (PowerShell)' : ''}: ${text(remediation.command.map(quoteArgument).join(' '))}\n` : '';
+          ? `  Command${process.platform === 'win32' ? ' (PowerShell)' : ''}: ${text(remediation.command.map(argument => quoteShellArgument(argument)).join(' '))}\n` : '';
         const env = record(remediation?.suggestedEnv) ? `  Verified MCP env configuration:\n${fields(remediation.suggestedEnv, '    ', true).join('\n')}\n` : '';
         return `${heading}\n${evidence}${steps}${command}${env}`;
       });
