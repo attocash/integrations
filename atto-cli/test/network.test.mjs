@@ -4,7 +4,7 @@ import { once } from 'node:events';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import test from 'node:test';
-import { AttoAddress, AttoAlgorithm, AttoPublicKey } from '@attocash/commons-core';
+import { AttoAddress, AttoAlgorithm, AttoPublicKey, AttoTransaction } from '@attocash/commons-core';
 
 const cliDirectory = process.env.ATTO_TEST_CLI_PACKAGE_DIR ?? fileURLToPath(new URL('../', import.meta.url));
 const { NodeReader, publicModel } = await import(pathToFileURL(join(cliDirectory, 'dist/network/reader.js')).href);
@@ -52,6 +52,43 @@ test('reads preserve exact Atto amounts and follow account, transaction, entry a
   assert.equal((await reader.voterWeight(address)).weight, '17999999999999999999');
   assert.equal(await reader.transaction('FF'.repeat(32)), null);
   assert.equal(requests.filter(value => value.startsWith('/vote-weights/')).length, 1);
+});
+
+test('payment verification reads the confirmed hash and matches exact payment fields', async t => {
+  const wire = transaction.replace('"amount":100', '"amount":9007199254740993');
+  const sendHash = AttoTransaction.fromJson(wire).hash.toString();
+  const missing = '00'.repeat(32);
+  const unavailable = '11'.repeat(32);
+  const calls = [];
+  const reader = await server(t, (req, res) => {
+    calls.push([req.method, req.url]);
+    if (req.url === `/transactions/${missing}`) { res.writeHead(404); res.end(); }
+    else if (req.url === `/transactions/${unavailable}`) { res.writeHead(503); res.end(); }
+    else res.end(wire);
+  });
+  const check = { hash: sendHash.toLowerCase(), recipient: otherAddress, amount: '9007199.254740993' };
+  const receipt = { verified: true, reason: 'matched', network: 'LOCAL', hash: sendHash,
+    sender: address, recipient: otherAddress, amount: { raw: '9007199254740993', atto: '9007199.254740993' }, height: '2' };
+  assert.deepEqual(await reader.verifyPayment(check), receipt);
+  assert.deepEqual(await reader.verifyPayment({ ...check, sender: address, unit: 'RAW', amount: receipt.amount.raw }), receipt);
+  const mismatches = [
+    [{ recipient: address }, 'recipient_mismatch'], [{ sender: otherAddress }, 'sender_mismatch'],
+    [{ amount: '9007199.254740992' }, 'amount_mismatch'], [{ hash: missing }, 'not_found'],
+  ];
+  for (const [overrides, reason] of mismatches) {
+    assert.deepEqual(await reader.verifyPayment({ ...check, ...overrides }), {
+      verified: false, reason, network: 'LOCAL', hash: overrides.hash ?? sendHash,
+    });
+  }
+  await assert.rejects(reader.verifyPayment({ ...check, hash }), { code: 'INVALID_NODE_RESPONSE' });
+  await assert.rejects(reader.verifyPayment({ ...check, hash: unavailable }), { code: 'NODE_HTTP_ERROR' });
+  const count = calls.length;
+  await assert.rejects(reader.verifyPayment({ ...check, sender: 'invalid' }), { code: 'INVALID_ADDRESS' });
+  await assert.rejects(reader.verifyPayment({ ...check, amount: '0' }), { code: 'INVALID_AMOUNT' });
+  assert.equal(calls.length, count);
+  assert.ok(calls.every(([method, url]) => method === 'GET' && url.startsWith('/transactions/')));
+  const otherNetwork = await server(t, (_req, res) => res.end(wire), { network: 'BETA' });
+  assert.deepEqual(await otherNetwork.verifyPayment(check), { verified: false, reason: 'network_mismatch', network: 'BETA', hash: sendHash });
 });
 
 test('NDJSON handles fragmented records and CRLF line endings', async t => {

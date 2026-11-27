@@ -187,7 +187,8 @@ async function verifyCli(directory, prefix, noMcp) {
   const source = `
     import assert from 'node:assert/strict';
     const core = await import('@attocash/cli/core');
-    assert.equal(core.operations.length, 38);
+    assert.equal(core.operations.length, 39);
+    assert.equal(core.operations.find(operation => operation.name === 'payment_verify').readOnly, true);
     assert.equal(core.operations.some(operation => operation.name === 'marketplace_topup'), false);
     assert.equal(core.operations.some(operation => operation.name === 'marketplace_topup_status'), false);
     assert.equal(typeof core.errorResult, 'function');

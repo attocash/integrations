@@ -73,7 +73,11 @@ export async function runCli(argv = process.argv): Promise<void> {
   const call = async (name: string, input: Record<string, unknown> = {}) => {
     if (name === 'doctor') { parseOperation(name, input); return diagnose(input); }
     const result = await app().call(name, compact(input));
-    app().resumeWork();
+    if (name === 'payment_verify') {
+      if (!(result as { verified: boolean }).verified) process.exitCode = 1;
+    } else {
+      app().resumeWork();
+    }
     output(result, name);
   };
   const waitForSignal = async (work: (signal: AbortSignal) => Promise<void>) => {
@@ -219,6 +223,12 @@ export async function runCli(argv = process.argv): Promise<void> {
     .option('--all', 'Include every saved address, including inactive accounts').action(options => call('balances_get', options));
   program.command('transaction <hash>').description('Read a raw signed protocol transaction; use entry for action history').action(hash => call('transaction_get', { hash }));
   program.command('entry <hash>').description('Read an action entry with owner, sender/receiver or new representative, and transfer amount').action(hash => call('entry_get', { hash }));
+  program.command('verify-payment <hash>').description('Verify a confirmed SEND against an expected payment')
+    .requiredOption('--to <address>', 'Expected recipient Atto address')
+    .requiredOption('--amount <amount>', 'Exact positive payment amount')
+    .option('--unit <unit>', 'ATTO (default) or RAW')
+    .option('--from <address>', 'Expected sender Atto address')
+    .action((hash, options) => call('payment_verify', { hash, recipient: options.to, amount: options.amount, unit: options.unit, sender: options.from }));
   listOptions(program.command('history [event]').description('Read action entries by default; choose transaction for raw signed protocol records'))
     .option('--last <count>', 'Read the last N heights per selected account within the height range', number)
     .option('--cursor <cursor>', 'Continue a previous history page with the same filters')
@@ -471,6 +481,7 @@ export async function runCli(argv = process.argv): Promise<void> {
     'atto address activate': 'atto address activate 1', 'atto address deactivate': 'atto address deactivate 1',
     'atto account': 'atto account --index 0', 'atto balances': 'atto balances\n  atto balances --all',
     'atto transaction': 'atto transaction <hash>', 'atto entry': 'atto entry <hash>',
+    'atto verify-payment': 'atto verify-payment <send-hash> --to <recipient> --amount 1.000000001',
     'atto history': 'atto history --index 0 --last 10\n  atto history transaction --addresses <address>',
     'atto receivables': 'atto receivables --index 1',
     'atto labels': 'atto labels set 1 \"Savings\"\n  atto labels list --all',

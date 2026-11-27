@@ -147,7 +147,7 @@ for storage, backup, and reset details.
 | --- | --- |
 | Public wallet settings | `wallet_status`, `wallet_configure` |
 | Derived addresses | `address_add`, `address_derive`, `address_list`, `address_activate`, `address_deactivate` |
-| Network reads | `account_get`, `balances_get`, `transaction_get`, `entry_get`, `representative_weight` |
+| Network reads | `account_get`, `balances_get`, `transaction_get`, `entry_get`, `payment_verify`, `representative_weight` |
 | Bounded lists | `history_list`, `receivables_list` |
 | Address labels | `labels_set`, `labels_remove`, `labels_get`, `labels_list` |
 | Payments | `send`, `receive`, `receive_all` |
@@ -311,6 +311,18 @@ a `subjectRole`: `receiver` for `SEND`, `sender` for `OPEN`/`RECEIVE`, or
 `representative` for `CHANGE`. Transfers include exact `amount.raw` and
 `amount.atto` strings; a representative change has no transfer amount.
 `entry_get` provides the same representation for a transaction hash.
+
+Use `payment_verify` with `hash`, `recipient`, an exact positive `amount`
+string, optional `unit` (`ATTO` or `RAW`), and optional `sender`. The operation
+checks one confirmed SEND on the profile's network through its configured node.
+On a match it returns `verified: true`, the network, hash, sender, recipient,
+height and exact amount. A missing or mismatched payment returns
+`verified: false` with a reason. An HTTP 404 sets `result.reason` to `not_found`.
+A timeout sets `isError: true` and `structuredContent.error.code` to `NODE_TIMEOUT`.
+In either case, keep the invoice pending and retry the same hash with bounded
+backoff. The payer only needs to send once.
+A merchant can use an invoice-specific address and redeem each `(network, hash)`
+once across its orders. Read-only verification can be repeated.
 
 Use `event: "transaction"` or `transaction_get` when you need raw signed
 protocol records, such as a receive block's `sendHash`, signatures, or work.

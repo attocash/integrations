@@ -222,13 +222,13 @@ programs running as your OS user.
 
 ## Tools
 
-The server exposes 38 public tools. Your client can discover each input schema,
+The server exposes 39 public tools. Your client can discover each input schema,
 read-only/destructive/idempotency annotations, and structured JSON results.
 
 | Category | Tools |
 | --- | --- |
 | Wallet and addresses | `wallet_status`, `wallet_configure`, `address_add`, `address_derive`, `address_list`, `address_activate`, `address_deactivate` |
-| Accounts and activity | `account_get`, `balances_get`, `history_list`, `receivables_list`, `transaction_get`, `entry_get`, `representative_weight` |
+| Accounts and activity | `account_get`, `balances_get`, `history_list`, `receivables_list`, `transaction_get`, `entry_get`, `payment_verify`, `representative_weight` |
 | Personal names | `labels_set`, `labels_remove`, `labels_get`, `labels_list` |
 | Payments and receiving | `send`, `receive`, `receive_all`, `representative_change` |
 | Policy and local history | `limits_get`, `limits_propose`, `pool_get`, `journal_list`, `journal_get` |

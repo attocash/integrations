@@ -36,7 +36,10 @@ test('MCP discovers every shared operation and keeps recovery operations termina
   // Then
   const publicOperations = operations.filter(operation => !operation.internalOnly);
   assert.deepEqual(result.tools.map(tool => tool.name).sort(), publicOperations.map(operation => operation.name).sort());
-  assert.equal(result.tools.length, 38);
+  assert.equal(result.tools.length, 39);
+  const verifier = result.tools.find(tool => tool.name === 'payment_verify');
+  assert.equal(verifier.annotations.readOnlyHint, true);
+  assert.equal(verifier.inputSchema.properties.amount.type, 'string');
   assert.equal(result.tools.some(tool => tool.name.startsWith('marketplace_pay_intent')), false,
     'ordinary Atto MCP clients never receive private payment-signature tools');
   await assert.rejects(client.callTool({ name: 'marketplace_pay_intent_status', arguments: { requestId: 'request-identifier-001' } }));

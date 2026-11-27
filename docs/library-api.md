@@ -31,7 +31,7 @@ proposal in either mode.
 The entry point also exports `operations`, `errorResult`, and `runDoctor`, plus
 the `Operation`, `ApplicationOptions`, `ApplicationSession`, `DoctorOptions`,
 `DoctorReport`, `DoctorCheck`, and `DoctorStatus` types. The `operations` catalog
-contains the schemas and descriptions for the 38 public operations. Installed npm
+contains the schemas and descriptions for the 39 public operations. Installed npm
 releases may expose an earlier set.
 
 `runDoctor({ directory, access: 'mcp' })` runs diagnostics without opening a

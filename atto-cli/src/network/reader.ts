@@ -1,13 +1,13 @@
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { AttoAccount, AttoAccountEntry, AttoAddress, AttoAmount, AttoHash, AttoInstant, AttoReceivable, AttoTransaction, AttoUnit, toAttoHeight, type AttoJob } from '@attocash/commons-core';
+import { AttoAccount, AttoAccountEntry, AttoAddress, AttoAmount, AttoHash, AttoInstant, AttoReceivable, AttoSendBlock, AttoTransaction, AttoUnit, toAttoHeight, type AttoJob } from '@attocash/commons-core';
 import { AccountHeightSearch, HeightSearch } from '@attocash/commons-node';
 import { AttoNodeClientAsyncBuilder } from '@attocash/commons-node-remote';
 import { AttoError } from '../domain/errors.js';
-import { amountRaw } from '../domain/amount.js';
+import { amountOutput, amountRaw } from '../domain/amount.js';
 import { publicEntry } from './entry.js';
 import { resolveNodeBatchSize } from './batching.js';
-import type { ListRequest, StreamFilter, WalletSettings } from '../wallet/types.js';
+import type { ListRequest, StreamFilter, VerifyPaymentRequest, WalletSettings } from '../wallet/types.js';
 
 // Ktor's Node engine uses require while Commons is imported as ESM.
 Object.assign(globalThis, { require: createRequire(import.meta.url) });
@@ -190,6 +190,30 @@ export class NodeReader {
 
   transaction(hash: string, signal?: AbortSignal): Promise<AttoTransaction | null> {
     return this.get(`transactions/${parseHash(hash)}`, AttoTransaction.fromJson, signal);
+  }
+
+  async verifyPayment(input: VerifyPaymentRequest, signal?: AbortSignal) {
+    const hash = parseHash(input.hash);
+    const recipient = parseAddress(input.recipient).value;
+    const sender = input.sender === undefined ? undefined : parseAddress(input.sender).value;
+    const raw = amountRaw(input.amount, input.unit);
+    const network = this.settings.network;
+    const transaction = await this.transaction(hash, signal);
+    const mismatch = (reason: string) => ({ verified: false, reason, network, hash });
+
+    if (!transaction) return mismatch('not_found');
+    // Commons recomputes this hash from the returned block.
+    if (transaction.hash.toString() !== hash) {
+      throw new AttoError('INVALID_NODE_RESPONSE', 'The returned transaction does not match the requested hash.');
+    }
+    const block = transaction.block;
+    if (block.network.name !== network) return mismatch('network_mismatch');
+    if (!(block instanceof AttoSendBlock)) return mismatch('not_send');
+    if (block.receiverAddress.value !== recipient) return mismatch('recipient_mismatch');
+    if (sender !== undefined && block.address.value !== sender) return mismatch('sender_mismatch');
+    if (block.amount.toString() !== raw) return mismatch('amount_mismatch');
+    return { verified: true, reason: 'matched', network, hash, sender: block.address.value,
+      recipient, amount: amountOutput(raw), height: block.height.toString() };
   }
 
   entry(hash: string, signal?: AbortSignal): Promise<AttoAccountEntry | null> {

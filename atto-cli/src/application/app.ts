@@ -24,7 +24,7 @@ import { AutoReceiver, type ReceiveProgress } from '../wallet/auto-receive.js';
 import { WalletReceiver } from '../wallet/receive.js';
 import { defaultSettings } from '../wallet/defaults.js';
 import { derivedSigner, mnemonicSeed, signingWallet } from '../wallet/signing.js';
-import type { AccountPool, ListRequest, ReceiveRequest, SendRequest, SpendingPolicy, StreamFilter, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
+import type { AccountPool, ListRequest, ReceiveRequest, SendRequest, SpendingPolicy, StreamFilter, VerifyPaymentRequest, WalletAddress, WalletIdentity, WalletSettings } from '../wallet/types.js';
 import { operationFor, parseOperation } from './operations.js';
 import { MarketData } from '../pricing/market.js';
 import { marketTerms } from '../pricing/terms.js';
@@ -490,6 +490,7 @@ export class AttoApplication {
       }
       case 'transaction_get': return { transaction: publicModel(await reader.transaction(args.hash as string)) };
       case 'entry_get': return { entry: publicModel(await reader.entry(args.hash as string)) };
+      case 'payment_verify': return reader.verifyPayment(args as unknown as VerifyPaymentRequest);
       case 'representative_weight': return reader.voterWeight(args.address as string);
       case 'history_list': {
         const addresses = this.selectedAddresses(args);
@@ -557,7 +558,7 @@ export class AttoApplication {
     const call = (async () => {
       const result = await this.invoke(name, args);
       if (this.internalMarketplaceReceiveSafety && name === 'receive' && (result as { status?: unknown } | null)?.status === 'unknown') return result;
-      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify'].includes(name)) return result;
+      if (name === 'doctor' || ['labels_get', 'labels_list', 'message_sign', 'message_verify', 'payment_verify'].includes(name)) return result;
       if (this.settings().network === 'LIVE' && ['address_list', 'account_get', 'balances_get', 'transaction_get', 'entry_get', 'representative_weight', 'history_list', 'receivables_list'].includes(name)) await this.labels.global.refresh();
       return this.labels.decorate(result, this.settings().network);
     })();

@@ -115,6 +115,8 @@ export const operations: readonly RegisteredOperation[] = [
     description: 'Read the raw signed protocol transaction by hash, including block, signature and work. Use entry_get for action history; transactions are needed for protocol fields such as a receive block\'s sendHash.', schema: z.strictObject({ hash }) },
   { name: 'entry_get', ...read,
     description: 'Read an action-oriented account entry by transaction hash. address is the account owner; subjectAddress and subjectRole identify the receiver for SEND, sender for OPEN/RECEIVE, or new representative for CHANGE. Transfers include exact amount.raw and amount.atto; representative changes do not transfer funds.', schema: z.strictObject({ hash }) },
+  { name: 'payment_verify', ...read,
+    description: 'Check a confirmed native SEND hash on the configured network against a recipient, exact positive ATTO or RAW amount, and optional sender. A match can be checked again. Store each matched network and hash once per invoice settlement.', schema: z.strictObject({ hash, recipient: address, amount: decimal, unit: unit.default('ATTO'), sender: address.optional() }) },
   { name: 'representative_weight', ...read,
     description: 'Read a representative address voting weight.', schema: z.strictObject({ address }) },
   { name: 'history_list', ...read,

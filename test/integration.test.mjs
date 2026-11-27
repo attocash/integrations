@@ -168,12 +168,28 @@ test('real Commons node/worker exercise the shared wallet, CLI and MCP', {
     assert.equal(sendEntry.subjectAddress, address1);
     assert.equal(sendEntry.subjectRole, 'receiver');
     assert.deepEqual(sendEntry.amount, { raw: '1000000001', atto: '1.000000001' });
+    const invoice = { hash: send.hash.toLowerCase(), recipient: address1, sender: address0, amount: '1.000000001' };
+    const verified = await app.call('payment_verify', invoice);
+    assert.deepEqual(verified, { verified: true, reason: 'matched', network: 'LOCAL', hash: send.hash,
+      sender: address0, recipient: address1, amount: sendEntry.amount, height: sendEntry.height });
+    const verifyCli = [join(cliDirectory, 'dist/cli/main.js'), '--json', '--no-update-notifier', '--data-dir', directory,
+      'verify-payment', send.hash, '--to', address1, '--from', address0, '--unit', 'RAW', '--amount'];
+    const match = await execute(process.execPath, [...verifyCli, '1000000001']);
+    assert.deepEqual(JSON.parse(match.stdout).result, verified);
+    await assert.rejects(execute(process.execPath, [...verifyCli, '1000000000']), error => {
+      assert.equal(error.code, 1);
+      assert.deepEqual(JSON.parse(error.stdout).result, { verified: false, reason: 'amount_mismatch', network: 'LOCAL', hash: send.hash });
+      return true;
+    });
     const pending = await app.call('receivables_list', { addresses: [address1], limit: 1, timeoutMs: 10_000 });
     assert.equal(pending.items[0].hash, send.hash);
     assert.equal(pending.limitReached, true);
     const received = await app.call('receive', { index: 1, hash: send.hash });
     assert.equal(received.status, 'received');
     assert.equal(received.transaction.block.type, 'OPEN');
+    assert.deepEqual(await app.call('payment_verify', { ...invoice, hash: received.hash }), {
+      verified: false, reason: 'not_send', network: 'LOCAL', hash: received.hash,
+    });
     assert.equal((await app.call('receive', { index: 1, hash: send.hash })).hash, received.hash);
     assert.equal((await app.call('account_get', { index: 1 })).account.balance, '1000000001');
     const balances = await app.call('balances_get');

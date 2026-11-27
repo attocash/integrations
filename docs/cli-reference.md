@@ -68,6 +68,7 @@ atto representative change <atto-address> --index 0
 atto representative weight <atto-address>
 atto transaction <hash>
 atto entry <hash>
+atto verify-payment <send-hash> --to <recipient> --amount 1.000000001
 atto history transaction --addresses <atto-address> --from-height 1 --limit 50
 atto history --index 0
 atto history --index 0 --last 10
@@ -76,6 +77,26 @@ atto watch account --addresses <atto-address>
 atto watch receivable --addresses <atto-address> --min-amount-raw 1
 atto watch transaction --network-wide
 ```
+
+Use `atto --json verify-payment <send-hash> --to <recipient> --amount <amount>`
+to check a payment against your invoice on the profile's network. Supply
+`--from <sender>` to require the payer's address or `--unit RAW` for raw units.
+The command reads the confirmed transaction from your configured node. It checks
+the block hash, network, SEND type, addresses and exact amount in a single lookup.
+A match returns exit status 0 with the send hash, height and payment details.
+A missing transaction or mismatched expectation returns exit status 1 with
+`result.verified: false` and a reason. A node or input error returns `error`.
+An HTTP 404 sets `result.reason` to `not_found`. A node timeout sets `error.code`
+to `NODE_TIMEOUT` and also exits 1. In either case, keep the invoice pending and
+retry the same hash with bounded backoff. The payer only needs to send once.
+
+For a checkout, give each invoice its own receiving address. If you reuse an
+address, establish a separate way to bind the payment to that invoice. The
+same sender can pay the same amount on different orders, and an older payment
+can also match. In the transaction that marks the order paid, enforce a unique
+constraint on the pair `(network, hash)` across all orders.
+Repeating the same verification returns the same match and leaves redemption
+to the service. Use a node you trust to report confirmed transactions.
 
 `--last N` selects the last N heights in each account's requested range.
 For example, an account at height 54 returns heights 52, 53 and 54 with
