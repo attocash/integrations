@@ -15,9 +15,13 @@ if (!included.length) throw new Error('No supported tests matched the requested 
 
 // Bound individual tests and the whole runner, including failed-fixture handles.
 // CI adds a separate hard step deadline so orphaned processes cannot occupy a job.
-const runnerMinutes = 8;
-const reporter = process.platform === 'win32' ? ['--test-reporter=tap'] : [];
-const child = spawn(process.execPath, ['--test', ...reporter, '--test-timeout=180000', ...included], {
+const isWindows = process.platform === 'win32';
+const isWindowsCI = isWindows && process.env.GITHUB_ACTIONS === 'true';
+const runnerMinutes = isWindowsCI ? 12 : 8;
+const reporter = isWindows ? ['--test-reporter=tap'] : [];
+// Limit competing test files on hosted Windows runners so busy fixtures can make progress.
+const concurrency = isWindowsCI ? ['--test-concurrency=2'] : [];
+const child = spawn(process.execPath, ['--test', ...reporter, ...concurrency, '--test-timeout=180000', ...included], {
   cwd: root, stdio: 'inherit', timeout: runnerMinutes * 60_000,
 });
 for (const signal of ['SIGINT', 'SIGTERM']) process.once(signal, () => child.kill(signal));

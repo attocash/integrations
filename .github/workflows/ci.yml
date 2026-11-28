@@ -26,7 +26,7 @@ jobs:
       - run: npm run check
         timeout-minutes: 5
       - run: npm test
-        timeout-minutes: 10
+        timeout-minutes: ${{ matrix.os == 'windows-latest' && 15 || 10 }}
       - run: npm run test:integration
         timeout-minutes: 8
         if: runner.os == 'Linux'
