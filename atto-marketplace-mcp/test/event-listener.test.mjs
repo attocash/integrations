@@ -11,6 +11,7 @@ import test from 'node:test';
 import { tmpdir } from '../../test/support/temporary-directory.mjs';
 import { MarketplaceProfileStore } from '../dist/profile-store.js';
 import { readAccountEvents } from '../dist/account-events.js';
+import { EventCheckpoint } from '../dist/event-checkpoint.js';
 
 const accountId = '11111111-1111-4111-8111-111111111111';
 const applicationId = '22222222-2222-4222-8222-222222222222';
@@ -258,6 +259,48 @@ test('saved selections pause, replace the feed after enqueue, and resume the ori
   listener.child.kill('SIGTERM');
   await listener.done;
   store.close();
+});
+
+test('expanding a saved selection catches up the new type, retries failed work, and skips acknowledged overlaps', {timeout:30_000}, async t => {
+  const a = 'application.hired';
+  const b = 'application.created';
+  const history = [{...hire('1'), type:b}, hire('2'), {...hire('3', secondApplication), type:b}, hire('4', secondApplication)];
+  const {home, start, requests} = await fixture(t, (req, res) => {
+    stream(res);
+    const selected = new URL(req.url, 'http://localhost').searchParams.get('types').split(',');
+    const after = BigInt(req.headers['last-event-id'] ?? '0');
+    const page = history.filter(event => selected.includes(event.type) && BigInt(event.id) > after);
+    if (page.length) res.end(page.map(frame).join(''));
+  });
+  const store = await MarketplaceProfileStore.open(home);
+  try {
+    const profile = store.getProfile('main');
+    const attempts = async () => (await readFile(join(home,'attempts'),'utf8')).trim().split('\n').map(line => JSON.parse(line).event.id);
+    store.writeSavedEventTypes(profile, [a]);
+    const original = start(['--types','saved']);
+    await until(() => requests.at(-1)?.cursor === '4');
+    assert.throws(() => new EventCheckpoint(home, profile.origin, accountId, b, profile.id).close(), /already owns/);
+    original.child.kill('SIGTERM');
+    await original.done;
+    assert.deepEqual(await attempts(), ['2','4']);
+
+    // A different selection and process must use A's durable progress while B starts at the beginning.
+    store.writeSavedEventTypes(profile, [a,b]);
+    await writeFile(join(home,'fail-3'), '');
+    const expanded = start(['--types','saved']);
+    await until(async () => (await attempts()).includes('3'));
+    await rm(join(home,'fail-3'));
+    await until(() => requests.at(-1)?.types === [b,a].join(',') && requests.at(-1)?.cursor === '4');
+    assert.deepEqual(await attempts(), ['2','4','1','3','3']);
+    assert.deepEqual(requests.filter(r => r.types === [b,a].join(',')).map(r => r.cursor), [undefined,'2','4']);
+
+    // Skipping A at 4 advanced B past its last actual event, with no rewind of A.
+    store.writeSavedEventTypes(profile, [b]);
+    await until(() => requests.at(-1)?.types === b && requests.at(-1)?.cursor === '4');
+    expanded.child.kill('SIGTERM');
+    await expanded.done;
+    assert.deepEqual(await attempts(), ['2','4','1','3','3']);
+  } finally { store.close(); }
 });
 
 test('all drops controller-only subscriptions when the local profile hands off to a scoped key', {timeout:30_000}, async t => {

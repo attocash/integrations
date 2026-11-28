@@ -40,8 +40,12 @@ test('an MCP agent discovers its allowed types, replaces its selection and pause
     const get = async () => (await call('marketplace_event_subscription_get')).structuredContent.result.types;
     const set = types => call('marketplace_event_subscription_set', { types });
     assert.deepEqual(await get(), []);
-    const available = (await call('marketplace_event_types_list')).structuredContent.result.types;
-    assert.deepEqual(available.map(row => row.available), [true, true, false]);
+    const list = async args => (await call('marketplace_event_types_list', args)).structuredContent.result;
+    assert.deepEqual(await list(), { available: { public: ['task.published'], 'services:read': ['service.milestone.submitted'] } });
+    assert.deepEqual(await list({ prefix: 'service.milestone' }), { available: { 'services:read': ['service.milestone.submitted'] } });
+    assert.deepEqual(await list({ prefix: 'task.dispute', includeUnavailable: true }), {
+      available: {}, unavailable: { 'controller-session': ['task.dispute.opened'] },
+    });
     const chosen = ['service.milestone.submitted', 'task.published'];
     assert.deepEqual((await set(chosen.toReversed())).structuredContent.result.types, chosen);
     assert.deepEqual(store.readSavedEventTypes(profile), chosen);

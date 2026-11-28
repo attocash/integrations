@@ -104,9 +104,9 @@ async function consume(subscription: Subscription, checkpoint: EventCheckpoint, 
       }
       process.stderr.write(`Marketplace listener connected for ${subscription.types}.\n`);
       for await (const event of readAccountEvents(response.body, subscription.accountId, subscription.types.split(','))) {
-        if (checkpoint.cursor && BigInt(event.id) <= BigInt(checkpoint.cursor)) continue;
-        if (!await deliver(event)) return;
-        checkpoint.acknowledge(event.id);
+        const needed = checkpoint.needsDelivery(event.type, event.id);
+        if (needed && !await deliver(event)) return;
+        checkpoint.advance(event.id, needed);
         backoffMs = 1_000;
       }
       // The server periodically closes healthy subscriptions to renew authentication.
@@ -122,6 +122,7 @@ async function consume(subscription: Subscription, checkpoint: EventCheckpoint, 
       clearTimeout(connectTimeout);
       clearTimeout(rotate);
       connection.abort();
+      checkpoint.flush();
     }
     try { await delay(backoffMs, undefined, {signal: stopped}); }
     catch (error) { if (!stopped.aborted) throw error; }
@@ -211,7 +212,7 @@ async function listen(options: ReturnType<typeof parseOptions>, store: Marketpla
         if (!types) continue;
         const accountId = audience === 'ACCOUNT' ? profile!.accountId : undefined;
         const partition = accountId ?? `public:${profile?.accountId ?? 'anonymous'}`;
-        const checkpoint = new EventCheckpoint(store.home, origin, partition, types);
+        const checkpoint = new EventCheckpoint(store.home, origin, partition, types, options.types === 'saved' ? options.profile : undefined);
         streams.push({subscription: {origin, types, ...(accountId ? {accountId} : {})}, checkpoint});
       }
       // Acquire every checkpoint before starting either stream. Each stream has its own

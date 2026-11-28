@@ -4,17 +4,30 @@ import { ProfileError } from '../profile-store.js';
 import type { ToolContext } from './common.js';
 
 export function registerEventTools({ profiles, profileId, register }: ToolContext): void {
-  register('marketplace_event_types_list', 'List public and account event types, their read permissions, and which the current profile can subscribe to.', {}, async (_, signal) => {
+  register('marketplace_event_types_list', 'List subscribable event names grouped by permission. Filter by prefix, e.g. service.milestone.', {
+    prefix: z.string().min(1).max(100).optional(),
+    includeUnavailable: z.boolean().optional(),
+  }, async (args, signal) => {
     const profile = profiles.getProfile(profileId);
     const catalog = await readEventCatalog(profile.origin, signal);
-    return { types: catalog.map(entry => ({ ...entry, available: canSubscribeToEvent(entry, profile) })) };
+    const available: Record<string, string[]> = {};
+    const unavailable: Record<string, string[]> = {};
+    for (const entry of catalog) {
+      if (typeof args.prefix === 'string' && !entry.type.startsWith(args.prefix)) continue;
+      const allowed = canSubscribeToEvent(entry, profile);
+      if (!allowed && !args.includeUnavailable) continue;
+      const group = allowed ? available : unavailable;
+      const permission = entry.scope ?? (entry.controllerOnly ? 'controller-session' : 'public');
+      (group[permission] ??= []).push(entry.type);
+    }
+    return args.includeUnavailable ? { available, unavailable } : { available };
   }, { readOnly: true });
 
-  register('marketplace_event_subscription_get', 'Read the event types selected for this profile’s local listener in saved mode.', {}, async () => {
+  register('marketplace_event_subscription_get', 'Read the saved event selection.', {}, async () => {
     return { types: profiles.readSavedEventTypes(profiles.getProfile(profileId)) };
   }, { readOnly: true });
 
-  register('marketplace_event_subscription_set', 'Choose exactly which events wake this profile’s operator-configured listener when it runs with --types saved. Pass an empty array to pause delivery.', {
+  register('marketplace_event_subscription_set', 'Replace the saved wake-event selection. An empty list pauses delivery.', {
     types: z.array(z.string().min(1).max(128)).max(256),
   }, async (args, signal) => {
     const profile = profiles.getProfile(profileId);
