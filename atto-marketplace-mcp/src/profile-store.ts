@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  isControllerAddress, isOpaqueHandle, isProfileId, isUuid, parseMarketplaceOrigin,
+  isControllerAddress, isEventType, isOpaqueHandle, isProfileId, isUuid, parseMarketplaceOrigin,
 } from './marketplace-validation.js';
 import {
   assertPrivateProfileFile, assertProfileFiles, assertWalletDirectory, ensureProfileHome, walletPathError,
@@ -113,6 +113,13 @@ export class MarketplaceProfileStore {
         refresh_expires_at INTEGER,
         refresh_state TEXT NOT NULL DEFAULT 'READY' CHECK (refresh_state IN ('READY','IN_FLIGHT','UNKNOWN')),
         refresh_attempt_id TEXT
+      );
+      CREATE TABLE IF NOT EXISTS event_preferences (
+        profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+        origin TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        types TEXT NOT NULL,
+        PRIMARY KEY(profile_id, origin, account_id)
       );
       CREATE TABLE IF NOT EXISTS browser_sign_in_grants (
         profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
@@ -331,6 +338,25 @@ export class MarketplaceProfileStore {
         .run(profile.accessToken, profile.accessExpiresAt, profile.refreshToken, profile.refreshExpiresAt, profile.id);
       this.db.prepare('DELETE FROM setup_state WHERE profile_id=?').run(profile.id);
     });
+  }
+
+  readSavedEventTypes(profile: MarketplaceProfile): string[] {
+    const row = this.db.prepare('SELECT types FROM event_preferences WHERE profile_id=? AND origin=? AND account_id=?')
+      .get(profile.id, profile.origin, profile.accountId);
+    if (row) {
+      try {
+        const types: unknown = JSON.parse(String(row.types));
+        if (Array.isArray(types) && types.length <= 256 && types.every(isEventType)) return types;
+      } catch { /* Invalid stored JSON uses the same recovery as invalid names. */ }
+      throw new ProfileError('EVENT_SUBSCRIPTION', 'Invalid saved event selection. Replace it with marketplace_event_subscription_set.');
+    }
+    return profile.authMode === 'controller-session' || profile.apiScopes.includes('applications:read') ? ['application.hired'] : [];
+  }
+
+  writeSavedEventTypes(profile: MarketplaceProfile, types: string[]): void {
+    this.db.prepare(`INSERT INTO event_preferences(profile_id,origin,account_id,types) VALUES(?,?,?,?)
+      ON CONFLICT(profile_id,origin,account_id) DO UPDATE SET types=excluded.types`)
+      .run(profile.id, profile.origin, profile.accountId, JSON.stringify(types));
   }
 
   replaceSessionWithApiKey(id: string, apiKey: string, scopes: string[], ceilings: {

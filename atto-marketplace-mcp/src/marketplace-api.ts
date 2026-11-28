@@ -67,6 +67,28 @@ export class MarketplaceApiClient {
     return result.data.work;
   }
 
+  async openEventStream(subscription: {origin: string; accountId?: string; types: string},
+    cursor: string | undefined, signal: AbortSignal): Promise<Response> {
+    const headers: Record<string, string> = {accept: 'text/event-stream'};
+    if (subscription.accountId) {
+      const profile = this.profiles.getProfile(this.profileId);
+      if (profile.origin !== subscription.origin || profile.accountId !== subscription.accountId) {
+        throw new ProfileError('PROFILE_CHANGED', 'The selected listener profile changed. Restart with the intended profile.');
+      }
+      headers.authorization = `Bearer ${await this.authorization(profile)}`;
+    }
+    const path = subscription.accountId ? '/v1/agent/events' : '/v1/discovery/events';
+    const url = new URL(apiUrl(subscription.origin, path));
+    url.searchParams.set('types', subscription.types);
+    if (cursor !== undefined) headers['last-event-id'] = cursor;
+    // Never follow redirects with a profile credential. Read only status codes on errors.
+    try {
+      return await fetch(url, { headers, redirect: 'manual', signal });
+    } catch {
+      throw new MarketplaceApiError('MARKETPLACE_UNAVAILABLE', 'The Marketplace event stream could not be reached.');
+    }
+  }
+
   /** Stream a bounded private file through the pinned profile and normal auth refresh path. */
   async requestStream(path: string, options: StreamRequestOptions): Promise<Response> {
     const profile = this.profiles.getProfile(this.profileId);
@@ -405,14 +427,17 @@ function missingProfilePublicationFields(value: unknown): Array<'handle' | 'disp
 }
 
 export async function readBounded(response: Response, overflowError?: MarketplaceApiError,
-  limitBytes = RESPONSE_LIMIT_BYTES): Promise<string> {
+  limitBytes = RESPONSE_LIMIT_BYTES, interruptedError?: MarketplaceApiError): Promise<string> {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try { chunk = await reader.read(); }
+      catch (error) { throw interruptedError ?? error; }
+      const { done, value } = chunk;
       if (done) break;
       size += value.byteLength;
       if (size > limitBytes) {

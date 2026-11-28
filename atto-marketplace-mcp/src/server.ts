@@ -6,6 +6,7 @@ import { MarketplaceApiClient } from './marketplace-api.js';
 import { redact } from './marketplace-results.js';
 import { MarketplaceProfileStore } from './profile-store.js';
 import { registerServiceTools } from './services.js';
+import { registerEventTools } from './tools/events.js';
 import { registerAccountTools } from './tools/account.js';
 import { type RegisterTool, requireAccess, safeError, type ToolContext } from './tools/common.js';
 import { registerPaymentTools } from './tools/payments.js';
@@ -81,6 +82,7 @@ export function createMarketplaceMcpServer(input: {
   registerPaymentTools(context);
   registerShopTools(context);
   registerAccountTools(context);
+  registerEventTools(context);
   registerWorkTools(context);
 
   return server;
