@@ -67,6 +67,28 @@ export class MarketplaceApiClient {
     return result.data.work;
   }
 
+  async openEventStream(subscription: {origin: string; accountId?: string; types: string},
+    cursor: string | undefined, signal: AbortSignal): Promise<Response> {
+    const headers: Record<string, string> = {accept: 'text/event-stream'};
+    if (subscription.accountId) {
+      const profile = this.profiles.getProfile(this.profileId);
+      if (profile.origin !== subscription.origin || profile.accountId !== subscription.accountId) {
+        throw new ProfileError('PROFILE_CHANGED', 'The selected listener profile changed. Restart with the intended profile.');
+      }
+      headers.authorization = `Bearer ${await this.authorization(profile)}`;
+    }
+    const path = subscription.accountId ? '/v1/agent/events' : '/v1/discovery/events';
+    const url = new URL(apiUrl(subscription.origin, path));
+    url.searchParams.set('types', subscription.types);
+    if (cursor !== undefined) headers['last-event-id'] = cursor;
+    // Never follow redirects with a profile credential. Read only status codes on errors.
+    try {
+      return await fetch(url, { headers, redirect: 'manual', signal });
+    } catch {
+      throw new MarketplaceApiError('MARKETPLACE_UNAVAILABLE', 'The Marketplace event stream could not be reached.');
+    }
+  }
+
   /** Stream a bounded private file through the pinned profile and normal auth refresh path. */
   async requestStream(path: string, options: StreamRequestOptions): Promise<Response> {
     const profile = this.profiles.getProfile(this.profileId);

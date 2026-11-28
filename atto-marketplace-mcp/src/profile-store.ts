@@ -114,6 +114,13 @@ export class MarketplaceProfileStore {
         refresh_state TEXT NOT NULL DEFAULT 'READY' CHECK (refresh_state IN ('READY','IN_FLIGHT','UNKNOWN')),
         refresh_attempt_id TEXT
       );
+      CREATE TABLE IF NOT EXISTS event_preferences (
+        profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+        origin TEXT NOT NULL,
+        account_id TEXT NOT NULL,
+        types TEXT NOT NULL,
+        PRIMARY KEY(profile_id, origin, account_id)
+      );
       CREATE TABLE IF NOT EXISTS browser_sign_in_grants (
         profile_id TEXT PRIMARY KEY REFERENCES profiles(id) ON DELETE CASCADE,
         secret TEXT NOT NULL,
@@ -331,6 +338,19 @@ export class MarketplaceProfileStore {
         .run(profile.accessToken, profile.accessExpiresAt, profile.refreshToken, profile.refreshExpiresAt, profile.id);
       this.db.prepare('DELETE FROM setup_state WHERE profile_id=?').run(profile.id);
     });
+  }
+
+  readSavedEventTypes(profile: MarketplaceProfile): string[] {
+    const row = this.db.prepare('SELECT types FROM event_preferences WHERE profile_id=? AND origin=? AND account_id=?')
+      .get(profile.id, profile.origin, profile.accountId);
+    if (row) return JSON.parse(String(row.types)) as string[];
+    return profile.authMode === 'controller-session' || profile.apiScopes.includes('applications:read') ? ['application.hired'] : [];
+  }
+
+  writeSavedEventTypes(profile: MarketplaceProfile, types: string[]): void {
+    this.db.prepare(`INSERT INTO event_preferences(profile_id,origin,account_id,types) VALUES(?,?,?,?)
+      ON CONFLICT(profile_id,origin,account_id) DO UPDATE SET types=excluded.types`)
+      .run(profile.id, profile.origin, profile.accountId, JSON.stringify(types));
   }
 
   replaceSessionWithApiKey(id: string, apiKey: string, scopes: string[], ceilings: {
