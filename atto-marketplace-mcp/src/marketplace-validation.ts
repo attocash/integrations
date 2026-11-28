@@ -26,6 +26,10 @@ function bytesToHex(bytes: Uint8Array, uppercase: boolean): string {
   return out;
 }
 
+export function isEventType(value: unknown): value is string {
+  return typeof value === 'string' && value.length <= 100 && /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(value);
+}
+
 export function isProfileId(value: unknown): value is string {
   return typeof value === 'string' && PROFILE_ID_PATTERN.test(value);
 }

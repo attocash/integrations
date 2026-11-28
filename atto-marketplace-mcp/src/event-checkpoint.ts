@@ -2,7 +2,8 @@ import { createHash } from 'node:crypto';
 import { closeSync, constants, openSync } from 'node:fs';
 import { join } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
-import { isCursor, isEventType } from './account-events.js';
+import { isCursor } from './account-events.js';
+import { isEventType } from './marketplace-validation.js';
 import { assertPrivateProfileFile } from './private-directory.js';
 
 /** A per-subscription SQLite file keeps a crash-released OS lock across cursor commits.
@@ -14,9 +15,10 @@ export class EventCheckpoint {
   private pending = 0;
   cursor: string | undefined;
 
-  constructor(home: string, origin: string, partition: string, types: string, savedProfile?: string) {
+  constructor(home: string, origin: string, partition: string, types: string,
+    selection?: {mode: 'saved' | 'all'; profile: string | null}) {
     this.selected = types.split(',');
-    const identity = savedProfile === undefined ? [origin, partition, types] : ['saved', origin, partition, savedProfile];
+    const identity = selection ? [selection.mode, origin, partition, selection.profile] : [origin, partition, types];
     const key = createHash('sha256').update(JSON.stringify(identity)).digest('hex');
     const path = join(home, `events-${key}.sqlite`);
     if (!assertPrivateProfileFile(path, true)) {
@@ -28,7 +30,7 @@ export class EventCheckpoint {
     this.db = new DatabaseSync(path, {defensive: true});
     try {
       this.db.exec('PRAGMA trusted_schema=OFF; PRAGMA locking_mode=EXCLUSIVE; PRAGMA synchronous=FULL; BEGIN EXCLUSIVE;');
-      if (savedProfile === undefined) {
+      if (!selection) {
         this.db.exec('CREATE TABLE IF NOT EXISTS checkpoint (singleton INTEGER PRIMARY KEY CHECK(singleton=1), cursor TEXT NOT NULL); COMMIT;');
         const row = this.db.prepare('SELECT cursor FROM checkpoint WHERE singleton=1').get();
         if (row && !isCursor(row.cursor)) throw new Error('The saved Marketplace listener cursor is invalid.');

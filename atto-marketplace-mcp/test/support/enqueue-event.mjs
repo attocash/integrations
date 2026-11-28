@@ -4,6 +4,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 
 const [directory, fixedArg, ...args] = process.argv.slice(2);
 if (existsSync(join(directory, 'argv-only'))) {
+  if (process.env.HOST_QUEUE_TIMEOUT_MS !== '6000') process.exit(2);
   closeSync(0);
   writeFileSync(join(process.env.HOST_QUEUE_DIR, 'queued-' + args[0]), JSON.stringify(args));
   process.exit(0);

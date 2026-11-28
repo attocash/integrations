@@ -65,11 +65,12 @@ async function fixture(t, serve, profileOverrides = {}) {
     authMode:'scoped-api-key', apiKey:credential, apiScopes:['applications:read','products:read','submissions:read'], ...profileOverrides});
   store.close();
   const children = [];
-  function start(extra = []) {
+  function start(extra = [], env = {}) {
     const handler = extra.includes('--list-types') ? [] : ['--', process.execPath, wake, home, literalArg];
     const child = spawn(process.execPath, [command, 'listen', ...extra, ...handler], {
       env: {...process.env, MARKETPLACE_TEST_SECRET: credential, MARKETPLACE_MCP_HOME: home,
-        UNRELATED_ALIAS: 'Bearer ' + credential, MARKETPLACE_API_KEY: 'other-legacy-key', LEGACY_ALIAS: 'other-legacy-key', HOST_QUEUE_DIR: home}, stdio: ['ignore', 'pipe', 'pipe'],
+        MARKETPLACE_TOKEN_TTL: '60', MARKETPLACE_KEY_INDEX: '0', HOST_QUEUE_TIMEOUT_MS: '6000',
+        UNRELATED_ALIAS: 'Bearer ' + credential, MARKETPLACE_API_KEY: 'other-legacy-key', LEGACY_ALIAS: 'other-legacy-key', HOST_QUEUE_DIR: home, ...env}, stdio: ['ignore', 'pipe', 'pipe'],
     });
     const result = { child, stdout: '', stderr: '', done: once(child, 'exit') };
     child.stdout.on('data', chunk => { result.stdout += chunk; });
@@ -139,6 +140,22 @@ test('idle worker receives hires, retries failed enqueue, and replays an offline
     assert.equal(attempt.leaking, false);
   }
   assert.ok(!first.stderr.includes(credential) && !restarted.stderr.includes(credential));
+});
+
+test('a stalled enqueue times out and replays from the last acknowledged cursor', {timeout:30_000}, async t => {
+  const {home, start, requests} = await fixture(t, (req, res) => {
+    stream(res);
+    if (!req.headers['last-event-id']) res.end(frame(hire('1')));
+  });
+  const hold = join(home, 'hold-1');
+  await writeFile(hold, '');
+  const listener = start(['--enqueue-timeout-seconds', '3']);
+  try {
+    await until(() => listener.stderr.includes('exceeded its enqueue timeout'));
+  } finally { await rm(hold, {force:true}); }
+  await until(() => requests.at(-1)?.cursor === '1');
+  const attempts = (await readFile(join(home, 'attempts'), 'utf8')).trim().split('\n');
+  assert.equal(attempts.length, 2);
 });
 
 test('existing argv-only hire command keeps its queue configuration and can close stdin', {timeout:30_000}, async t => {
@@ -279,7 +296,7 @@ test('expanding a saved selection catches up the new type, retries failed work, 
     store.writeSavedEventTypes(profile, [a]);
     const original = start(['--types','saved']);
     await until(() => requests.at(-1)?.cursor === '4');
-    assert.throws(() => new EventCheckpoint(home, profile.origin, accountId, b, profile.id).close(), /already owns/);
+    assert.throws(() => new EventCheckpoint(home, profile.origin, accountId, b, {mode:'saved', profile:profile.id}).close(), /already owns/);
     original.child.kill('SIGTERM');
     await original.done;
     assert.deepEqual(await attempts(), ['2','4']);
@@ -337,6 +354,88 @@ test('saved mode starts paused without hire permission and reloads the catalog w
   } finally { store.close(); }
 });
 
+test('planned stream rotations resume from the saved cursor without reporting failure', {timeout:30_000}, async t => {
+  // Given an open SSE connection and an abbreviated rotation interval for the child process.
+  const {home, start, requests} = await fixture(t, (_req, res, observed) => {
+    stream(res);
+    if (observed.length === 1) res.write(frame(hire('1')));
+  });
+  const preload = `const schedule = globalThis.setTimeout;
+globalThis.setTimeout = (callback, ms, ...args) => schedule(callback, ms === 300_000 ? 250 : ms, ...args);`;
+
+  // When the listener rotates twice on otherwise healthy connections.
+  const listener = start([], {NODE_OPTIONS: `--import=data:text/javascript,${encodeURIComponent(preload)}`});
+  await until(() => requests.length >= 3);
+  listener.child.kill('SIGTERM');
+  await listener.done;
+
+  // Then both reconnects use the acknowledged cursor and neither is treated as a failure.
+  assert.deepEqual(requests.slice(0, 3).map(request => request.cursor), [undefined,'1','1']);
+  assert.doesNotMatch(listener.stderr, /interrupted|Reconnecting from the last acknowledged cursor/);
+  const attempts = (await readFile(join(home,'attempts'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.deepEqual(attempts.map(attempt => attempt.event.id), ['1']);
+});
+
+test('credential handoff during refresh reopens the feed with the replacement scoped key', {timeout:30_000}, async t => {
+  // Given a controller refresh waiting on its HTTP response.
+  let refresh;
+  const {home, start, requests} = await fixture(t, (req, res) => {
+    if (req.url.endsWith('/refresh')) { refresh = res; return; }
+    stream(res);
+  }, {
+    authMode:'controller-session', apiKey:undefined, apiScopes:[], accessToken:'expired-access-token',
+    accessExpiresAt:Date.now() - 1_000, refreshToken:'test-refresh', refreshExpiresAt:Date.now() + 600_000,
+  });
+  const listener = start(['--types','all']);
+  await until(() => refresh !== undefined);
+  const store = await MarketplaceProfileStore.open(home);
+  try {
+    // When the terminal replaces the local authority before the old response arrives.
+    assert.equal(store.getProfile('main').refreshState, 'IN_FLIGHT');
+    store.replaceSessionWithApiKey('main', credential, ['services:read'], {});
+    refresh.writeHead(200, {'content-type':'application/json'});
+    refresh.end(JSON.stringify({
+      accessToken:'rotated-access-token', accessExpiresAt:new Date(Date.now() + 60_000).toISOString(),
+      refreshToken:'rotated-refresh-token', refreshExpiresAt:new Date(Date.now() + 120_000).toISOString(),
+    }));
+    await until(() => requests.some(request => request.path === '/v1/agent/events'
+      && request.types === 'service.quote.revised' && request.authorization === 'Bearer ' + credential));
+
+    // Then the stale refresh cannot overwrite the key or open a controller-authority stream.
+    const current = store.getProfile('main');
+    assert.equal(current.authMode, 'scoped-api-key');
+    assert.equal(current.apiKey, credential);
+    assert.equal(current.refreshState, 'READY');
+    assert.equal(current.refreshToken, null);
+    assert.equal(current.accessToken, null);
+    assert.equal(requests.filter(request => request.path.endsWith('/refresh')).length, 1);
+    assert.equal(requests.filter(request => request.path === '/v1/agent/events').length, 1);
+    assert.equal(listener.child.exitCode, null);
+  } finally { store.close(); }
+});
+
+test('a denied refresh for an unchanged controller profile remains terminal', {timeout:30_000}, async t => {
+  // Given an expired controller session whose refresh is denied.
+  const {home, start, requests} = await fixture(t, (_req, res) => {
+    res.writeHead(401, {'content-type':'application/json'});
+    res.end('{}');
+  }, {
+    authMode:'controller-session', apiKey:undefined, apiScopes:[], accessToken:'expired-access-token',
+    accessExpiresAt:Date.now() - 1_000, refreshToken:'test-refresh', refreshExpiresAt:Date.now() + 600_000,
+  });
+
+  // When the unchanged profile tries to connect.
+  const listener = start();
+  assert.equal((await listener.done)[0], 1);
+
+  // Then it requests reauthentication and never uses the uncertain session again.
+  assert.match(listener.stderr, /Reauthenticate from the local terminal/);
+  assert.deepEqual(requests.map(request => request.path), ['/v1/agent/auth/sessions/refresh']);
+  const store = await MarketplaceProfileStore.open(home);
+  try { assert.equal(store.getProfile('main').refreshState, 'UNKNOWN'); }
+  finally { store.close(); }
+});
+
 test('bounded SSE parser rejects mismatched identity, malformed payloads and oversize lines, and discards incomplete frames', async () => {
   const parse = async wire => {
     const stream = new ReadableStream({start(controller) {
@@ -350,4 +449,74 @@ test('bounded SSE parser rejects mismatched identity, malformed payloads and ove
     frame({...hire('1'),taskId:'invalid'}), frame({...hire('1'),type:'application.created'}), 'data: ' + 'x'.repeat(65536)]) {
     await assert.rejects(parse(invalid), /invalid event/);
   }
+});
+
+test('all catches up a newly advertised public type after restart without waking again for overlapping history', {timeout:30_000}, async t => {
+  const history = [
+    {id:'1', type:'service.listing.published', listingId:applicationId},
+    {id:'2', type:'task.published', taskId},
+  ];
+  const {home, start, requests, advertised} = await fixture(t, (req, res) => {
+    stream(res);
+    if (!req.url.startsWith('/v1/discovery/events')) return;
+    const types = new URL(req.url, 'http://localhost').searchParams.get('types').split(',');
+    const after = BigInt(req.headers['last-event-id'] ?? '0');
+    const page = history.filter(e => types.includes(e.type) && BigInt(e.id) > after);
+    if (page.length) res.end(page.map(frame).join(''));
+  });
+  const first = start(['--types','all']);
+  await until(() => requests.some(r => r.path === '/v1/discovery/events' && r.cursor === '2'));
+  first.child.kill('SIGTERM');
+  await first.done;
+
+  advertised.push({type:'service.listing.published', audience:'PUBLIC'});
+  const expanded = start(['--types','all']);
+  const expandedRequests = () => requests.filter(r => r.types.includes('service.listing.published'));
+  await until(() => expandedRequests().some(r => r.cursor === '2'));
+  expanded.child.kill('SIGTERM');
+  await expanded.done;
+  assert.deepEqual(expandedRequests().map(r => r.cursor), [undefined, '2']);
+  assert.ok(expandedRequests().every(r => r.authorization === undefined));
+  const attempts = (await readFile(join(home,'attempts'),'utf8')).trim().split('\n').map(line => JSON.parse(line).event);
+  assert.deepEqual(attempts, [history[1], history[0]]);
+
+  // Without a profile, the anonymous partition uses the same per-type replay semantics.
+  const anonymous = {mode:'all', profile:null};
+  const publicPartition = 'public:anonymous';
+  const original = new EventCheckpoint(home, 'https://api.example', publicPartition, 'task.published', anonymous);
+  original.advance('2', true);
+  original.close();
+  const next = new EventCheckpoint(home, 'https://api.example', publicPartition, 'service.listing.published,task.published', anonymous);
+  try {
+    assert.equal(next.cursor, undefined);
+    assert.equal(next.needsDelivery('task.published', '2'), false);
+    assert.equal(next.needsDelivery('service.listing.published', '1'), true);
+  } finally { next.close(); }
+});
+
+test('all retains the acknowledged account cursor when a controller hands off to narrower authority', {timeout:30_000}, async t => {
+  const history = [
+    {id:'1', type:'service.quote.revised', accountId, requestId:applicationId, quoteVersion:'1'},
+    hire('2'),
+  ];
+  const {home, start, requests} = await fixture(t, (req, res) => {
+    stream(res);
+    if (!req.url.startsWith('/v1/agent/events')) return;
+    const types = new URL(req.url, 'http://localhost').searchParams.get('types').split(',');
+    const page = history.filter(e => types.includes(e.type) && BigInt(e.id) > BigInt(req.headers['last-event-id'] ?? '0'));
+    if (page.length) res.end(page.map(frame).join(''));
+  }, {authMode:'controller-session', apiKey:undefined, apiScopes:[], accessToken:'original-controller',
+    accessExpiresAt:Date.now() + 300_000, refreshToken:'test-refresh', refreshExpiresAt:Date.now() + 600_000});
+  const listener = start(['--types','all']);
+  await until(() => requests.some(r => r.types.includes('task.dispute.opened') && r.cursor === '2'));
+  const store = await MarketplaceProfileStore.open(home);
+  try { store.replaceSessionWithApiKey('main', credential, ['services:read'], {}); }
+  finally { store.close(); }
+  await until(() => requests.some(r => r.types === 'service.quote.revised' && r.cursor === '2'));
+  listener.child.kill('SIGTERM');
+  await listener.done;
+  const narrowed = requests.filter(r => r.types === 'service.quote.revised');
+  assert.deepEqual(narrowed.map(r => [r.authorization,r.cursor]), [['Bearer ' + credential,'2']]);
+  const attempts = (await readFile(join(home,'attempts'),'utf8')).trim().split('\n').map(line => JSON.parse(line).event);
+  assert.deepEqual(attempts, history);
 });

@@ -427,14 +427,17 @@ function missingProfilePublicationFields(value: unknown): Array<'handle' | 'disp
 }
 
 export async function readBounded(response: Response, overflowError?: MarketplaceApiError,
-  limitBytes = RESPONSE_LIMIT_BYTES): Promise<string> {
+  limitBytes = RESPONSE_LIMIT_BYTES, interruptedError?: MarketplaceApiError): Promise<string> {
   if (!response.body) return '';
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let size = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try { chunk = await reader.read(); }
+      catch (error) { throw interruptedError ?? error; }
+      const { done, value } = chunk;
       if (done) break;
       size += value.byteLength;
       if (size > limitBytes) {

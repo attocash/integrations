@@ -1,13 +1,14 @@
 import { spawn } from 'node:child_process';
 import { isAbsolute, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { canSubscribeToEvent, isEventType, readAccountEvents, readEventCatalog, RetryListener, type AccountEvent, type EventCatalogEntry } from './account-events.js';
+import { canSubscribeToEvent, readAccountEvents, readEventCatalog, RetryListener, type AccountEvent, type EventCatalogEntry } from './account-events.js';
 import { defaultMarketplaceHome, defaultMarketplaceProfile, productionMarketplaceOrigin } from './defaults.js';
+import { isEventType } from './marketplace-validation.js';
 import { EventCheckpoint } from './event-checkpoint.js';
 import { MarketplaceApiClient, MarketplaceApiError } from './marketplace-api.js';
 import { MarketplaceProfileStore, ProfileError, type MarketplaceProfile } from './profile-store.js';
 
-const usage = 'atto-marketplace-mcp listen [--profile <id>] [--home <directory>] [--list-types | --types <all|saved|comma-separated-types> -- /absolute/path/to/wake-worker [argument ...]]';
+const usage = 'atto-marketplace-mcp listen [--profile <id>] [--home <directory>] [--enqueue-timeout-seconds <seconds>] [--list-types | --types <all|saved|comma-separated-types> -- /absolute/path/to/wake-worker [argument ...]]';
 
 function parseOptions(argv: string[], env: NodeJS.ProcessEnv) {
   const separator = argv.indexOf('--');
@@ -16,6 +17,7 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv) {
   let explicitProfile = Boolean(env.MARKETPLACE_MCP_PROFILE);
   let home = env.MARKETPLACE_MCP_HOME ?? defaultMarketplaceHome(env);
   let types = 'application.hired';
+  let enqueueTimeoutMs = 60_000;
   let listTypes = false;
   for (let i = 0; i < optionEnd; i++) {
     const option = argv[i];
@@ -24,14 +26,17 @@ function parseOptions(argv: string[], env: NodeJS.ProcessEnv) {
     if (i >= optionEnd || !value || value.startsWith('--')) throw new Error(usage);
     if (option === '--home') home = value;
     else if (option === '--profile') { profile = value; explicitProfile = true; }
-    else if (option === '--types') {
+    else if (option === '--enqueue-timeout-seconds') {
+      if (!/^[1-9][0-9]*$/.test(value) || Number(value) > 2_147_483) throw new Error(usage);
+      enqueueTimeoutMs = Number(value) * 1_000;
+    } else if (option === '--types') {
       if (value !== 'all' && value !== 'saved' && !value.split(',').every(isEventType)) throw new Error(usage);
       types = value;
     } else throw new Error(usage);
   }
   const command = separator < 0 ? '' : argv[separator + 1] ?? '';
   if (listTypes ? separator !== -1 : !isAbsolute(command)) throw new Error(usage);
-  return {profile, explicitProfile, home: resolve(home), types, listTypes, command, args: argv.slice(separator + 2)};
+  return {profile, explicitProfile, home: resolve(home), types, listTypes, enqueueTimeoutMs, command, args: argv.slice(separator + 2)};
 }
 
 function workerEnvironment(env: NodeJS.ProcessEnv, profile?: MarketplaceProfile): NodeJS.ProcessEnv {
@@ -39,7 +44,7 @@ function workerEnvironment(env: NodeJS.ProcessEnv, profile?: MarketplaceProfile)
   const secrets = [profile?.apiKey, profile?.accessToken, profile?.refreshToken];
   const result: NodeJS.ProcessEnv = {};
   for (const [name, value] of Object.entries(env)) {
-    if (value && /MARKETPLACE.*(?:KEY|TOKEN|SECRET|AUTHORIZATION)/i.test(name)) secrets.push(value);
+    if (value && value.length >= 16 && /MARKETPLACE.*(?:KEY|TOKEN|SECRET|AUTHORIZATION)/i.test(name)) secrets.push(value);
   }
   for (const [name, value] of Object.entries(env)) {
     if (/MARKETPLACE|^(?:ATTO|NANO|XNO)_/i.test(name) || secrets.some(secret => secret && value?.includes(secret))) continue;
@@ -48,12 +53,14 @@ function workerEnvironment(env: NodeJS.ProcessEnv, profile?: MarketplaceProfile)
   return result;
 }
 
-async function enqueue(command: string, args: string[], env: NodeJS.ProcessEnv, event: AccountEvent, stopped: AbortSignal): Promise<void> {
+async function enqueue(command: string, args: string[], env: NodeJS.ProcessEnv, event: AccountEvent, stopped: AbortSignal, timeoutMs: number): Promise<void> {
   stopped.throwIfAborted();
   const workerArgs = event.type === 'application.hired' ? [...args, event.applicationId!, event.taskId!] : args;
   const worker = spawn(command, workerArgs, {shell: false, env, stdio: ['pipe', 'ignore', 'ignore']});
   const terminate = () => { worker.kill('SIGKILL'); };
   stopped.addEventListener('abort', terminate, {once: true});
+  let timedOut = false;
+  const deadline = setTimeout(() => { timedOut = true; terminate(); }, timeoutMs);
   let inputFailed = false;
   worker.stdin.on('error', () => { inputFailed = true; });
   try {
@@ -62,11 +69,13 @@ async function enqueue(command: string, args: string[], env: NodeJS.ProcessEnv, 
       worker.once('close', complete);
       worker.stdin.end(JSON.stringify(event) + '\n');
     });
+    if (timedOut) throw new RetryListener('The wake command exceeded its enqueue timeout.');
     // Existing hire handlers can use only the two positional IDs and close stdin.
     if (result !== 0 || (inputFailed && event.type !== 'application.hired') || stopped.aborted) {
       throw new RetryListener('The wake command did not acknowledge the enqueue.');
     }
   } finally {
+    clearTimeout(deadline);
     stopped.removeEventListener('abort', terminate);
   }
 }
@@ -77,6 +86,10 @@ interface Subscription {
   types: string;
 }
 
+function retryableHttpStatus(status: number | undefined): boolean {
+  return status === 408 || status === 429 || (status !== undefined && status >= 500);
+}
+
 async function consume(subscription: Subscription, checkpoint: EventCheckpoint, api: MarketplaceApiClient,
   deliver: (event: AccountEvent) => Promise<boolean>, configurationCurrent: () => boolean, stopped: AbortSignal): Promise<void> {
   let backoffMs = 1_000;
@@ -84,7 +97,9 @@ async function consume(subscription: Subscription, checkpoint: EventCheckpoint, 
     const connection = new AbortController();
     const signal = AbortSignal.any([stopped, connection.signal]);
     const connectTimeout = setTimeout(() => connection.abort(), 15_000);
-    const rotate = setTimeout(() => connection.abort(), 5 * 60_000);
+    let rotate: NodeJS.Timeout | undefined;
+    let rotating = false;
+    let handlingEvent = false;
     const started = Date.now();
     try {
       const response = await api.openEventStream(subscription, checkpoint.cursor, signal);
@@ -96,24 +111,35 @@ async function consume(subscription: Subscription, checkpoint: EventCheckpoint, 
       if (response.status !== 200) {
         await response.body?.cancel();
         const message = `Marketplace event subscription returned HTTP ${response.status}.`;
-        if (response.status === 429 || response.status === 408 || response.status >= 500) throw new RetryListener(message);
+        if (retryableHttpStatus(response.status)) throw new RetryListener(message);
         throw new Error(message + ' Check the selected profile, its event read permissions and the API endpoint.');
       }
       if (response.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'text/event-stream' || !response.body) {
         throw new Error('Marketplace did not return a text/event-stream response.');
       }
+      rotate = setTimeout(() => {
+        rotating = true;
+        connection.abort();
+      }, 5 * 60_000);
       process.stderr.write(`Marketplace listener connected for ${subscription.types}.\n`);
       for await (const event of readAccountEvents(response.body, subscription.accountId, subscription.types.split(','))) {
+        handlingEvent = true;
         const needed = checkpoint.needsDelivery(event.type, event.id);
         if (needed && !await deliver(event)) return;
         checkpoint.advance(event.id, needed);
+        handlingEvent = false;
         backoffMs = 1_000;
       }
       // The server periodically closes healthy subscriptions to renew authentication.
       if (Date.now() - started >= 60_000) backoffMs = 1_000;
       throw new RetryListener('Marketplace closed the event stream.');
     } catch (error) {
-      if (stopped.aborted) return;
+      // A stale refresh result can reject before an SSE response exists.
+      if (stopped.aborted || !configurationCurrent()) return;
+      if (rotating && !handlingEvent && error instanceof RetryListener) {
+        backoffMs = 1_000;
+        continue;
+      }
       if (!(error instanceof RetryListener)
         && !(error instanceof MarketplaceApiError && error.code === 'MARKETPLACE_UNAVAILABLE')
         && !(error instanceof ProfileError && error.code === 'REFRESH_BUSY')) throw error;
@@ -136,7 +162,9 @@ async function catalogForListener(origin: string, stopped: AbortSignal, retry: b
     stopped.throwIfAborted();
     try { return await readEventCatalog(origin, stopped); }
     catch (error) {
-      if (!retry || !(error instanceof RetryListener)) throw error;
+      stopped.throwIfAborted();
+      if (!retry || !(error instanceof MarketplaceApiError) ||
+        !(error.code === 'MARKETPLACE_UNAVAILABLE' || (error.code === 'MARKETPLACE_HTTP' && retryableHttpStatus(error.httpStatus)))) throw error;
       process.stderr.write(`${error.message} Retrying discovery.\n`);
       await delay(waitMs, undefined, {signal: stopped});
       waitMs = Math.min(30_000, waitMs * 2);
@@ -198,7 +226,7 @@ async function listen(options: ReturnType<typeof parseOptions>, store: Marketpla
     const deliver = (event: AccountEvent) => {
       const next = previous.then(async () => {
         if (!configurationCurrent()) return false;
-        await enqueue(options.command, options.args, workerEnv, event, cancelWorker);
+        await enqueue(options.command, options.args, workerEnv, event, cancelWorker, options.enqueueTimeoutMs);
         return true;
       });
       previous = next.then(() => {}, () => {});
@@ -212,7 +240,8 @@ async function listen(options: ReturnType<typeof parseOptions>, store: Marketpla
         if (!types) continue;
         const accountId = audience === 'ACCOUNT' ? profile!.accountId : undefined;
         const partition = accountId ?? `public:${profile?.accountId ?? 'anonymous'}`;
-        const checkpoint = new EventCheckpoint(store.home, origin, partition, types, options.types === 'saved' ? options.profile : undefined);
+        const checkpoint = new EventCheckpoint(store.home, origin, partition, types,
+          options.types === 'saved' || options.types === 'all' ? {mode: options.types, profile: profile?.id ?? null} : undefined);
         streams.push({subscription: {origin, types, ...(accountId ? {accountId} : {})}, checkpoint});
       }
       // Acquire every checkpoint before starting either stream. Each stream has its own

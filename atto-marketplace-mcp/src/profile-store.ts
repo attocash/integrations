@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import {
-  isControllerAddress, isOpaqueHandle, isProfileId, isUuid, parseMarketplaceOrigin,
+  isControllerAddress, isEventType, isOpaqueHandle, isProfileId, isUuid, parseMarketplaceOrigin,
 } from './marketplace-validation.js';
 import {
   assertPrivateProfileFile, assertProfileFiles, assertWalletDirectory, ensureProfileHome, walletPathError,
@@ -343,7 +343,13 @@ export class MarketplaceProfileStore {
   readSavedEventTypes(profile: MarketplaceProfile): string[] {
     const row = this.db.prepare('SELECT types FROM event_preferences WHERE profile_id=? AND origin=? AND account_id=?')
       .get(profile.id, profile.origin, profile.accountId);
-    if (row) return JSON.parse(String(row.types)) as string[];
+    if (row) {
+      try {
+        const types: unknown = JSON.parse(String(row.types));
+        if (Array.isArray(types) && types.length <= 256 && types.every(isEventType)) return types;
+      } catch { /* Invalid stored JSON uses the same recovery as invalid names. */ }
+      throw new ProfileError('EVENT_SUBSCRIPTION', 'Invalid saved event selection. Replace it with marketplace_event_subscription_set.');
+    }
     return profile.authMode === 'controller-session' || profile.apiScopes.includes('applications:read') ? ['application.hired'] : [];
   }
 

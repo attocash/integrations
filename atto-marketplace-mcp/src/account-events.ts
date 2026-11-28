@@ -1,6 +1,6 @@
-import { apiUrl, readBounded } from './marketplace-api.js';
+import { apiUrl, MarketplaceApiError, readBounded } from './marketplace-api.js';
 import type { MarketplaceProfile } from './profile-store.js';
-import { isUuid } from './marketplace-validation.js';
+import { isEventType, isUuid } from './marketplace-validation.js';
 
 export interface EventCatalogEntry {
   type: string;
@@ -15,28 +15,31 @@ export function canSubscribeToEvent(entry: EventCatalogEntry, profile?: Marketpl
   return profile?.authMode === 'scoped-api-key' && !entry.controllerOnly && entry.scope !== null && profile.apiScopes.includes(entry.scope);
 }
 
-export function isEventType(value: unknown): value is string {
-  return typeof value === 'string' && value.length <= 100 && /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/.test(value);
-}
-
 export async function readEventCatalog(origin: string, signal?: AbortSignal): Promise<EventCatalogEntry[]> {
   const timeout = AbortSignal.timeout(15_000);
+  const url = apiUrl(origin, '/v1/discovery/event-types');
   let response: Response;
   try {
-    response = await fetch(apiUrl(origin, '/v1/discovery/event-types'), {headers: {accept: 'application/json'}, redirect: 'manual',
+    response = await fetch(url, {headers: {accept: 'application/json'}, redirect: 'manual',
       signal: signal ? AbortSignal.any([signal, timeout]) : timeout});
-  } catch { throw new RetryListener('The Marketplace event catalog could not be reached.'); }
+  } catch { throw new MarketplaceApiError('MARKETPLACE_UNAVAILABLE', 'The Marketplace event catalog could not be reached.'); }
   if (response.status !== 200) {
-    await response.body?.cancel();
-    const message = `Marketplace event catalog returned HTTP ${response.status}.`;
-    if (response.status >= 500 || response.status === 408 || response.status === 429) throw new RetryListener(message);
-    throw new Error(message);
+    await response.body?.cancel().catch(() => undefined);
+    const code = response.status === 401 || response.status === 403 ? 'AUTHORIZATION_DENIED' : 'MARKETPLACE_HTTP';
+    throw new MarketplaceApiError(code, `Marketplace event catalog returned HTTP ${response.status}.`, response.status);
   }
+  const invalidCatalog = () => new MarketplaceApiError('MARKETPLACE_PROTOCOL', 'Marketplace sent an invalid event catalog.', response.status);
   let value: unknown;
-  try { value = JSON.parse(await readBounded(response, undefined, 256 * 1024)); }
-  catch { throw new Error('Marketplace sent an invalid event catalog.'); }
+  try {
+    const text = await readBounded(response, undefined, 256 * 1024,
+      new MarketplaceApiError('MARKETPLACE_UNAVAILABLE', 'The Marketplace event catalog download was interrupted.', response.status));
+    value = JSON.parse(text);
+  } catch (error) {
+    if (error instanceof MarketplaceApiError && error.code === 'MARKETPLACE_UNAVAILABLE') throw error;
+    throw invalidCatalog();
+  }
   if (!value || typeof value !== 'object' || !('types' in value) || !Array.isArray(value.types)
-    || value.types.length === 0 || value.types.length > 1024) throw new Error('Marketplace sent an invalid event catalog.');
+    || value.types.length === 0 || value.types.length > 1024) throw invalidCatalog();
   const seen = new Set<string>();
   return value.types.map(entry => {
     if (!entry || !isEventType(entry.type) || seen.has(entry.type)
@@ -45,7 +48,7 @@ export async function readEventCatalog(origin: string, signal?: AbortSignal): Pr
       || (entry.scope != null && (typeof entry.scope !== 'string' || !/^[a-z][a-z_-]*(?::[a-z_-]+)+$/.test(entry.scope)))
       || (entry.audience === 'PUBLIC' && (entry.scope || entry.controllerOnly))
       || (entry.audience === 'ACCOUNT' && Boolean(entry.scope) === Boolean(entry.controllerOnly))) {
-      throw new Error('Marketplace sent an invalid event catalog.');
+      throw invalidCatalog();
     }
     seen.add(entry.type);
     return {type: entry.type, audience: entry.audience, scope: entry.scope ?? null, controllerOnly: entry.controllerOnly ?? false};
